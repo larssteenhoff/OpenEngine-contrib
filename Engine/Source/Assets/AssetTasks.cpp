@@ -493,10 +493,8 @@ void AssetUnloadTask::Execute()
 // UNIFIED ASSET BATCH COORDINATOR
 // ========================================
 
-AssetBatchCoordinator::AssetBatchCoordinator(AssetManager& assetManager,
-                                             JobSystem::WorkStealingThreadPool& jobSystem,
-                                             AssetIOService& ioService)
-    : m_AssetManager(assetManager), m_JobSystem(jobSystem), m_IOService(ioService)
+AssetBatchCoordinator::AssetBatchCoordinator(AssetManager& assetManager, AssetIOService& ioService)
+    : m_AssetManager(assetManager), m_IOService(ioService)
 {
 }
 
@@ -544,11 +542,6 @@ void AssetBatchCoordinator::LoadAsset(const AssetMetadata& metadata, AssetLoadPr
     request.OnFailure = std::move(onFailure);
 
     m_IOService.SubmitRead(std::move(request));
-}
-
-JobSystem::TaskHandle AssetBatchCoordinator::UnloadAsset(const GUID& assetGuid)
-{
-    return m_JobSystem.Submit(std::make_unique<AssetUnloadTask>(&m_JobSystem, assetGuid, m_AssetManager));
 }
 
 // ========================================

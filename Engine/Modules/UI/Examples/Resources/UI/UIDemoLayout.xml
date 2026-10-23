@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <UI id="root" class="root column">
     <UIElement id="header" class="header">
-        <Label id="titleLabel" class="title">UI Demo</Label>
+        <Label id="titleLabel" class="title" localization-key="menu.title" text="Adventure" />
     </UIElement>
     <UIElement id="content" class="row content">
         <UIElement id="left" class="column panel">

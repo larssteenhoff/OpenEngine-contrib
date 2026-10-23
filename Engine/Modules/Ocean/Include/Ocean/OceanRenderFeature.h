@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Engine/Rendering/IRenderFeature.h"
+#include "Engine/Rendering/WorldContentDigestTable.h"
 #include "Ocean/OceanAlbedoSim.h"
 #include "Ocean/OceanCaustics.h"
 #include "Ocean/OceanClipSim.h"
@@ -712,6 +713,11 @@ public:
     // per update, after its last SetParams.
     void PublishDepthClaim();
 
+    // Per-world ocean presence for reflection-probe recapture. The extraction
+    // system of each world tracks and sets its entry.
+    Engine::Renderer::WorldContentDigestTable& GetWorldContent() { return m_WorldContent; }
+    uint64_t ContentDigest(uint64_t worldId) const override { return m_WorldContent.Get(worldId); }
+
     // Authored flow / dynamic-wave toggles (from OceanSurface). Stored by the
     // extraction system; read by the contributor to gate binding + availability.
     void SetFlowEnabled(bool value) { m_FlowEnabled.store(value, std::memory_order_release); }
@@ -973,6 +979,7 @@ private:
     SurfaceDepthInputs m_LatestDepthInputs{};
     // The inputs at the previous PublishDepthClaim.
     SurfaceDepthInputs m_ClaimedDepthInputs{};
+    Engine::Renderer::WorldContentDigestTable m_WorldContent;
     OceanOriginShiftNotifier m_OriginShiftNotifier;
     std::atomic<float32> m_WaveOriginOffsetX{0.0f};
     std::atomic<float32> m_WaveOriginOffsetZ{0.0f};

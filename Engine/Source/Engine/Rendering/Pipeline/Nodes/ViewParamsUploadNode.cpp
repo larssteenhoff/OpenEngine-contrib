@@ -132,7 +132,11 @@ void ViewParamsUploadNode::DeclareForView(ViewDeclare& d)
     // from the ACTUAL extent ratio (even-snap included), so it tracks the slider
     // live; exactly 0.0 when the view is not upscaling — the scale-1.0
     // byte-neutrality gate.
-    ubo.ge_mipBiasParams[0] = ComputeTaauMipBias(d.RenderWidth, d.OutputWidth);
+    // The pixel-perfect crossing is excluded: its Render/Output ratio is the
+    // camera's integer zoom, and sharpening material sampling against it would
+    // fight the point-sampled art grid instead of compensating an upscale.
+    ubo.ge_mipBiasParams[0] = ComputeTaauMipBias(
+        d.RenderWidth, d.PixelPerfectCrossing ? d.RenderWidth : d.OutputWidth);
 
     // Previous frame's UNJITTERED world->clip. This history is independent of
     // the active AA mode, so SSSR's temporal lane also works with AA off/MSAA.
@@ -168,6 +172,16 @@ void ViewParamsUploadNode::DeclareForView(ViewDeclare& d)
     const PostProcessSettings& post = d.Services.GetEffectivePostProcessSettings(d.View.id, d.View.worldId);
     ubo.ge_exposureParams[0] = post.Exposure;
     ubo.ge_exposureParams[1] = post.IsAutoExposureActive() ? 1.0f : 0.0f;
+
+    float bandStart = 0, bandEnd = 0;
+    int distanceMode = 0;
+    if (d.Services.GetDepthPixelationBandRange(d.View.id, bandStart, bandEnd, distanceMode))
+    {
+        ubo.ge_pixelationBand[0] = bandStart;
+        ubo.ge_pixelationBand[1] = bandEnd;
+        ubo.ge_pixelationBand[2] = 1.0f;
+        ubo.ge_pixelationBand[3] = static_cast<float>(distanceMode);
+    }
 
     *alloc.Ptr = ubo;
     d.PublishBuffer(m_BufferRef,

@@ -18,6 +18,7 @@
 #include "NativeScripting/PrebuiltModuleBinaries.h"
 #include "NativeScripting/ToolchainFingerprint.h"
 #include "StampedBinary.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
@@ -104,9 +105,8 @@ struct StagingFixture
 
     explicit StagingFixture(const char* name)
     {
-        Root = fs::temp_directory_path() / name;
+        Root = TestUtils::MakeUniqueTempDirectory(name);
         std::error_code ec;
-        fs::remove_all(Root, ec);
         ContentRoot = Root / "staged-game";
         fs::create_directories(ContentRoot, ec);
     }

@@ -216,7 +216,8 @@ bool OceanForwardContributor::BuildForwardCommand(
     // capture produced a reflection texture this frame. Otherwise the surface
     // reads the procedural sky dome (PlanarReflectionAvailable stays 0).
     const bool allowPlanarReflection =
-        ctx.Purpose != Engine::Renderer::ForwardEmitPurpose::ReflectionProbeCapture;
+        ctx.Purpose != Engine::Renderer::ForwardEmitPurpose::ReflectionProbeCapture &&
+        ctx.Purpose != Engine::Renderer::ForwardEmitPurpose::PlanarReflectionCapture;
     const bool planarReflectionReady =
         allowPlanarReflection &&
         m_Feature.GetParams().PlanarReflections != 0u &&
@@ -588,59 +589,7 @@ bool OceanForwardContributor::BuildForwardCommand(
         }
     }
 
-    // Image-based lighting: ocean uses an interned custom grid pipeline, so it
-    // does not get recompiled through the ordinary per-draw world-pass variant
-    // path. Bind the shared IBL resources directly under the same reflected names
-    // as RenderServices so the ocean can match the active sky/environment.
-    auto& ibl = m_RenderServices.EnsureFeature<Engine::Renderer::ImageBasedLightingFeature>();
-    if (!ibl.IsInitialized())
-        ibl.Initialize(device);
-    if (ibl.IsInitialized())
-    {
-        if (auto* sky = m_RenderServices.GetFeature<Engine::Renderer::SkyRenderFeature>();
-            sky && sky->HasActiveSettings())
-        {
-            ibl.SetIblIntensity(sky->GetSettings().iblIntensity);
-        }
-        if (auto* iblSource = ibl.GetEnvironmentSource(); !iblSource || iblSource->InputDigest() == 0)
-            ibl.SetIblIntensity(0.0f);
-        const auto envBuffer = ibl.UploadEnvData(device);
-
-        const auto cubeSampler = ibl.GetCubeSampler();
-        const auto lutSampler = ibl.GetLutSampler();
-        if (cubeSampler.IsValid())
-        {
-            if (const auto irradiance = ibl.GetIrradianceCube(); irradiance.IsValid())
-            {
-                DrawBindings::TextureEntry tex{};
-                tex.Name = HashStringId("ge_irradianceCube");
-                tex.Texture = irradiance;
-                tex.Sampler = cubeSampler;
-                scratch.Textures.push_back(tex);
-            }
-            if (const auto prefilter = ibl.GetPrefilterCube(); prefilter.IsValid())
-            {
-                DrawBindings::TextureEntry tex{};
-                tex.Name = HashStringId("ge_prefilterCube");
-                tex.Texture = prefilter;
-                tex.Sampler = cubeSampler;
-                scratch.Textures.push_back(tex);
-            }
-        }
-        if (lutSampler.IsValid())
-        {
-            if (const auto brdfLut = ibl.GetBrdfLut(); brdfLut.IsValid())
-            {
-                DrawBindings::TextureEntry tex{};
-                tex.Name = HashStringId("ge_brdfLUT");
-                tex.Texture = brdfLut;
-                tex.Sampler = lutSampler;
-                scratch.Textures.push_back(tex);
-            }
-        }
-        if (envBuffer.IsValid())
-            scratch.Buffers.push_back({HashStringId("Env"), envBuffer, 0u, 0u});
-    }
+    // Environment resources are inherited from the shared forward pass.
 
     // The per-view accumulated field is declared after the engine shadow pass.
     const auto shadowInfo = ctx.Frame->AllocUpload<OceanShadowSamplingGPU>();

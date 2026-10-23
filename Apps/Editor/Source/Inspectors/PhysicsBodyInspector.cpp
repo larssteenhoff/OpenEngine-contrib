@@ -1,6 +1,8 @@
 #include "Inspectors/PhysicsBodyInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
+#include "PhysicsECS/Components/PhysicsWorldSettingsComponent.h"
 #include "Inspectors/InspectorUIHelpers.h"
 
 #include "ECS/ECSTemplates.h" // brings in ECS::World definition (via Entity.h)
@@ -15,6 +17,7 @@
 #include "UI/UIManager.h"
 
 #include <cmath>
+#include <utility>
 
 namespace GameEngine
 {
@@ -490,6 +493,27 @@ class PhysicsBodyInspectorSection final : public UIElement
 
 void RegisterPhysicsBodyInspector()
 {
+    constexpr int kPhysicsBodySortKey = 40;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Physics Body";
+        traits.Category = "Physics";
+        traits.SortKey = kPhysicsBodySortKey;
+        traits.Tooltip = "Simulated rigid body with mass, damping, and collision response";
+        traits.InspectorIconClass = "inspector-section-icon-physics";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::PhysicsBody>(), std::move(traits));
+    }
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Physics World Settings";
+        traits.Category = "Physics";
+        traits.InspectorIconClass = "inspector-section-icon-physics-settings";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::PhysicsWorldSettingsComponent>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())

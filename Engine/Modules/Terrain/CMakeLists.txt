@@ -24,8 +24,8 @@ target_link_libraries(Terrain
         Logger
 )
 
-# Image: the 16-bit PNG heightmap decode.
-target_link_libraries(Terrain PRIVATE Image)
+# Image: the 16-bit PNG heightmap decode. Noise: the base fill's value noise.
+target_link_libraries(Terrain PRIVATE Image Noise)
 
 # The root CMakeLists finds GTest AFTER this module is added, so resolve it
 # here — otherwise the guard below never passes and TerrainTests silently
@@ -42,6 +42,7 @@ if(BUILD_TESTING AND (GTest_FOUND OR TARGET GTest::gtest))
     # Image and Logger are OBJECT libraries: their objects reach the executable only
     # when it links them directly.
     target_link_libraries(TerrainTests PRIVATE Terrain Image Logger GTest::gtest GTest::gtest_main)
+    target_include_directories(TerrainTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
     set_target_properties(TerrainTests PROPERTIES
         CXX_STANDARD 20
         CXX_STANDARD_REQUIRED ON

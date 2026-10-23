@@ -41,6 +41,14 @@ class Log
     static void Initialize(const Config& config);
     static void Shutdown();
     static void AddSink(UniquePtr<LogSink> sink);
+
+    /**
+     * @brief Flush and remove every sink.
+     *
+     * Every record logged before the call reaches the sinks it removes; a record
+     * logged concurrently reaches whichever sinks are installed when it is
+     * dispatched. Blocks like Flush while the drain thread catches up.
+     */
     static void ClearSinks();
     static void SetLogLevel(LogLevel level);
     static LogLevel GetLogLevel();

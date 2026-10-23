@@ -246,7 +246,7 @@ void SceneResolveService::Enqueue(ECS::World& world, RenderServices& renderServi
         return;
     if (!NeedsModel(*meshRenderer))
     {
-        RequestMaterial(renderServices, meshRenderer->materialAssetGuid.ToGuid(), SceneResolveBatch::None);
+        RequestEntityMaterial(world, renderServices, entity, meshRenderer->materialAssetGuid.ToGuid(), SceneResolveBatch::None);
         return;
     }
     const GUID modelGuid = meshRenderer->modelAssetGuid.ToGuid();
@@ -261,7 +261,8 @@ SceneResolveBatch SceneResolveService::EnqueueWorld(ECS::World& world, RenderSer
     const auto batch = static_cast<SceneResolveBatch>(m_NextBatch++);
     m_Batches.emplace(static_cast<uint32>(batch), BatchState{});
     // Asset resolution binds handles for the scene as authored: an entity that
-    // is switched off still needs its mesh and material when it comes back.
+    // is switched off still needs its mesh. Its standalone material is requested
+    // when the MeshRenderer component is enabled.
     world.Query<ECS::Read<Components::MeshRenderer>>()
         .IncludeDisabled()
         .Each([&](ECS::EntityHandle entity, const Components::MeshRenderer& meshRenderer)
@@ -269,7 +270,7 @@ SceneResolveBatch SceneResolveService::EnqueueWorld(ECS::World& world, RenderSer
             if (NeedsModel(meshRenderer))
                 Hold(entity, meshRenderer.modelAssetGuid.ToGuid(), batch);
             else
-                RequestMaterial(renderServices, meshRenderer.materialAssetGuid.ToGuid(), batch);
+                RequestEntityMaterial(world, renderServices, entity, meshRenderer.materialAssetGuid.ToGuid(), batch);
         });
     return batch;
 }
@@ -392,12 +393,14 @@ void SceneResolveService::BindEntity(ECS::World& world, RenderServices& renderSe
     ++m_Counts.ResolvedEntities;
     // After the model registered its own materials, so an embedded one is not
     // requested as a standalone .material.
+    if (world.HasComponent<ECS::ComponentDisabled<Components::MeshRenderer>>(entity))
+        return;
     if (const auto* resolved = world.GetComponent<Components::MeshRenderer>(entity))
     {
         // An entity's own material (an authored override) draws its mesh too.
         renderServices.Materials().SceneWarm().Note(Rendering::MeshGPUHandle(resolved->meshGpuHandleId),
                                                     resolved->materialAssetGuid.ToGuid());
-        RequestMaterial(renderServices, resolved->materialAssetGuid.ToGuid(), batch);
+        RequestEntityMaterial(world, renderServices, entity, resolved->materialAssetGuid.ToGuid(), batch);
     }
 }
 
@@ -422,6 +425,14 @@ void SceneResolveService::EvictModels(const std::vector<GUID>& invalidatedModels
             m_LoadingModels.push_back(modelGuid);
         }
     }
+}
+
+void SceneResolveService::RequestEntityMaterial(ECS::World& world, RenderServices& renderServices,
+                                                ECS::EntityHandle entity, const GUID& materialGuid,
+                                                SceneResolveBatch batch)
+{
+    if (!world.HasComponent<ECS::ComponentDisabled<Components::MeshRenderer>>(entity))
+        RequestMaterial(renderServices, materialGuid, batch);
 }
 
 void SceneResolveService::RequestMaterial(RenderServices& renderServices, const GUID& materialGuid,
@@ -578,7 +589,7 @@ void SceneResolveService::ResolveHeldEntity(ECS::World& world, RenderServices& r
     if (!NeedsModel(*meshRenderer))
     {
         // Resolved by another owner meanwhile, or it no longer names a model.
-        RequestMaterial(renderServices, meshRenderer->materialAssetGuid.ToGuid(), batch);
+        RequestEntityMaterial(world, renderServices, entity, meshRenderer->materialAssetGuid.ToGuid(), batch);
         ReleaseEntity(world, entity, batch, false);
         return;
     }
@@ -603,7 +614,7 @@ void SceneResolveService::ResolveHeldEntity(ECS::World& world, RenderServices& r
     if (!kept)
     {
         ++m_Counts.MissedEntities;
-        RequestMaterial(renderServices, meshRenderer->materialAssetGuid.ToGuid(), batch);
+        RequestEntityMaterial(world, renderServices, entity, meshRenderer->materialAssetGuid.ToGuid(), batch);
         ReleaseEntity(world, entity, batch, false);
         return;
     }

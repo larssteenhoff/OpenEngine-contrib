@@ -1,12 +1,12 @@
 #pragma once
 
 #include "Components/Rendering/WorldSectorCoord.h"
+#include "Platform/Environment.h"
 #include "Types/Types.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 
 namespace GameEngine::Engine::Renderer
@@ -104,11 +104,7 @@ inline void UnpackSector(uint32 p0, uint32 p1, int32& sx, int32& sy, int32& sz)
 // per-view/per-frame call cost stays nil; default (unset) => normal behavior.
 inline bool IsRenderOriginForcedInactive()
 {
-    static const bool s_Forced = []()
-    {
-        const char* env = std::getenv("GE_ES_FORCE_WORLD_SPACE");
-        return env != nullptr && std::strcmp(env, "0") != 0;
-    }();
+    static const bool s_Forced = Platform::EnvironmentSwitchEnabled("GE_ES_FORCE_WORLD_SPACE", false);
     return s_Forced;
 }
 

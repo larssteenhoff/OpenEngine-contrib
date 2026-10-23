@@ -3,7 +3,6 @@
 #include "UIAttributeAccess.h"
 
 #include "UI/UIElement.h"
-#include "UI/Controls/Mount.h"
 #include "UI/Controls/ScrollView.h"
 #include "UI/Interaction/DragDropManager.h"
 #include "UI/Interaction/DragDropOverlay.h"
@@ -24,11 +23,11 @@
 
 #include "Core/CpuProfiler.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -406,10 +405,7 @@ namespace
 // skipped. Diagnostic for "hover state right, pixels stale" reports.
 bool HoverTraceEnabled()
 {
-    static const bool enabled = [] {
-        const char* v = std::getenv("GE_UI_HOVER_TRACE");
-        return v && v[0] == '1';
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_UI_HOVER_TRACE", false);
     return enabled;
 }
 
@@ -631,7 +627,7 @@ bool UIManager::MarkHoverTransitionDirty(UIElement* prevHover, UIElement* newHov
     // tearing the hover paint across two frames.
     constexpr int kMaxInPlaceReResolves = 12;
     int reResolveBudget = gated ? kMaxInPlaceReResolves : std::numeric_limits<int>::max();
-    // Cascade-memoization Phase 5: when the rule cache is the primary
+    // When the rule cache is the primary
     // cascade path, m_MatchedPseudoStates reflects which dynamic pseudo
     // classes appear in any rule that COULD match an element (structural
     // matches independent of state). Skip MarkDirty for elements with no
@@ -718,14 +714,7 @@ bool UIManager::MarkHoverTransitionDirty(UIElement* prevHover, UIElement* newHov
             if (shouldMarkHover(cur))
                 markOneElement(cur);
             if (mayDesc)
-            {
-                for (const auto& ch : cur->GetChildren())
-                    if (ch)
-                        stack.push_back(ch.get());
-                if (auto* m = dynamic_cast<Mount*>(cur))
-                    if (UIElement* tgt = m->GetTarget())
-                        stack.push_back(tgt);
-            }
+                cur->ForEachLogicalChild([](UIElement* child) { stack.push_back(child); });
         }
     };
 
@@ -844,7 +833,7 @@ UIManager::PointerFrameResult UIManager::TryPointerOnlyFrame(unsigned dirtyNow, 
     if ((dirtyNow & ~unsigned(UIElement::VisualDirty)) != 0u)
         return PointerFrameResult::NotApplicable;
     m_PointerGateDecline = PointerGateDecline::RelayoutOrRebuild;
-    if (m_RequestRelayout || m_ForceFullRebuildNextFrame || m_RebuildDockspace)
+    if (m_RequestRelayout || m_ForceFullRebuildNextFrame)
         return PointerFrameResult::NotApplicable;
     m_PointerGateDecline = PointerGateDecline::Virtualization;
     if (m_VirtualizationImpactFlags.load(std::memory_order_relaxed) != 0u)
@@ -970,7 +959,7 @@ UIManager::PointerFrameResult UIManager::TryPointerOnlyFrame(unsigned dirtyNow, 
         ((m_DirtyHintFlags.load(std::memory_order_relaxed) & ~unsigned(UIElement::VisualDirty)) != 0u) ||
         m_RequestRelayout || m_ScrollOffsetsChanged || m_ScrollWheelMoved ||
         m_KeyInputSinceLastUpdate ||
-        captureChanged || m_RebuildDockspace ||
+        captureChanged ||
         (m_VirtualizationImpactFlags.load(std::memory_order_relaxed) != 0u) ||
         m_VirtualizationCoordinator.HasPending() ||
         (m_FocusId != m_LastFocusIdNotified);
@@ -1116,8 +1105,7 @@ void UIManager::MarkPseudoStateScope(UIElement* el,
     if (!el)
         return;
     // Nothing this pseudo touches can change style or geometry — the mark would
-    // re-cascade to an identical result. Skip (subsumes the per-site guards the
-    // call sites used to carry inline).
+    // re-cascade to an identical result. Skip.
     if (!info.AffectsLayout && !info.AffectsPaint)
         return;
 
@@ -1152,16 +1140,7 @@ void UIManager::MarkPseudoStateScope(UIElement* el,
                 continue;
             if (shouldMark(cur))
                 cur->MarkDirty(flags);
-            for (const auto& ch : cur->GetChildren())
-            {
-                if (ch)
-                    stack.push_back(ch.get());
-            }
-            if (auto* m = dynamic_cast<Mount*>(cur))
-            {
-                if (UIElement* tgt = m->GetTarget())
-                    stack.push_back(tgt);
-            }
+            cur->ForEachLogicalChild([](UIElement* child) { stack.push_back(child); });
         }
     };
 
@@ -1253,7 +1232,7 @@ void UIManager::DispatchEvents(UpdateContext& ctx)
             // Mouse move: route to hovered or captured element. Press handlers
             // are guaranteed to have run first — OnMouseButton dispatches them
             // at the platform callback, which is strictly before this pass — so
-            // drag logic can no longer race ahead of click logic on the press
+            // drag logic cannot race ahead of click logic on the press
             // (which is what would break Cmd/Alt+Click multi-cursor). The one
             // remaining skip is for TryPointerOnlyFrame having already
             // dispatched this frame's mouse move before escalating here.
@@ -1438,10 +1417,7 @@ void UIManager::BuildFocusOrder(UpdateContext& /*ctx*/)
             focusCandidates.push_back({id, el->GetTabIndex(), domOrder});
         }
         ++domOrder;
-        for (auto& ch : el->GetChildren())
-            visit(ch.get());
-        if (UIElement* tgt = el->GetMountTarget())
-            visit(tgt);
+        el->ForEachLogicalChild(visit);
     };
     visit(GetRootElement());
 

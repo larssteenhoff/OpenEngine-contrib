@@ -28,10 +28,7 @@ IncrementalCompilationTask::IncrementalCompilationTask(JobSystem::WorkStealingTh
 
     Logger::Log::Debug("[IncrementalCompilationTask] Initializing with project: {}", config.ProjectPath);
 
-    // Initialize file change tracker
-    std::filesystem::path cachePath = std::filesystem::path(config.ProjectPath).parent_path() / "file_change_cache.json";
-    std::string cacheFile = cachePath.string();
-    m_FileChangeTracker = std::make_unique<FileChangeTracker>(cacheFile);
+    m_FileChangeTracker = std::make_unique<FileChangeTracker>();
 
     // Initialize dependency analyzer
     m_DependencyAnalyzer = std::make_unique<DependencyGraphAnalyzer>();

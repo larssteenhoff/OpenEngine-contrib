@@ -2,11 +2,11 @@
 #include "TerrainECS/TerrainService.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 
 namespace GameEngine::TerrainECS
@@ -792,7 +792,7 @@ void TileStreamingManager::UnloadDistantTiles(
         // unified sub-rect simply stops being refreshed until it streams back in.
         service.UnloadTile(stream.Handle, coord);
 
-        static const bool kTileStreamDebug = std::getenv("GE_TERRAIN_TILE_DEBUG") != nullptr;
+        static const bool kTileStreamDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_TILE_DEBUG", false);
         if (kTileStreamDebug)
             Logger::Log::Info("Terrain.TileStream out tile=({},{})", coord.X, coord.Z);
 

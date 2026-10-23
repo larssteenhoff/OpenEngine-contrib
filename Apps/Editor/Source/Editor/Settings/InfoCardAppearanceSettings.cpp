@@ -4,7 +4,6 @@
 #include "Editor/Settings/SettingsStore.h"
 #include "Types/StringId.h"
 #include "UI/Controls/Label.h"
-#include "UI/Controls/Mount.h"
 #include "UI/InfoCard.h"
 #include "UI/UIElement.h"
 #include "UI/UIManager.h"
@@ -120,11 +119,7 @@ void SetCardVisibility(UIElement* element, bool visible)
                                   UIElement::VisualDirty);
     }
 
-    if (auto* mount = dynamic_cast<Mount*>(element))
-        SetCardVisibility(mount->GetTarget(), visible);
-
-    for (const auto& child : element->GetChildren())
-        SetCardVisibility(child.get(), visible);
+    element->ForEachLogicalChild([visible](UIElement* child) { SetCardVisibility(child, visible); });
 }
 
 void ApplyVisibility(UIManager* ui, bool visible)
@@ -183,46 +178,25 @@ void InfoCardAppearanceSettings::Save()
     prefs.Save(&error);
 }
 
-void InfoCardAppearanceSettings::ApplyToManager(UIManager* ui) const
+void InfoCardAppearanceSettings::ApplyToManager(UIManager& ui) const
 {
-    ApplyBackground(ui, m_BackgroundEnabled, m_BackgroundColor);
-    ApplyOutline(ui, m_OutlineEnabled, m_OutlineColor);
-    ApplyShadow(ui, m_ShadowEnabled);
-    ApplyVisibility(ui, m_CardsVisible);
+    ApplyBackground(&ui, m_BackgroundEnabled, m_BackgroundColor);
+    ApplyOutline(&ui, m_OutlineEnabled, m_OutlineColor);
+    ApplyShadow(&ui, m_ShadowEnabled);
+    ApplyVisibility(&ui, m_CardsVisible);
 }
 
 void InfoCardAppearanceSettings::ApplyTo(UIManager* ui)
 {
     if (!ui)
         return;
-
-    bool alreadyTracked = false;
-    for (const UIManagerRef& tracked : m_TrackedManagers)
-    {
-        if (tracked.Get() == ui)
-        {
-            alreadyTracked = true;
-            break;
-        }
-    }
-    if (!alreadyTracked)
-        m_TrackedManagers.push_back(UIManagerRef(ui));
-
-    ApplyToManager(ui);
+    m_Windows.Add(ui);
+    ApplyToManager(*ui);
 }
 
 void InfoCardAppearanceSettings::ApplyToTrackedManagers()
 {
-    size_t write = 0;
-    for (const UIManagerRef& tracked : m_TrackedManagers)
-    {
-        UIManager* ui = tracked.Get();
-        if (!ui)
-            continue;
-        ApplyToManager(ui);
-        m_TrackedManagers[write++] = tracked;
-    }
-    m_TrackedManagers.resize(write);
+    m_Windows.ForEachLive([this](UIManager& ui) { ApplyToManager(ui); });
 }
 
 void InfoCardAppearanceSettings::SetBackgroundEnabled(bool enabled)

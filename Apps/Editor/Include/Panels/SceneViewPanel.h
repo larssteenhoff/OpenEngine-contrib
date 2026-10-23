@@ -9,6 +9,7 @@
 #include "Engine/Rendering/ModelEntityFactory.h"
 #include "EditorChangeNotifications.h"
 #include "InspectorRegistry.h"
+#include "SceneView/SceneViewEvents.h"
 #include "SceneView/SceneViewToolStrip.h"
 #include "UI/Controls/Widgets/SceneViewMeasureOverlay.h"
 #include "UI/Interaction/Types.h"
@@ -113,7 +114,6 @@ public:
 
     // Render Services from engine
     Engine::Renderer::RenderServices* GetRenderServices() const { return ResolveRenderServices(); }
-    void SetRenderServices(Engine::Renderer::RenderServices* services) { m_RenderServices = services; }
 
     // Simple accessors for FPS-style navigation state
     bool IsLooking() const { return m_Dragging && m_DragButton == 1 && !m_IsAltOrbiting && !m_IsPanning && !m_IsDollying; }
@@ -219,6 +219,24 @@ private:
     void MarkBindFailed(std::string_view reason);
     void RefreshElementPointers();
     void RegisterViewportEvents();
+    // RegisterViewportEvents phases and the perspective viewport's event handlers.
+    void RegisterAuxViewportSlotEvents();
+    void CreateFpsAndCompileStatusLabels(UIElement* overlayHost);
+    void OnFpsLabelMouseDown(UIEvent& e);
+    void OnFpsLabelMouseMove(UIEvent& e);
+    void OnFpsLabelMouseUp(UIEvent& e);
+    void CreateHoverHighlightLabel(UIElement* overlayHost);
+    void RegisterPerspectiveViewportHandlers();
+    void OnViewportMouseDown(UIEvent& ev);
+    void OnViewportMouseUp(UIEvent& ev);
+    void ShowViewportScriptContextMenu(UIEvent& ev);
+    void OnViewportMouseMove(UIEvent& ev);
+    void OnViewportMouseLeave();
+    void OnViewportScroll(UIEvent& ev);
+    void OnViewportKeyDown(UIEvent& ev);
+    // Transform-tool, measure and FPS hotkeys; returns true when the key was one of them.
+    bool HandleViewportToolHotkey(UIEvent& ev);
+    void OnViewportKeyUp(UIEvent& ev);
     void BindToolbarWidgets();
     void WireToolOverlay();
     void ApplySceneToolIconBackgrounds();
@@ -245,6 +263,8 @@ private:
     // Shows the right-click "hide icons" menu for the scene view toolbar.
     void ShowToolbarIconContextMenu(float windowX, float windowY);
     void UpdateHoverHighlightPill();
+    /** Mirrors the active tool's status line into the viewport HUD. */
+    void UpdateToolStatusLabel();
     void UpdateQuadViewButtonState();
     void ResetQuadViewSplits();
     void ResetQuadViewAssignments();
@@ -281,10 +301,24 @@ private:
     bool ApplyImmediatePan(SceneViewController* controller, UIElement* viewport, UIEvent& ev);
     bool HandleSceneViewCommandShortcut(SceneViewController* controller, UIEvent& ev);
     void FocusViewport(UIElement* viewport);
+    // Measure is a mode of the whole panel: it switches every viewport's
+    // controller to ToolKind::Measure and restores each one's tool and
+    // transform-gizmo visibility when it ends.
     void SetMeasureToolEnabled(bool enabled);
     void ToggleMeasureTool();
     void UpdateMeasureToolButtons();
-    void ApplyMeasureSoloMode(bool enabled);
+    void BeginMeasureMode();
+    // Ends measure mode. `leftBy` is a controller that already switched to
+    // another tool on its own (a click on a measure endpoint selects it for
+    // the transform tool): it keeps that tool and shows its transform gizmos.
+    void EndMeasureMode(SceneViewController* leftBy);
+    void OnSceneControllerToolChanged(SceneViewController* controller);
+    // Hands a measure-mode pointer event to the controller's tool context, with
+    // the pointer clamped to the viewport so a drag keeps measuring outside it.
+    void DispatchMeasurePointer(SceneViewController* controller, UIElement* viewport,
+                                Editor::SceneTools::PointerPhase phase, UIEvent& ev);
+    static bool IsMeasureDragging(SceneViewController* controller);
+    void OnMeasured(const std::array<float, 3>& start, const std::array<float, 3>& end, bool is2D);
     // The tool buttons' menus, declared at their attach sites. The select and
     // measure sets are fixed with show-time state hooks; spline and quad-view
     // sets are computed per show (curve-type-gated submenus, per-slot rows).
@@ -296,10 +330,6 @@ private:
     ECS::EntityHandle CreateMeasureEntity(const std::array<float, 3>& start,
                                           const std::array<float, 3>& end,
                                           bool is2D);
-    bool HandleMeasurePointerDown(SceneViewController* controller, UIElement* viewport, ViewportSlot slot, UIEvent& ev);
-    bool HandleMeasurePointerMove(SceneViewController* controller, UIElement* viewport, ViewportSlot slot, UIEvent& ev);
-    bool HandleMeasurePointerUp(SceneViewController* controller, UIElement* viewport, ViewportSlot slot, UIEvent& ev);
-    void FinishMeasureDrag(bool allowCreateEntity);
     void FinishMeasureDragIfReleased();
     void RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot slot);
     void RegisterQuadSplitHandleEvents();
@@ -371,9 +401,6 @@ private:
     UIElement* m_QuadSplitVerticalBottom = nullptr; // not owned
     UIElement* m_QuadSplitHorizontal = nullptr; // not owned
 
-    // EngineRender Services
-    Engine::Renderer::RenderServices* m_RenderServices = nullptr;
-
     // Scene View controllers keyed by their default view kind (not owned).
     SceneViewController* m_Controller = nullptr; // not owned
     std::array<SceneViewController*, static_cast<size_t>(ViewportSlot::Count)> m_SceneControllers{};
@@ -384,6 +411,11 @@ private:
     UIElement::WeakRef<UIElement> m_PublishedOverlayViewport;
 
     Label* m_HoverHighlightLabel = nullptr; // not owned (optional)
+    Label* m_ToolStatusLabel = nullptr;     // not owned (optional)
+    std::string m_ToolStatusShown;
+    // Widths the status pill was last centred against; a change re-centres it.
+    float m_ToolStatusViewportWidth = -1.0f;
+    float m_ToolStatusLabelWidth = -1.0f;
     // Hover highlight pill: cache layout inputs so we don't relayout or re-anchor every frame (reduces jitter).
     std::string m_LastHoverPillLayoutText;
     float m_LastHoverPillViewportWidth = -1.0f;
@@ -414,12 +446,7 @@ private:
     std::array<UIElement::WeakRef<class SceneViewMeasureOverlay>, static_cast<size_t>(ViewportSlot::Count)>
         m_HeldMeasureOverlays{};
     bool m_MeasureToolEnabled = false;
-    bool m_MeasureDragActive = false;
     bool m_MeasureCreateEntitiesMode = false;
-    ViewportSlot m_MeasureDragSlot = ViewportSlot::Perspective;
-    std::array<float, 3> m_MeasureDragStartWorld{0.0f, 0.0f, 0.0f};
-    std::array<float, 3> m_MeasureDragEndWorld{0.0f, 0.0f, 0.0f};
-    bool m_MeasureDragIs2D = false;
     SceneViewMeasureOverlay::UnitSystem m_MeasureUnitSystem = SceneViewMeasureOverlay::UnitSystem::Metric;
     SceneViewMeasureOverlay::TwoDMode m_MeasureTwoDMode = SceneViewMeasureOverlay::TwoDMode::Triangle;
     std::array<std::uint8_t, static_cast<size_t>(ViewportSlot::Count)> m_MeasureSavedToolKinds{};

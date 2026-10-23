@@ -112,6 +112,16 @@ class MaterialRegistry
     Material* Find(const GUID& guid);
     const Material* Find(const GUID& guid) const;
 
+    // Registration generation of the Material currently bound to `guid`, or 0
+    // when the GUID is unbound. A generation is issued when Register binds the
+    // GUID to a new Material object; a re-Register of a bound GUID re-applies
+    // the document in place and keeps the object and its generation.
+    // Generations come from one registry-wide counter, so a later binding of a
+    // GUID always carries a larger generation than any earlier binding of it.
+    // Work snapshotted against a binding (a variant compile) compares its
+    // snapshot to this value to tell whether that binding is still current.
+    uint64_t GetRegistrationGeneration(const GUID& guid) const;
+
     // --- Lifecycle ---
 
     // Unregister a Material by GUID and remove the entry. If a pre-unregister
@@ -120,8 +130,9 @@ class MaterialRegistry
     void Unregister(const GUID& guid);
 
     // Optional callback invoked just before a Material is freed (Unregister or
-    // Shutdown). Used by RenderServices to clear per-material cache entries on
-    // ShaderCompilationCache before the pointer becomes invalid.
+    // Shutdown). Used by MaterialSystem to drop state keyed on the Material
+    // pointer (variant-cache rows, queued variant compiles, the SSBO slot)
+    // before the pointer becomes invalid.
     using PreUnregisterCallback = std::function<void(const Material*)>;
     void SetPreUnregisterCallback(PreUnregisterCallback callback)
     {
@@ -136,9 +147,9 @@ class MaterialRegistry
     template <typename Fn>
     void ForEach(Fn&& fn) const
     {
-        for (const auto& [guid, mat] : m_Materials)
+        for (const auto& [guid, registration] : m_Materials)
         {
-            fn(guid, *mat);
+            fn(guid, *registration.Object);
         }
     }
 
@@ -147,9 +158,9 @@ class MaterialRegistry
     template <typename Fn>
     void ForEachMutable(Fn&& fn)
     {
-        for (auto& [guid, mat] : m_Materials)
+        for (auto& [guid, registration] : m_Materials)
         {
-            fn(guid, *mat);
+            fn(guid, *registration.Object);
         }
     }
 
@@ -174,8 +185,26 @@ class MaterialRegistry
     uint32_t m_DefaultBlackIdx      = 0;
     bool     m_TextureSlotDefaultsSeeded = false;
 
-    // GUID -> owned Material instance.
-    std::unordered_map<GUID, std::unique_ptr<Material>> m_Materials;
+    // One GUID binding: the owned Material and the generation it was bound
+    // under (see GetRegistrationGeneration).
+    struct Registration
+    {
+        std::unique_ptr<Material> Object;
+        uint64_t Generation = 0;
+    };
+
+    std::unordered_map<GUID, Registration> m_Materials;
+
+    // Last generation Register issued; 0 means none yet, so 0 never names a
+    // binding. Never reset, not even by Shutdown: a counter that returned to an
+    // earlier value would let a stale snapshot compare equal again. No mutex
+    // and no atomic, like m_Materials: Register writes it and every
+    // Registration::Generation, and GetRegistrationGeneration reads them, all
+    // on the single thread the registry is confined to (see Thread safety at
+    // the top of this file), which is also the serial thread that runs
+    // PipelineVariantCache's frame-begin compile drain and publish apply.
+    // Compile workers never read the registry; they carry the snapshot by value.
+    uint64_t m_LastRegistrationGeneration = 0;
 };
 
 // Push every document property into the Material's param cache: through the

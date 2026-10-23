@@ -19,10 +19,11 @@
 
 #include "Rendering/Core/Device.h"
 #include "Rendering/Materials/ShaderCompileService.h"
+#include "TestTempDir.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -42,10 +43,7 @@ struct TempTree
 
     explicit TempTree(const char* prefix)
     {
-        static std::atomic<uint32_t> counter{0};
-        Root = fs::temp_directory_path() /
-               (std::string(prefix) + "_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()) +
-                "_" + std::to_string(counter.fetch_add(1)));
+        Root = GameEngine::TestUtils::MakeUniqueTempDirectory(prefix);
         fs::create_directories(Root);
     }
     ~TempTree()
@@ -922,4 +920,26 @@ TEST(ShaderCompileCacheKey, AMissCompilesIntoTheWritableRootAndNeverTheReadOnlyO
     EXPECT_FALSE(ShaderCompileService::CompileProgramToCache(uncooked, ShaderSourceKind::SpirV, miss, &missErr));
     EXPECT_NE(missErr.find((bundle / miss.outputDir.filename() / "program.shaderpkg").string()), std::string::npos)
         << missErr;
+}
+
+TEST(ShaderCompileCacheKey, Vulkan11UsesSpirv13AndDoesNotAliasVulkan12)
+{
+    struct RestoreTarget
+    {
+        ShaderCompileService::SpirvTarget Target = ShaderCompileService::MaxSupportedSpirv();
+        ~RestoreTarget() { ShaderCompileService::SetMaxSupportedSpirv(Target); }
+    } restore;
+    TempTree tree("ge_cachekey_spirv13");
+    const auto request = MakeInlineRequest(tree.Root / "Cache", tree.Root / "probe.vert", "mobile");
+    ShaderCompileService::SetMaxSupportedSpirv(ShaderCompileService::SpirvTarget::Spirv_1_3);
+    ShaderProgramCompileResult mobile{};
+    COMPILE_OR_SKIP(request, mobile);
+    ASSERT_GE(mobile.stageBytes.at("vs").size(), 8u);
+    uint32_t version = 0;
+    std::memcpy(&version, mobile.stageBytes.at("vs").data() + 4, sizeof(version));
+    EXPECT_EQ(version, 0x00010300u);
+    ShaderCompileService::SetMaxSupportedSpirv(ShaderCompileService::SpirvTarget::Spirv_1_5);
+    ShaderProgramCompileResult desktop{};
+    COMPILE_OR_SKIP(request, desktop);
+    EXPECT_NE(mobile.outputDir, desktop.outputDir);
 }

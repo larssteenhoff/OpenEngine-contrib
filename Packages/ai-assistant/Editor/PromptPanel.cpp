@@ -16,10 +16,14 @@
 #include "MarkupChips.h"
 #include "MarkupContext.h"
 #include "MarkupTokenPicker.h"
+#include "PromptFileDropZone.h"
+#include "PromptInputLayout.h"
+#include "PromptFileTray.h"
 #include "PromptTextArea.h"
 #include "ModeControlFit.h"
 #include "Providers/IAgentProvider.h"
 
+#include "Core/Engine.h"
 #include "Editor/Registries/EditorMarkupRequests.h"
 #include "Input/InputSystem.h"
 #include "Input/KeyCodes.h"
@@ -44,6 +48,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -164,6 +169,10 @@ auto s_PromptMicButtonRegistration =
     UIRegistration::RegisterWithFactory<PromptMicButton>(
         "PromptMicButton", []() { return std::make_unique<PromptMicButton>(); });
 
+auto s_PromptFileDropZoneRegistration =
+    UIRegistration::RegisterWithFactory<PromptFileDropZone>(
+        "PromptFileDropZone", []() { return std::make_unique<PromptFileDropZone>(); });
+
 // The ids of the registered reply actions a reply to `prompt` offers, in registration order.
 std::vector<std::string> ReplyActionsFor(const ConversationMessage& prompt)
 {
@@ -218,12 +227,17 @@ void PromptPanel::OnLayoutBound()
     m_SessionButton = findButton("PromptSessionButton"_sid);
     m_ModelButton = findButton("PromptModelButton"_sid);
     m_ContinuedRow = dynamic_cast<Label*>(findElement("PromptContinuedSession"_sid));
+    auto* fileStrip = dynamic_cast<PromptFileDropZone*>(findElement("PromptFileStrip"_sid));
+    UIElement* fileItems = findElement("PromptFileItems"_sid);
+    auto* inputDrop = dynamic_cast<PromptFileDropZone*>(m_InputRow);
+    Button* attachButton = findButton("PromptAttachButton"_sid);
+    m_AttachButton = attachButton;
 
     const bool hasRequiredControls = providerSettings && m_ProviderDropdown && m_HistoryScroll &&
         m_HistoryList && m_HistoryEmpty && m_InputPane && m_InputRow && m_InputControls && m_PromptInputScroll &&
         m_PromptText &&
         m_ClearPromptButton && m_SendButton && m_StatusLabel && m_SessionButton && m_ContinuedRow &&
-        m_ModeDropdown && m_ModelButton;
+        m_ModeDropdown && m_ModelButton && fileStrip && fileItems && inputDrop && attachButton;
     if (!hasRequiredControls)
     {
         Logger::Log::Error("AI Assistant panel layout is missing one or more required controls");
@@ -435,6 +449,15 @@ void PromptPanel::OnLayoutBound()
         if (UIManager* ui = GetOwnerManager())
             ui->FocusElement(m_PromptText);
     });
+    m_FileTray = std::make_unique<PromptFileTray>(*fileStrip, *fileItems, EngineCore::GetInstance().GetJobSystem(),
+                                                  [this](const std::string& text) { SetStatus(text); });
+    const auto addFiles = [this](std::span<const std::filesystem::path> paths) { m_FileTray->Add(paths); };
+    fileStrip->SetOnFilesDropped(addFiles);
+    inputDrop->SetOnFilesDropped(addFiles);
+    inputDrop->SetFeedbackElement(attachButton);
+    attachButton->SetTooltip("Add files to the prompt: images the model sees, and text files it reads");
+    // The dialog opens after the click, not in it.
+    attachButton->SetOnClick([this](UIEvent&) { PostSafeAction([this]() { m_FileTray->Pick(); }); });
     m_SendButton->SetTooltip("Send prompt (Enter); a prompt sent while a reply runs waits its turn");
     m_SendButton->SetOnClick([this](UIEvent&) { SubmitPrompt(); });
     BindMicButton(dynamic_cast<PromptMicButton*>(findElement("PromptMicButton"_sid)));
@@ -486,7 +509,7 @@ void PromptPanel::AutoSizePromptInputPane()
 
 void PromptPanel::UpdateInputStacking()
 {
-    if (!m_InputPane || !m_InputRow || !m_InputControls)
+    if (!m_InputPane || !m_InputRow || !m_InputControls || !m_AttachButton)
         return;
     // The controls group never shrinks beside the field, so its width is that of the
     // controls the connection shows (Claude (API) hides the mode control and Session…);
@@ -500,16 +523,7 @@ void PromptPanel::UpdateInputStacking()
     if (stacked == m_InputStacked)
         return;
     m_InputStacked = stacked;
-    if (stacked)
-    {
-        m_InputRow->AddClass("prompt-panel-input-row-stacked");
-        m_InputControls->AddClass("prompt-panel-input-controls-stacked");
-    }
-    else
-    {
-        m_InputRow->RemoveClass("prompt-panel-input-row-stacked");
-        m_InputControls->RemoveClass("prompt-panel-input-controls-stacked");
-    }
+    ArrangePromptInput(*m_InputRow, *m_InputControls, *m_AttachButton, stacked);
 }
 
 void PromptPanel::UpdateHistoryNarrow()
@@ -778,6 +792,12 @@ void PromptPanel::SubmitPrompt()
         SetStatus("Enter a prompt first");
         return;
     }
+    // The prompt carries every file in the strip, so it waits for the ones still being read.
+    if (m_FileTray->IsLoading())
+    {
+        SetStatus("Wait for the files to finish loading, then send again");
+        return;
+    }
 
     // A prompt over the cap is refused whole and stays in the field to be shortened.
     const std::string providerId = AiAssistantSettings::Provider();
@@ -785,7 +805,7 @@ void PromptPanel::SubmitPrompt()
     // The mark-ups the prompt names are read now, as they are when it is sent.
     MarkupTurnContext markups = MarkupContext::ForPrompt(prompt, Editor::EditorMarkupRequests::Get());
     if (!m_Controller->Send(prompt, SentMarkups{std::move(markups.Text), std::move(markups.Mentions)},
-                            AiAssistantSettings::Model(providerId),
+                            m_FileTray->Files(), AiAssistantSettings::Model(providerId),
                             AiAssistantSettings::Effort(providerId)))
     {
         SetStatus(PromptTooLongStatus(prompt.size()));
@@ -799,6 +819,7 @@ void PromptPanel::SubmitPrompt()
     m_PromptRecallCursor = -1;
     m_PromptRecallDraft.clear();
     m_PromptText->SetValue("");
+    m_FileTray->Clear();
     UpdateConversation();
 }
 

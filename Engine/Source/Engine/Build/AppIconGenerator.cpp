@@ -10,6 +10,7 @@
 #include "Image/Resample.h"
 #include "Logger/Logger.h"
 #include "Core/Application.h"
+#include "Types/StringUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -26,13 +27,6 @@ namespace fs = std::filesystem;
 namespace GameEngine {
 
 namespace {
-
-std::string ToLowerAscii(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
 
 struct RgbaImage
 {
@@ -254,7 +248,9 @@ enum class IconBundleKind
 {
     Windows,
     Mac,
-    Linux
+    Linux,
+    Android,
+    IOS
 };
 
 static IconBundleKind IconKindForPlatform(const std::string& platformName)
@@ -262,6 +258,8 @@ static IconBundleKind IconKindForPlatform(const std::string& platformName)
     const std::string plat = ToLowerAscii(platformName);
     if (plat == "windows")
         return IconBundleKind::Windows;
+    if (plat == "android") return IconBundleKind::Android;
+    if (plat == "ios") return IconBundleKind::IOS;
     if (plat == "mac")
         return IconBundleKind::Mac;
     return IconBundleKind::Linux;
@@ -431,6 +429,34 @@ AppIconGenerationResult GenerateApplicationIcons(const BuildSettings& settings, 
                 result.warnings.push_back(icnsError);
                 result.warnings.push_back(
                     "macOS .icns was not embedded; build the Mac target on macOS or copy AppIcon.icns manually.");
+            }
+            break;
+        }
+        case IconBundleKind::Android:
+        case IconBundleKind::IOS:
+        {
+            const bool ios = kind == IconBundleKind::IOS;
+            const fs::path directory = iconsRoot / (ios ? "iOS" : "Android");
+            fs::create_directories(directory, ec);
+            const std::vector<int> sizes = ios ? std::vector<int>{120, 180, 152, 167, 1024}
+                                               : std::vector<int>{48, 72, 96, 144, 192};
+            for (const int size : sizes)
+            {
+                RgbaImage image;
+                if (!ResampleIcon(source, size, image))
+                {
+                    result.error = "Failed to resize mobile application icon";
+                    return result;
+                }
+                // iOS rejects an app icon with an alpha channel that is not fully opaque.
+                if (ios)
+                    for (size_t alpha = 3; alpha < image.pixels.size(); alpha += 4) image.pixels[alpha] = 255;
+                if (!Image::WritePngFile(directory / ("AppIcon" + std::to_string(size) + ".png"), image.pixels,
+                                         static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height)))
+                {
+                    result.error = "Failed to write mobile application icon";
+                    return result;
+                }
             }
             break;
         }

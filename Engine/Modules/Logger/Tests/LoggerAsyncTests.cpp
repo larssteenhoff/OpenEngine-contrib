@@ -4,6 +4,7 @@
 #include "Logger/CallbackSink.h"
 #include "Logger/FileSink.h"
 #include "Logger/RingBufferSink.h"
+#include "TestTempDir.h"
 
 #include <atomic>
 #include <chrono>
@@ -170,9 +171,8 @@ TEST_F(LoggerAsyncTest, ShutdownDrainsRemaining)
 TEST_F(LoggerAsyncTest, BurstTrailingLinesFlushWithoutExplicitFlush)
 {
     namespace fs = std::filesystem;
-    const fs::path path = fs::temp_directory_path() / "ge_logger_burst_flush.txt";
-    std::error_code ec;
-    fs::remove(path, ec);
+    const GameEngine::TestUtils::ScopedTempDir tempDir(GameEngine::TestUtils::MakeUniqueTempDirectory("ge_logger_burst_flush"));
+    const fs::path path = tempDir.Path() / "ge_logger_burst_flush.txt";
 
     FileSink::Config cfg;
     cfg.filename = path.string().c_str();
@@ -209,7 +209,6 @@ TEST_F(LoggerAsyncTest, BurstTrailingLinesFlushWithoutExplicitFlush)
 
     // Release the file handle before removing the temp file.
     Log::ClearSinks();
-    fs::remove(path, ec);
 }
 
 // Log::Flush() must be a barrier all the way to the file, not just to the sink:
@@ -218,9 +217,8 @@ TEST_F(LoggerAsyncTest, BurstTrailingLinesFlushWithoutExplicitFlush)
 TEST_F(LoggerAsyncTest, ExplicitFlushReachesTheFileImmediately)
 {
     namespace fs = std::filesystem;
-    const fs::path path = fs::temp_directory_path() / "ge_logger_explicit_flush.txt";
-    std::error_code ec;
-    fs::remove(path, ec);
+    const GameEngine::TestUtils::ScopedTempDir tempDir(GameEngine::TestUtils::MakeUniqueTempDirectory("ge_logger_explicit_flush"));
+    const fs::path path = tempDir.Path() / "ge_logger_explicit_flush.txt";
 
     FileSink::Config cfg;
     cfg.filename = path.string().c_str();
@@ -245,7 +243,6 @@ TEST_F(LoggerAsyncTest, ExplicitFlushReachesTheFileImmediately)
     EXPECT_NE(content.find("pre-flush line 0"), std::string::npos);
 
     Log::ClearSinks();
-    fs::remove(path, ec);
 }
 #endif // LOGGER_ENABLE_FILE_LOGGING
 
@@ -276,6 +273,49 @@ TEST_F(LoggerAsyncTest, ReinitAfterShutdown)
     EXPECT_GE(spy2->GetCount(), 1u);
     auto msgs = spy2->GetMessages(LogLevel::Trace, 0, "after re-init");
     EXPECT_EQ(msgs.size(), 1u);
+}
+
+// A record logged right before ClearSinks or Initialize is usually still queued
+// when that call runs, but not always: the drain thread can win the race. The
+// tests below repeat the pair so that, in practice, some rounds hit a queued
+// record.
+constexpr int kQueuedRecordRounds = 1000;
+
+// A capture removed right after the code under test logs must still receive
+// what that code logged.
+TEST_F(LoggerAsyncTest, ClearSinksDeliversQueuedRecordsToTheRemovedSinks)
+{
+    // Heap-owned: ClearSinks destroys the sinks, the count must outlive them.
+    auto delivered = std::make_shared<std::atomic<int>>(0);
+    for (int round = 0; round < kQueuedRecordRounds; ++round)
+    {
+        auto callbackSink = std::make_unique<CallbackSink>();
+        callbackSink->RegisterCallback([delivered](const LogMessage&)
+        {
+            delivered->fetch_add(1, std::memory_order_relaxed);
+        });
+        Log::AddSink(std::move(callbackSink));
+
+        Log::Info("logged before ClearSinks {}", round);
+        Log::ClearSinks();
+    }
+    m_Spy = nullptr;
+
+    EXPECT_EQ(delivered->load(), kQueuedRecordRounds);
+}
+
+// Initialize on a running logger reconfigures it; records still in the queue
+// belong to the installed sinks and must not be discarded.
+TEST_F(LoggerAsyncTest, InitializeOnARunningLoggerKeepsQueuedRecords)
+{
+    for (int round = 0; round < kQueuedRecordRounds; ++round)
+    {
+        Log::Info("logged before Initialize {}", round);
+        Log::Initialize({});
+    }
+    Log::Flush();
+
+    EXPECT_EQ(m_Spy->GetCount(), static_cast<size_t>(kQueuedRecordRounds));
 }
 
 TEST_F(LoggerAsyncTest, CriticalBypassesQueue)

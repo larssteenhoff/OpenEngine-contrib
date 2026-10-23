@@ -13,6 +13,7 @@
 #include "Engine/Rendering/ShaderGraphMaterial.h"
 #include "Rendering/Materials/MaterialBuildContext.h"
 #include "Rendering/Materials/MaterialDocument.h"
+#include "TestTempDir.h"
 
 #include <chrono>
 #include <filesystem>
@@ -55,10 +56,7 @@ protected:
     void SetUp() override
     {
         std::error_code ec;
-        m_Root = std::filesystem::temp_directory_path(ec) /
-                 ("ge_gen_surface_" + std::to_string(::testing::UnitTest::GetInstance()
-                                                         ->random_seed()) +
-                  "_" + std::to_string(reinterpret_cast<uintptr_t>(this)));
+        m_Root = TestUtils::MakeUniqueTempDirectory("ge_gen_surface");
         m_MaterialDir = m_Root / "assets" / "materials";
         m_CacheRoot = m_Root / ".Cache" / "Shaders";
         std::filesystem::create_directories(m_MaterialDir, ec);

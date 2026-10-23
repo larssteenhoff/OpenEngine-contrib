@@ -851,8 +851,15 @@
     },
     {
       "enabled": true,
-      "id": "RenderScaleUpscale",
+      "id": "PixelPerfectUpscale",
       "input": "HDRTemporalAA",
+      "output": "HDRPixelPerfect",
+      "type": "PixelPerfectUpscale"
+    },
+    {
+      "enabled": true,
+      "id": "RenderScaleUpscale",
+      "input": "HDRPixelPerfect",
       "output": "HDRUpscaled",
       "type": "RenderScaleUpscale"
     },
@@ -2245,6 +2252,19 @@
       ]
     },
     "LDRBeforeVhs": {
+      "extent": { "basis": "output" },
+      "format": "R16G16B16A16_FLOAT",
+      "kind": "Texture",
+      "scope": "PerView",
+      "size": {
+        "variables": {}
+      },
+      "usage": [
+        "RenderTarget",
+        "ShaderResource"
+      ]
+    },
+    "HDRPixelPerfect": {
       "extent": { "basis": "output" },
       "format": "R16G16B16A16_FLOAT",
       "kind": "Texture",

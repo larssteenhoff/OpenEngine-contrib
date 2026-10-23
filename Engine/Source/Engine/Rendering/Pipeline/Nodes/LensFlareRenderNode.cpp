@@ -1,6 +1,6 @@
 #include "Engine/Rendering/Pipeline/Nodes/LensFlareRenderNode.h"
 
-#include "Engine/Rendering/ExposureReadbackFeature.h"
+#include "Engine/Rendering/ViewExposureScale.h"
 #include "Engine/Rendering/LensFlareRenderFeature.h"
 #include "Mathematics/Curve.h" // ::GameEngine::Math::EvaluateCurveKeys
 #include "Engine/Rendering/Pipeline/PipelineResourceNames.h"
@@ -67,8 +67,6 @@ float EdgeAmountForAxis(float v, float range, float bias)
 // regardless of scene luminance — the same pre-exposure compensation HDRP's
 // SRP lens flares use. Clamp keeps a degenerate metered scale from producing
 // inf/NaN instance colors.
-constexpr float kMinExposureScale = 1.0e-4f;
-constexpr float kMaxExposureScale = 1.0e4f;
 
 // One draw's worth of instances sharing an atlas texture.
 struct AtlasBatch
@@ -399,17 +397,7 @@ void LensFlareRenderNode::DeclareForView(ViewDeclare& d)
     // readback (enabled on demand — a view showing flares keeps the 16-byte/
     // frame readback on); until the first readback lands, the settings' base
     // exposure keeps the flare merely dim for a frame or two rather than wrong.
-    const PostProcessSettings& pp = rs.GetEffectivePostProcessSettings(d.View.id, d.View.worldId);
-    float exposureScale = pp.Exposure;
-    if (pp.IsAutoExposureActive())
-    {
-        auto& readback = rs.EnsureFeature<ExposureReadbackFeature>();
-        readback.SetReadbackEnabled(d.View.id, true);
-        float adapted = 0.0f;
-        if (readback.TryResolveAdaptedExposure(d.View.id, adapted))
-            exposureScale = adapted;
-    }
-    exposureScale = std::clamp(exposureScale, kMinExposureScale, kMaxExposureScale);
+    const float32 exposureScale = ResolveViewExposureScale(rs, d.View);
     const float invExposure = 1.0f / exposureScale;
 
     const float viewportAspect =

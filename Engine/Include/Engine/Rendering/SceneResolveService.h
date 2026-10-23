@@ -191,6 +191,8 @@ class SceneResolveService
     KeptBinding Keep(RenderServices& renderServices, const GUID& modelGuid, const SharedPtr<Asset>& asset);
     void BindEntity(ECS::World& world, RenderServices& renderServices, ECS::EntityHandle entity,
                     const ModelRenderResources& resources, SceneResolveBatch batch);
+    void RequestEntityMaterial(ECS::World& world, RenderServices& renderServices, ECS::EntityHandle entity,
+                               const GUID& materialGuid, SceneResolveBatch batch);
     void RequestMaterial(RenderServices& renderServices, const GUID& materialGuid, SceneResolveBatch batch);
     void PollModelLoads();
     void PollMaterialLoads();

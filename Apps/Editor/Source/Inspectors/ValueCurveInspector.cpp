@@ -1,10 +1,12 @@
 #include "Inspectors/ValueCurveInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
 
 #include "Components/Animation/ValueCurve.h"
 #include "Editor/Entities/EditorECSHelpers.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
+#include "Inspectors/InspectorComponentSection.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorUIHelpers.h"
 #include "UI/StyleProperties.h"
@@ -29,6 +31,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace GameEngine
@@ -38,17 +41,16 @@ namespace
 
 std::vector<Dropdown::Option> BuildTargetOptions()
 {
-    return {
-        {"0", "None"},
-        {"1", "Transform · Position · X"},
-        {"2", "Transform · Position · Y"},
-        {"3", "Transform · Position · Z"},
-        {"4", "Transform · Scale · X"},
-        {"5", "Transform · Scale · Y"},
-        {"6", "Transform · Scale · Z"},
-        {"7", "Light · Intensity"},
-        {"8", "Post Process · Blend Weight"},
-    };
+    std::vector<Dropdown::Option> options;
+    options.reserve(std::size(Components::kValueCurveTargetEntries));
+    for (const Components::ValueCurveTargetEntry& entry : Components::kValueCurveTargetEntries)
+    {
+        Dropdown::Option option;
+        option.value = std::to_string(static_cast<int>(entry.Value));
+        option.label = std::string(entry.Label);
+        options.push_back(std::move(option));
+    }
+    return options;
 }
 
 std::vector<Dropdown::Option> BuildShapeModeOptions()
@@ -260,6 +262,19 @@ float NormalizedPlaybackTime(const Components::ValueCurve& curve)
 
 void RegisterValueCurveInspector()
 {
+    constexpr int kValueCurveSortKey = 34;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Value Curve";
+        traits.Category = "Animation";
+        traits.SortKey = kValueCurveSortKey;
+        traits.Tooltip = "Tween curve with easing, duration, and looping behavior";
+        traits.InspectorIconClass = "inspector-section-icon-animator";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::ValueCurve>(), std::move(traits));
+    }
+
     using namespace InspectorDrag;
 
     InspectorRegistry::Get().RegisterComponentInspector<Components::ValueCurve>(
@@ -710,11 +725,9 @@ void RegisterValueCurveInspector()
 
             // Preset foldout: curated built-ins + the user's saved library. Picking replaces the shape;
             // saving captures the current shape into the shared user library.
-            auto presetFoldout = std::make_unique<Foldout>();
-            presetFoldout->SetTitle("Presets");
-            presetFoldout->AddClass("rp-foldout");
+            Foldout* presetFoldout =
+                InspectorUI::AddComponentSection(ctx.Parent, "ValueCurve/Presets", "Presets", false);
             presetFoldout->AddClass("curve-preset-foldout");
-            presetFoldout->SetExpanded(false);
             UIElement* presetContent = presetFoldout->GetContentContainer();
 
             auto picker = std::make_unique<CurvePresetPicker>();
@@ -821,7 +834,6 @@ void RegisterValueCurveInspector()
                         pickerRaw->Refresh();
                 });
             presetContent->AddChild(std::move(picker));
-            ctx.Parent->AddChild(std::move(presetFoldout));
 
             shapeModeDropdown->SetOnValueChanged(
                 [getWorld, entity, notifications, undo, curveFieldRaw, bezierFieldRaw, suppressShapeModeChange, setPlaybackIndicator](
@@ -903,12 +915,11 @@ void RegisterValueCurveInspector()
                         world, entity, notifications, undo, "Change Value Curve Target",
                         [target](Components::ValueCurve& c)
                         {
-                            constexpr int kMinTarget = static_cast<int>(Components::ValueCurveTarget::None);
-                            constexpr int kMaxTarget =
-                                static_cast<int>(Components::ValueCurveTarget::PostProcessWeight);
-                            if (target < kMinTarget || target > kMaxTarget)
+                            const Components::ValueCurveTargetEntry* entry =
+                                Components::FindValueCurveTargetEntry(target);
+                            if (!entry)
                                 return;
-                            c.Target = static_cast<Components::ValueCurveTarget>(target);
+                            c.Target = entry->Value;
                         });
                 });
         });

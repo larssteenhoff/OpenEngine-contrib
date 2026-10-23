@@ -38,6 +38,7 @@
 #include "Engine/Rendering/Pipeline/RenderPipeline.h"
 #include "Engine/Rendering/Pipeline/RenderPipelineNodes.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Common/Utils.h"
 #include "Rendering/Core/BindlessResourceManager.h"
 #include "Rendering/Core/Device.h"
@@ -78,7 +79,6 @@
 #include <cmath>
 #include <cassert>
 #include <cstring>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -179,11 +179,7 @@ void BindVolumetricFogVolume(RenderGraph::RGContext& ctx, RenderGraph::RGTexture
 // candidate set on occlusion-culled views.
 bool PropCensusEnabled()
 {
-    static const bool kEnabled = []
-    {
-        const char* v = std::getenv("GE_PROP_CENSUS");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
+    static const bool kEnabled = Platform::EnvironmentSwitchEnabled("GE_PROP_CENSUS", false);
     return kEnabled;
 }
 
@@ -399,6 +395,10 @@ ResolvedPassResources RenderServices::BuildPassResourcesRG(
                 { add(HashStringId(name), b.Buffer, b.Offset, b.Size); });
         }
     }
+
+    if (vfr && vfr->DirectionalShadowData.Valid())
+        add(HashStringId("ShadowData"), vfr->DirectionalShadowData.Buffer,
+            vfr->DirectionalShadowData.Offset, sizeof(ShadowDataGPU));
 
     if (const auto materialParams = m_MaterialSystem.PackedMaterialParams();
         materialParams.Buffer.IsValid())
@@ -660,7 +660,9 @@ ResolvedPassResources RenderServices::BuildPassResourcesRG(
 
         if (feature && feature->IsInitialized())
         {
-            auto momentsTex = feature->GetMsmMomentsTextureForBinding(viewId);
+            auto momentsTex = vfr && vfr->MsmMoments.IsValid()
+                ? frame.PhysicalTexture(vfr->MsmMoments)
+                : feature->GetMsmMomentsTextureForBinding(viewId);
             auto momentsSampler = feature->GetMsmSampler();
             if (momentsTex.IsValid() && momentsSampler.IsValid())
                 addTexture(kShadowMomentsName, momentsTex, momentsSampler);
@@ -734,13 +736,53 @@ ResolvedPassResources RenderServices::BuildPassResourcesRG(
             // be a SEPARATE buffer, not a re-upload — the last upload would win
             // for all passes. The cubes still bind to satisfy the descriptor
             // layout; iblIntensity 0 zeroes their contribution.
+            const auto* iblView = m_ViewRegistry.FindViewDesc(viewId);
+            const uint64_t probeWorld = iblView && !ibl->IsLocalProbeCaptureView(viewId) ? iblView->worldId : 0;
             const BufferHandle envData = m_WorldPassExcludeEnvironment
                                              ? m_FallbackBuffers[HashStringId("Env")]
-                                             : ibl->UploadEnvData(m_Device);
+                                             : ibl->UploadEnvData(m_Device, probeWorld);
 
             addTexture(HashStringId("ge_irradianceCube"), ibl->GetIrradianceCube(), ibl->GetCubeSampler());
             addTexture(HashStringId("ge_prefilterCube"), ibl->GetPrefilterCube(), ibl->GetCubeSampler());
             addTexture(HashStringId("ge_brdfLUT"), ibl->GetBrdfLut(), ibl->GetLutSampler());
+            for (uint32_t i = 0; i < ImageBasedLightingFeature::kMaxLocalProbes; ++i)
+            {
+                addTexture(HashStringId(ImageBasedLightingFeature::kLocalIrradianceNames[i]),
+                           ibl->GetLocalIrradiance(probeWorld, i), ibl->GetCubeSampler());
+                addTexture(HashStringId(ImageBasedLightingFeature::kLocalPrefilterNames[i]),
+                           ibl->GetLocalPrefilter(probeWorld, i), ibl->GetCubeSampler());
+            }
+            // Bindings and graph dependencies share this path for entity draws
+            // and custom contributors, including views containing only contributors.
+            auto& iblVfr = ViewFrameRGFor(frame, viewId);
+            if (!iblVfr.IblIrradiance.IsValid())
+            {
+                iblVfr.IblIrradiance = frame.ImportExternalTexture(
+                    "IBL_Irradiance", ibl->GetIrradianceCube(), Rendering::ResourceState::ShaderResource,
+                    Rendering::TextureFormat::R16G16B16A16_FLOAT, 1,
+                    ImageBasedLightingFeature::kNumCaptureFaces);
+                iblVfr.IblPrefilter = frame.ImportExternalTexture(
+                    "IBL_Prefilter", ibl->GetPrefilterCube(), Rendering::ResourceState::ShaderResource,
+                    Rendering::TextureFormat::R16G16B16A16_FLOAT, ibl->GetPrefilterMipCount(),
+                    ImageBasedLightingFeature::kNumCaptureFaces);
+                iblVfr.IblBrdfLut = frame.ImportExternalTexture(
+                    "IBL_BrdfLut", ibl->GetBrdfLut(), Rendering::ResourceState::ShaderResource,
+                    Rendering::TextureFormat{}, 1, 1);
+                for (uint32_t i = 0; i < ImageBasedLightingFeature::kMaxLocalProbes; ++i)
+                {
+                    const auto* capture = ibl->GetLocalProbeCapture(probeWorld, i);
+                    if (!capture || !capture->IsInitialized())
+                        continue;
+                    iblVfr.IblLocalIrradiance[i] = frame.ImportExternalTexture(
+                        ImageBasedLightingFeature::kLocalIrradianceNames[i], capture->GetIrradianceCube(),
+                        Rendering::ResourceState::ShaderResource, Rendering::TextureFormat::R16G16B16A16_FLOAT,
+                        1, ImageBasedLightingFeature::kNumCaptureFaces);
+                    iblVfr.IblLocalPrefilter[i] = frame.ImportExternalTexture(
+                        ImageBasedLightingFeature::kLocalPrefilterNames[i], capture->GetPrefilterCube(),
+                        Rendering::ResourceState::ShaderResource, Rendering::TextureFormat::R16G16B16A16_FLOAT,
+                        capture->GetPrefilterMipCount(), ImageBasedLightingFeature::kNumCaptureFaces);
+                }
+            }
             // Compat-profile spellings: ibl.glsl's compat arm declares the trio
             // as separate images over one standalone sampler (WebGPU's
             // per-stage sampler budget). Registered unconditionally — the
@@ -960,6 +1002,195 @@ RenderServices::WorldPassRG RenderServices::AddWorldColorRecoverPassForView(
                             Rendering::GPUDrawStreamBuilder::kCascadeIndexNone);
 }
 
+namespace
+{
+std::string MakeWorldPassName(const ViewDesc* view, ViewId viewId, uint8_t sliceCascadeIndex,
+                              RenderServices::WorldPassDrawScope scope, bool isRecover)
+{
+    std::string passName = "RenderEntities[";
+    if (view->debugName && view->debugName[0] != '\0')
+        passName += view->debugName;
+    else
+        passName += "View";
+    passName += "#";
+    passName += std::to_string(static_cast<uint32_t>(viewId));
+    passName += "]";
+    if (sliceCascadeIndex != Rendering::GPUDrawStreamBuilder::kCascadeIndexNone)
+        passName += ".Slice" + std::to_string(static_cast<uint32_t>(sliceCascadeIndex));
+    if (scope == RenderServices::WorldPassDrawScope::TransmissiveOnly)
+        passName = "Transmissive" + passName;
+    if (isRecover)
+        passName += "B";
+    return passName;
+}
+
+void SetWorldPassViewport(Rendering::CommandList* cl, uint32_t viewportW, uint32_t viewportH,
+                          const ViewLetterbox& letterbox, bool flipViewportY)
+{
+    if (viewportW != 0 && viewportH != 0)
+    {
+        if (letterbox.active)
+        {
+            cl->SetViewport(static_cast<float>(letterbox.x),
+                            static_cast<float>(letterbox.y),
+                            static_cast<float>(letterbox.width),
+                            static_cast<float>(letterbox.height));
+            cl->SetScissor(letterbox.x, letterbox.y, letterbox.width, letterbox.height);
+        }
+        else if (flipViewportY)
+        {
+            // Flipped-height viewport (origin at the bottom): inverts the
+            // rasterized winding on both backends so the mirror view's
+            // geometry isn't back-face culled. Matches the shadow-debug
+            // overlay's y-flip form.
+            cl->SetViewport(0.0f, static_cast<float>(viewportH),
+                            static_cast<float>(viewportW), -static_cast<float>(viewportH));
+            cl->SetScissor(0, 0, viewportW, viewportH);
+        }
+        else
+        {
+            cl->SetViewport(0.0f, 0.0f, static_cast<float>(viewportW),
+                            static_cast<float>(viewportH));
+            cl->SetScissor(0, 0, viewportW, viewportH);
+        }
+    }
+}
+} // namespace
+
+// Declaration-time identity of one world colour pass, shared by the
+// AddWorldPassImpl phases.
+struct RenderServices::WorldPassDeclaration
+{
+    RenderGraph::RGFrame& Frame;
+    ViewId ViewId;
+    const ViewDesc* View;
+    const WorldPassTargetsRG& Targets;
+    WorldPassDrawScope Scope;
+    bool IsRecover;
+    ViewFrameRG& Vfr;
+};
+
+// Load/clear/resolve decisions for the world pass's attachments.
+struct RenderServices::WorldPassAttachmentPlan
+{
+    bool SuppressDepthClear = false;
+    bool NeedsClear = false;
+    bool DepthReadOnly = false;
+    bool ColorAlreadyInit = false;
+    bool CanResolveColor = false;
+    bool CollapseToResolve = false;
+    // Where a parallax material's colour draw finds the relief depth, and
+    // whether the pass samples the prepass depth for it.
+    ReliefDepthSource ReliefDepth = ReliefDepthSource::NoPrepass;
+    bool ReadsReliefDepth = false;
+};
+
+// What the world pass's exec closure captures.
+struct RenderServices::WorldPassExecData
+{
+    ViewId ViewId;
+    MaterialKeyword PassKeywords;
+    ReliefDepthSource ReliefDepth;
+    WorldPassDrawScope Scope;
+    uint32_t ViewportW;
+    uint32_t ViewportH;
+    ViewLetterbox Letterbox;
+    bool FlipViewportY;
+    Rendering::GPUDrawStreamBuilder::SlicePhase Phase;
+    uint8_t SliceCascadeIndex;
+    std::vector<DrawCommand> FwdCommands;
+    // ge_prepassDepth is the depth attachment itself, which a multisampled view
+    // allocates per frame: resolved to its physical texture at record time.
+    RenderGraph::RGTexture PrepassDepth;
+    SamplerHandle PrepassDepthSampler;
+    RenderGraph::RGTexture VolumetricFog;
+    SamplerHandle VolumetricFogSampler;
+    ResolvedPassResources Resources;
+};
+
+// Exec-time state of one world colour pass while it records.
+struct RenderServices::WorldPassRecordState
+{
+    RenderGraph::RGContext& Ctx;
+    Rendering::CommandList* Cl;
+    ViewId ViewId;
+    MaterialKeyword PassKeywords;
+    ReliefDepthSource ReliefDepth;
+    WorldPassDrawScope Scope;
+    Rendering::GPUDrawStreamBuilder::SlicePhase Phase;
+    uint8_t SliceCascadeIndex;
+    const Rendering::MeshGPURegistry& MeshRegistry;
+    uint64_t InstGpuInstancesAddr;
+    MaterialBinder& Binder;
+    PassBindingContext& Pass;
+    // The compat instance list's size when the pass's resources were resolved;
+    // the compat recorder asserts the list was not rebuilt since.
+    uint64_t UploadedCompatListBytes = 0;
+    // Draw consolidation: the pass's pool-group span (empty when off) and the
+    // (classKey, pool group) draws already attempted this pass.
+    std::span<const uint32_t> MeshGroups;
+    std::unordered_set<uint64_t> DrawnGroups;
+
+    // Scratch push-constant storage referenced by each iteration's
+    // DrawBindings.PushConstants span — stable for the whole bind call.
+    ComposedPCInstanced PcInst{};
+    // GE_DRAW_ATTRIBUTION: indirect-count draws this pass issued
+    // (the headline consolidation number; per-group when active).
+    uint32_t AttribDrawsIssued = 0;
+    // Per-pass VB/IB sticky trackers (slots 0-5 cached; higher slots
+    // always rebind — preserved quirk from the old arm).
+    static constexpr uint32_t kCachedVertexSlots = 6;
+    Rendering::BufferHandle BoundVbSlot[kCachedVertexSlots]{};
+    Rendering::BufferHandle BoundIb{};
+    Rendering::IndexType BoundIbType = Rendering::IndexType::Uint16;
+    bool BoundIbInit = false;
+
+    void SetVertexBufferSticky(Rendering::BufferHandle want, uint32_t slot)
+    {
+        if (want.IsValid() && (slot >= kCachedVertexSlots || BoundVbSlot[slot] != want))
+        {
+            Cl->SetVertexBuffer(want, slot);
+            if (slot < kCachedVertexSlots) BoundVbSlot[slot] = want;
+        }
+    }
+    void SetIndexBufferSticky(Rendering::BufferHandle want, Rendering::IndexType type)
+    {
+        if (want.IsValid() && (!BoundIbInit || BoundIb != want || BoundIbType != type))
+        {
+            Cl->SetIndexBuffer(want, type);
+            BoundIb = want;
+            BoundIbType = type;
+            BoundIbInit = true;
+        }
+    }
+    // A registry mesh's vertex streams at their fixed slots plus its index buffer.
+    void BindMeshBuffersSticky(const Rendering::MeshGPUEntryBindings& bindings, Rendering::IndexType indexType)
+    {
+        SetVertexBufferSticky(bindings.coreVB,    0);
+        SetVertexBufferSticky(bindings.tangentVB, 1);
+        SetVertexBufferSticky(bindings.colorVB,   2);
+        SetVertexBufferSticky(bindings.uv1VB,     3);
+        SetVertexBufferSticky(bindings.jointsVB,  4);
+        SetVertexBufferSticky(bindings.weightsVB, 5);
+        SetVertexBufferSticky(bindings.joints1VB,  6);
+        SetVertexBufferSticky(bindings.weights1VB, 7);
+        for (uint32_t i = 0; i < bindings.extraUvVB.size(); ++i)
+            SetVertexBufferSticky(bindings.extraUvVB[i], 8u + i);
+        SetIndexBufferSticky(bindings.indexBuffer, indexType);
+    }
+};
+
+// One entity batch's resolved draw inputs.
+struct RenderServices::WorldEntityBatch
+{
+    const WorldDrawBuilder::BatchKey& Key;
+    const Material* BatchMaterial;
+    const Rendering::MeshGPUEntry* Entry;
+    const Rendering::MeshGPUEntryBindings& EntryBindings;
+    Rendering::VertexAttributeFlags EffectiveFlags;
+    MaterialKeyword EntityKeywords;
+};
+
 RenderServices::WorldPassRG RenderServices::AddWorldPassImpl(
     Rendering::RenderGraph::RGFrame& frame, ViewId viewId,
     const WorldPassTargetsRG& targets, MaterialKeyword passKeywords, WorldPassDrawScope scope,
@@ -975,51 +1206,14 @@ RenderServices::WorldPassRG RenderServices::AddWorldPassImpl(
 
     WorldPassRG result{};
 
-    const ViewDesc* view = nullptr;
-    for (const auto& v : m_ViewRegistry.GetViews())
-    {
-        if (v.id == viewId)
-        {
-            view = &v;
-            break;
-        }
-    }
+    const ViewDesc* view = m_ViewRegistry.FindViewDesc(viewId);
     if (!view)
         return result;
 
-    // The old activation predicate, evaluated at declaration: not declared =
-    // not compiled. (The render-layer/external-request term is the
-    // slice-4 spine's job — calling this function IS the request.)
-    const bool hasTargets = targets.Color.IsValid() || targets.Depth.IsValid();
-    // The recover pass never activates just to clear (it always loads) — it only
-    // runs when there is phase-B geometry to draw.
-    const bool anyClearRequested =
-        !isRecover && (view->targets.clearColor || view->targets.clearDepth ||
-                       view->targets.clearStencil);
-    // Phase B only recovers GPU-cullable entity batches. Explicit forward
-    // contributors (terrain, grass, ocean, fog) are not part of the HZB
-    // scatter and were already drawn in phase A; draining them here draws the
-    // entire contributor a second time.
-    const bool hasForwardContributors = !isRecover && HasForwardCommands(viewId);
-    if (!hasTargets ||
-        (!anyClearRequested && m_WorldDrawBuilder.GetBatchKeys(viewId).empty() &&
-         !hasForwardContributors))
+    if (!WorldPassHasWork(viewId, view, targets, isRecover))
         return result;
 
-    std::string passName = "RenderEntities[";
-    if (view->debugName && view->debugName[0] != '\0')
-        passName += view->debugName;
-    else
-        passName += "View";
-    passName += "#";
-    passName += std::to_string(static_cast<uint32_t>(viewId));
-    passName += "]";
-    if (sliceCascadeIndex != Rendering::GPUDrawStreamBuilder::kCascadeIndexNone)
-        passName += ".Slice" + std::to_string(static_cast<uint32_t>(sliceCascadeIndex));
-    if (scope == WorldPassDrawScope::TransmissiveOnly)
-        passName = "Transmissive" + passName;
-    if (isRecover)
-        passName += "B";
+    const std::string passName = MakeWorldPassName(view, viewId, sliceCascadeIndex, scope, isRecover);
 
     // Shadow array: CONSUME-only — the SAME resource id the cascade arm
     // imported and attached earlier this frame (contract order), so the Read
@@ -1034,52 +1228,8 @@ RenderServices::WorldPassRG RenderServices::AddWorldPassImpl(
     auto& vfr = ViewFrameRGFor(frame, viewId);
     const RenderGraph::RGTexture shadowArr =
         (wantsShadows && vfr.ShadowMapArray.IsValid()) ? vfr.ShadowMapArray : RenderGraph::RGTexture{};
-
-    // MSM moments: dedup FALLBACK import (feature-owned physical). On MSM4
-    // frames the producer node (ShadowMapNode) owns the import and
-    // handle-dedup lands both sites on one id (RGFrame FindImport) — this arm
-    // only creates the resource when the producer declared nothing this frame
-    // (PCSS frames: nothing writes, so declared ShaderResource is truthful).
-    // On producer frames the world's all-layer Sampled read below is the edge
-    // that homogenizes written layers back to ShaderReadOnly.
-    if (auto* feature = GetFeature<ShadowMapRenderFeature>();
-        wantsShadows && feature && feature->IsInitialized() && !vfr.MsmMoments.IsValid())
-    {
-        if (auto momentsTex = feature->GetMsmMomentsTexture(viewId); momentsTex.IsValid())
-        {
-            const auto& cfg = feature->GetConfig();
-            const std::string momentsName =
-                "MsmMoments.View" + std::to_string(static_cast<uint32_t>(viewId));
-            vfr.MsmMoments = frame.ImportExternalTexture(
-                momentsName.c_str(), momentsTex, Rendering::ResourceState::ShaderResource,
-                Rendering::TextureFormat::R16G16B16A16_UNORM, 1, cfg.NumCascades);
-        }
-    }
-
-    // IBL bake outputs: import the engine-shared cubes the keyword-IBL world draw
-    // samples. Dedup-by-handle lands these on the SAME ids the IBLGen bake's writes
-    // produced, so the setup-lambda Read below forms the bake->world
-    // StorageWrite->Sampled edge and orders the bake before this view's world pass.
-    // Imported here even on PCSS/keyword-less-IBL? No — only when IBL is requested,
-    // mirroring the binding gate in BuildPassResourcesRG.
-    if (Rendering::HasKeyword(passKeywords, Rendering::MaterialKeyword::IBL))
-    {
-        if (auto* ibl = GetFeature<ImageBasedLightingFeature>();
-            ibl && ibl->IsInitialized() && !vfr.IblIrradiance.IsValid())
-        {
-            vfr.IblIrradiance = frame.ImportExternalTexture(
-                "IBL_Irradiance", ibl->GetIrradianceCube(), Rendering::ResourceState::ShaderResource,
-                Rendering::TextureFormat::R16G16B16A16_FLOAT, 1,
-                ImageBasedLightingFeature::kNumCaptureFaces);
-            vfr.IblPrefilter = frame.ImportExternalTexture(
-                "IBL_Prefilter", ibl->GetPrefilterCube(), Rendering::ResourceState::ShaderResource,
-                Rendering::TextureFormat::R16G16B16A16_FLOAT, ibl->GetPrefilterMipCount(),
-                ImageBasedLightingFeature::kNumCaptureFaces);
-            vfr.IblBrdfLut = frame.ImportExternalTexture(
-                "IBL_BrdfLut", ibl->GetBrdfLut(), Rendering::ResourceState::ShaderResource,
-                Rendering::TextureFormat{}, 1, 1);
-        }
-    }
+    const WorldPassDeclaration decl{frame, viewId, view, targets, scope, isRecover, vfr};
+    ImportWorldPassSampledInputs(decl, passKeywords, wantsShadows);
 
     // Phase A arms the misorder tripwire (producers after this point derive
     // WAR). The recover pass LEGITIMATELY follows the phase-A raster, so it must
@@ -1087,126 +1237,21 @@ RenderServices::WorldPassRG RenderServices::AddWorldPassImpl(
     if (!isRecover)
         vfr.WorldDeclared = true;
 
-    // Depth-clear suppression + read-only depth: the RenderGraph prepass is declared
-    // only when it runs and always clears, so the old prepassWillExecute
-    // dance collapses to the per-frame record. Texture IDENTITY, not a bool:
-    // a prepass that ran on an override depth didn't write THIS depth, and
-    // suppressing the clear would depth-test against stale content.
-    const bool hasDepthPrepass = vfr.DepthPrepassDepth.IsValid() && targets.Depth.IsValid() &&
-                                 vfr.DepthPrepassDepth.Id == targets.Depth.Id;
-    // Recover always loads the phase-A depth (the phase-B depth recover already
-    // wrote newly-revealed fragments into it) — never clears.
-    //
-    // The transmissive pass composites over an already-rasterized opaque scene and attaches that
-    // scene's depth read-only: clearing it would both discard depth later passes still read and
-    // leave the glass testing against a cleared buffer. Independent of the prepass, whose absence
-    // would otherwise let the view's clearDepth through on a pass that only ever loads.
-    const bool suppressDepthClear =
-        hasDepthPrepass || isRecover || scope == WorldPassDrawScope::TransmissiveOnly;
-    const bool needsClear = view->targets.clearColor ||
-                            (view->targets.clearDepth && !suppressDepthClear) ||
-                            view->targets.clearStencil;
-    const auto entityBatchKeys = m_WorldDrawBuilder.GetBatchKeys(viewId);
+    const WorldPassAttachmentPlan attachments = PlanWorldPassAttachments(decl);
+    result.EffectiveColor = (attachments.CanResolveColor || attachments.CollapseToResolve) ? targets.Resolve
+                                                                                           : targets.Color;
 
-    // The prepass wrote this view's opaque depth, Mask coverage included (its alpha-tested heads run
-    // the colour pass's own cutoff), and the depth of every forward draw whose producer emitted its
-    // head there (ForwardDrawDepth::Prepass, or PrepassNonOccluding through the non-occluding prepass
-    // after DepthResolve), so the world pass only tests against it. A forward
-    // draw that writes its own depth (ForwardDrawDepth::ColourPass) keeps it writable.
-    const ViewRegistry::PerViewResources* forwardView = m_ViewRegistry.FindPerView(viewId);
-    bool depthReadOnly =
-        hasDepthPrepass && !(forwardView && forwardView->ForwardDrawsWritingDepth != 0u);
-    // The transmissive pass never writes depth: glass composites over the lit opaque scene
-    // and only depth-tests (ReadOnly) against the opaque depth — single-layer, order-independent.
-    if (scope == WorldPassDrawScope::TransmissiveOnly)
-        depthReadOnly = true;
-
-    // A parallax material's colour draw reads the relief depth the prepass wrote, from the depth it
-    // attaches read-only (ge_prepassDepth), and rebuilds the hit instead of marching again. The read is
-    // declared only when a parallax material is in view.
-    const ReliefDepthSource reliefDepthSource = WorldPassReliefDepthSource(
-        hasDepthPrepass, depthReadOnly && scope != WorldPassDrawScope::TransmissiveOnly,
-        targets.Depth.IsValid() ? frame.Graph().ResourceDesc(targets.Depth.Id).SampleCount : 1u);
-    const bool readsReliefDepth =
-        (reliefDepthSource == ReliefDepthSource::PrepassReadable ||
-         reliefDepthSource == ReliefDepthSource::PrepassReadableMultisample) &&
-        std::any_of(entityBatchKeys.begin(), entityBatchKeys.end(),
-                    [](const WorldDrawBuilder::BatchKey& key)
-                    { return key.material && WritesReliefDepth(key.material->GetVariantKey().materialKeywords); });
-
-    // Recover loads the phase-A colour (additive) — treat it as already
-    // initialized so the attach below takes the Load branch, never Clear.
-    const bool colorAlreadyInit =
-        isRecover || m_ViewRegistry.IsViewColorInitialized(viewId) || m_ViewRegistry.IsViewSkyBackdropScheduled(viewId);
-
-    // MSAA resolve three-way, decided from declared descs (old: TryGetTextureDesc).
-    bool canResolveColor = false;
-    bool collapseToResolve = false;
-    if (targets.Color.IsValid() && targets.Resolve.IsValid() &&
-        targets.Resolve.Id != targets.Color.Id)
-    {
-        const auto& colorDesc = frame.Graph().ResourceDesc(targets.Color.Id);
-        const auto& resolveDesc = frame.Graph().ResourceDesc(targets.Resolve.Id);
-        if (resolveDesc.SampleCount == 1u)
-        {
-            if (colorDesc.SampleCount > 1u)
-            {
-                // Resolve requires matching formats (VUID 06865); a mismatch
-                // means the resolve target is wrong for this color — render
-                // to the MSAA color only rather than emit an invalid resolve.
-                if (colorDesc.Format == resolveDesc.Format)
-                    canResolveColor = true;
-                else
-                {
-                    static std::atomic<int> sFmtWarnBudget{8};
-                    if (sFmtWarnBudget.fetch_sub(1, std::memory_order_relaxed) > 0)
-                        Logger::Log::Warning(
-                            "RenderServices WorldView.Color (RenderGraph): skipping MSAA resolve -- "
-                            "color fmt {} vs resolve fmt {}",
-                            colorDesc.Format, resolveDesc.Format);
-                }
-            }
-            else if (targets.ResolveFromPipeline)
-            {
-                // MSAA off: render straight into the pipeline's resolve target
-                // so the post-FX chain never samples an uninitialized texture.
-                collapseToResolve = true;
-            }
-        }
-    }
-    result.EffectiveColor = (canResolveColor || collapseToResolve) ? targets.Resolve
-                                                                   : targets.Color;
-
-    // Viewport snapshot at declaration (old: exec-time GetTextureSize).
     uint32_t viewportW = 0;
     uint32_t viewportH = 0;
-    {
-        const RenderGraph::RGTexture vpTex = targets.Resolve.IsValid() ? targets.Resolve : targets.Color;
-        if (vpTex.IsValid())
-        {
-            const auto& d = frame.Graph().ResourceDesc(vpTex.Id);
-            viewportW = d.Width;
-            viewportH = d.Height;
-        }
-    }
-    // Publish the view's render-target height for the SSE-budget LOD scale
-    // (read at next frame's scatter registration; see PerViewResources).
-    if (viewportH != 0u)
-        m_ViewRegistry.PerView(viewId).WorldViewportHeight = viewportH;
-    // Publish the color attachment's sample count the same way (grass reads it
-    // at next frame's forward emit to pick alpha-to-coverage vs screen-door
-    // dither; one frame stale across an MSAA toggle, self-heals).
-    if (targets.Color.IsValid())
-        m_ViewRegistry.PerView(viewId).WorldColorSampleCount =
-            frame.Graph().ResourceDesc(targets.Color.Id).SampleCount;
-    // And the formats it draws with, for the forward producers that request a pipeline's build
+    ResolveWorldPassViewport(decl, viewportW, viewportH);
+    // The formats the pass draws with, for the forward producers that request a pipeline's build
     // at next frame's emit (PerViewResources::WorldColorFormatKey).
     if (!isRecover && scope == WorldPassDrawScope::All)
     {
         if (const std::optional<Rendering::PipelineFormatKey> fk =
-                WorldColorFormatKey(frame, targets, collapseToResolve))
+                WorldColorFormatKey(frame, targets, attachments.CollapseToResolve))
             m_ViewRegistry.PerView(viewId).WorldColorFormatKey = *fk;
-        m_ViewRegistry.PerView(viewId).WorldReliefDepthSource = reliefDepthSource;
+        m_ViewRegistry.PerView(viewId).WorldReliefDepthSource = attachments.ReliefDepth;
     }
 
     // Camera UBO: upload-ring alloc written NOW. Clear-only frames still get
@@ -1284,13 +1329,6 @@ RenderServices::WorldPassRG RenderServices::AddWorldPassImpl(
         BuildPassResourcesRG(frame, viewId, passKeywords, &targets, cam.Buffer, cam.Offset);
     const DDGIProbeFeature::GatherReadsRG ddgiReads =
         ImportDdgiGatherReads(frame, GetFeature<DDGIProbeFeature>(), passKeywords);
-    // ge_prepassDepth is the depth attachment itself, which a multisampled view allocates per frame:
-    // resolved to its physical texture at record time, below.
-    const RenderGraph::RGTexture prepassDepth = readsReliefDepth ? targets.Depth : RenderGraph::RGTexture{};
-    const SamplerHandle prepassDepthSampler = m_Textures->GetSampler(Rendering::SamplerPreset::PointClamp);
-    const RenderGraph::RGTexture volumetricFog =
-        HasKeyword(passKeywords, MaterialKeyword::VolumetricFog) ? targets.VolumetricFog : RenderGraph::RGTexture{};
-    const SamplerHandle volumetricFogSampler = m_Textures->GetSampler(Rendering::SamplerPreset::LinearClamp);
 
     // Snapshot the view's forward-contributor commands AT DECLARATION: the
     // stream is per view and REPLACED by every emit, so a second pass declared
@@ -1306,839 +1344,967 @@ RenderServices::WorldPassRG RenderServices::AddWorldPassImpl(
         forwardSnapshot.assign(emitted.begin(), emitted.end());
     }
 
+    WorldPassExecData execData{
+        viewId,
+        passKeywords,
+        attachments.ReliefDepth,
+        scope,
+        viewportW,
+        viewportH,
+        letterbox,
+        flipViewportY,
+        phase,
+        sliceCascadeIndex,
+        std::move(forwardSnapshot),
+        attachments.ReadsReliefDepth ? targets.Depth : RenderGraph::RGTexture{},
+        m_Textures->GetSampler(Rendering::SamplerPreset::PointClamp),
+        HasKeyword(passKeywords, MaterialKeyword::VolumetricFog) ? targets.VolumetricFog : RenderGraph::RGTexture{},
+        m_Textures->GetSampler(Rendering::SamplerPreset::LinearClamp),
+        std::move(resources)};
     result.Pass = frame.AddPass(
         passName.c_str(), Rendering::PassPhase::kWorldRender,
         [&](RenderGraph::RGPassBuilder& p)
         {
-            // A2.4-P0-R: the world/forward+ exec is self-contained — it sets its
-            // own viewport/scissor and binds per draw (CONC-F13), so its interior
-            // may record into a worker secondary under GE_PARALLEL_RECORD.
-            p.RecordInSecondary();
-            // Slice-3 contract reads. SkinPaletteAtlas is the compute→VS
-            // barrier (the VS binds it descriptor-direct, so only this
-            // declared read orders skinning). DrawStreamOrdering is the
-            // bucketer's ordering proxy: the Read must be recorded AFTER its
-            // Write or the edge derives WAR and draws consume frame N−1 slots.
-            if (m_FrameRG.For.IsFor(frame) && m_FrameRG.SkinPaletteAtlas.IsValid())
-                p.Read(m_FrameRG.SkinPaletteAtlas);
-            else if (m_GPUAnimDataStore.GetInstanceCount() != 0)
-                Logger::Log::Error(
-                    "[RenderGraph] AddWorldPassForView(view {}): skinned instances pending but no "
-                    "SkinPaletteAtlas value is published — declare "
-                    "ScheduleGpuSkinningAndRetarget(frame) BEFORE the world pass",
-                    viewId);
-            if (m_FrameRG.For.IsFor(frame) && m_FrameRG.DrawStreamOrdering.IsValid())
-                p.Read(m_FrameRG.DrawStreamOrdering, RenderGraph::RGBufferRead::Indirect);
-            else if (m_DrawStreamBuilder && m_DrawStreamBuilder->GetPendingSliceCount() != 0)
-                Logger::Log::Error(
-                    "[RenderGraph] AddWorldPassForView(view {}): buckets are registered but no "
-                    "DrawStreamOrdering value is published — declare "
-                    "ScheduleWorldBucketerDispatches(frame) BEFORE the world pass",
-                    viewId);
-
-            if (shadowArr.IsValid())
-                p.Read(shadowArr, RenderGraph::RGTextureRead::Sampled);
-            // PCSS min/max pyramid: the same compute->fragment edge as the RT
-            // mask below, and even more load-bearing — the PCSS early-out reads
-            // the pyramid through a BINDLESS index, so there is no by-name
-            // binding here at all and this read is the ONLY thing ordering the
-            // reduction dispatches before the draw that samples them. Whole
-            // resource (every mip, every cascade layer): the early-out picks its
-            // level per pixel. The pyramid is GENERAL-resident, so the barrier
-            // is a memory dependency, not a layout change.
-            if (wantsShadows && vfr.ShadowPcssPyramid.IsValid())
-                p.Read(vfr.ShadowPcssPyramid, RenderGraph::RGTextureRead::Sampled);
-            // Glass transmittance cascade: declare the sampled read so the RG inserts
-            // the RenderTarget->ShaderRead transition + orders the tint cascade writes
-            // before this world sample (the binding alone forms no producer->consumer edge).
-            if (vfr.TransmittanceShadowArray.IsValid())
-                p.Read(vfr.TransmittanceShadowArray, RenderGraph::RGTextureRead::Sampled);
-            if (vfr.MsmMoments.IsValid())
-                p.Read(vfr.MsmMoments, RenderGraph::RGTextureRead::Sampled);
-            // RT shadow-mask: the declared read forms the compute->fragment
-            // (StorageWrite->Sampled) edge that orders the ray-query mask pass
-            // before this draw — the by-name binding alone forms no edge.
-            if (vfr.RTShadowMask.IsValid())
-                p.Read(vfr.RTShadowMask, RenderGraph::RGTextureRead::Sampled);
-            if (vfr.ScreenSpaceShadowMask.IsValid())
-                p.Read(vfr.ScreenSpaceShadowMask, RenderGraph::RGTextureRead::Sampled);
-            if (vfr.AreaShadowMap.IsValid())
-                p.Read(vfr.AreaShadowMap, RenderGraph::RGTextureRead::Sampled);
-            if (vfr.SpotShadowMap.IsValid())
-                p.Read(vfr.SpotShadowMap, RenderGraph::RGTextureRead::Sampled);
-            if (vfr.PointShadowMap.IsValid())
-                p.Read(vfr.PointShadowMap, RenderGraph::RGTextureRead::Sampled);
-            // IBL bake -> world edge: these Reads land on the same ids the IBLGen
-            // bake's StorageWrites produced (dedup-by-handle), inserting the
-            // StorageWrite->Sampled barrier and ordering the bake before this draw.
-            if (vfr.IblIrradiance.IsValid())
-                p.Read(vfr.IblIrradiance, RenderGraph::RGTextureRead::Sampled);
-            if (vfr.IblPrefilter.IsValid())
-                p.Read(vfr.IblPrefilter, RenderGraph::RGTextureRead::Sampled);
-            if (vfr.IblBrdfLut.IsValid())
-                p.Read(vfr.IblBrdfLut, RenderGraph::RGTextureRead::Sampled);
-            // ge_gtao samples the AO node's storage-written output: this read is
-            // the compute->fragment RAW edge AND the General->ShaderReadOnly
-            // transition that matches the descriptor's SHADER_READ_ONLY claim
-            // (VUID-vkCmdDraw-None-09600 fired every frame without it — the
-            // by-name binding alone forms no edge). Gated exactly like the
-            // ge_gtao binding in BuildPassResourcesRG.
-            if (targets.GTAO.IsValid() && HasKeyword(passKeywords, MaterialKeyword::GTAO))
-                p.Read(targets.GTAO, RenderGraph::RGTextureRead::Sampled);
-            // ge_skyBackdrop and ge_volumetricFog: the sky-view LUT and the froxel volume are written
-            // by compute earlier in the frame; the by-name bindings alone form no edge.
-            DeclareForwardFogReads(p, targets, passKeywords);
-            // ge_ddgiResolveRough/Glossy sample the DDGI glossy-resolve
-            // compute outputs: same compute->fragment RAW edge + layout
-            // transition the ge_gtao read above provides, gated exactly like
-            // their bindings in BuildPassResourcesRG.
-            if (targets.DDGIResolveRough.IsValid() && targets.DDGIResolveGlossy.IsValid() &&
-                targets.DDGIResolveIrradiance.IsValid() &&
-                HasKeyword(passKeywords, MaterialKeyword::DDGI))
-            {
-                p.Read(targets.DDGIResolveRough, RenderGraph::RGTextureRead::Sampled);
-                p.Read(targets.DDGIResolveGlossy, RenderGraph::RGTextureRead::Sampled);
-                p.Read(targets.DDGIResolveIrradiance, RenderGraph::RGTextureRead::Sampled);
-            }
+            DeclareWorldPassContractReads(p, decl);
+            DeclareWorldPassSampledReads(p, decl, passKeywords, shadowArr, wantsShadows);
             DeclareDdgiGatherReads(p, ddgiReads);
-            // ge_sceneColor samples the transmission grab: the read is the
-            // copy->draw RAW edge the grab's contract requires (SceneColorGrab.h)
-            // — without it ordering rides only the scheduler's declaration-order
-            // tie-break. Gated exactly like the ge_sceneColor binding.
-            if (targets.SceneGrab.IsValid() &&
-                HasKeyword(passKeywords, MaterialKeyword::SceneColorGrab))
-                p.Read(targets.SceneGrab, RenderGraph::RGTextureRead::Sampled);
-            // Producer-emitted forward draws that sample render-graph textures
-            // descriptor-direct registered their imports at emit time
-            // (EmitForwardSampledRead — ocean cascades in probe-face captures).
-            // Declaring them here orders the writing sim before this draw and
-            // restores ShaderReadOnly; without it the draw samples the sim's
-            // Storage-state output (the export batch only lands at end of
-            // frame). SampledVertex: emitted draws can displace vertices. The
-            // stamp check matches the emit's import frame (RGTexture ids are
-            // frame-local; a foreign frame must not consume them).
-            {
-                const auto& pvRes = m_ViewRegistry.PerView(viewId);
-                if (pvRes.ForwardSampledFor.IsFor(frame))
-                {
-                    for (const auto& texture : pvRes.ForwardSampledRG)
-                    {
-                        if (texture.IsValid())
-                            p.Read(texture, RenderGraph::RGTextureRead::SampledVertex);
-                    }
-                }
-                // Buffers a GPU-driven node reads as indirect args / index /
-                // vertex-stage SSBOs (CBT terrain, terrain grass). Each carries
-                // its access so the arg buffer gets an Indirect edge (not
-                // Storage), ordering the producing compute pass before the draw,
-                // and its own import frame, since nodes emit from the frame they
-                // declare in.
-                for (const auto& bufferRead : pvRes.ForwardSampledBufferRG)
-                {
-                    if (bufferRead.For.IsFor(frame) && bufferRead.Buffer.IsValid())
-                        p.Read(bufferRead.Buffer, bufferRead.Access);
-                }
-            }
-            // ge_sceneDepth samples the resolved depth when it is a DISTINCT
-            // texture — that read needs its own edge (the AttachDepth below
-            // covers only targets.Depth).
-            if (targets.DepthResolved.IsValid() && targets.DepthResolved.Id != targets.Depth.Id)
-                p.Read(targets.DepthResolved, RenderGraph::RGTextureRead::Sampled);
-            // ge_prepassDepth samples the depth attachment itself, attached read-only: the sampled read
-            // and the read-only attach meet in the DepthReadOnly layout, and the read orders the
-            // fragment stage after the prepass's write.
-            if (readsReliefDepth)
+            // ge_prepassDepth samples the depth attachment itself, attached read-only: the sampled
+            // read and the read-only attach meet in the DepthReadOnly layout, and the read orders
+            // the fragment stage after the prepass's write.
+            if (attachments.ReadsReliefDepth)
                 p.Read(targets.Depth, RenderGraph::RGTextureRead::Sampled);
-            // Precise pipeline-buffer reads (the old arm's blanket
-            // ReadBuffer-over-everything): only Graph-valid entries — the
-            // device-local pool imports (ClusterBuffer, LightIndexBuffer)
-            // whose compute writers must order before this pass. Upload
-            // allocs are host-coherent and get no edge.
-            if (auto* instance = m_FrameOrchestrator.PipelineInstanceForFrame(frame))
-            {
-                if (const auto* fr = instance->FrameResourcesFor(&frame))
-                {
-                    fr->ForEachBufferBinding(
-                        viewId,
-                        [&](const std::string&, const Pipeline::PipelineBufferBindingRG& b)
-                        {
-                            if (b.Graph.IsValid())
-                                p.Read(b.Graph, RenderGraph::RGBufferRead::Storage);
-                        });
-                }
-            }
-            // Local shadow data UBOs are upload-ring allocs (host-coherent): no
-            // declaration needed.
-
-            if (targets.Color.IsValid())
-            {
-                RenderGraph::RGAttachmentOps col{};
-                if (view->targets.clearColor && !colorAlreadyInit &&
-                    scope != WorldPassDrawScope::TransmissiveOnly)
-                {
-                    col.Load = RenderGraph::RGLoadOp::Clear;
-                    col.Clear.Color[0] = view->targets.clearColorValue[0];
-                    col.Clear.Color[1] = view->targets.clearColorValue[1];
-                    col.Clear.Color[2] = view->targets.clearColorValue[2];
-                    col.Clear.Color[3] = view->targets.clearColorValue[3];
-                }
-                else
-                {
-                    col.Load = RenderGraph::RGLoadOp::Load;
-                }
-                col.Store = RenderGraph::RGStoreOp::Store;
-
-                if (canResolveColor)
-                    p.AttachColorResolve(0, targets.Color, targets.Resolve, col);
-                else if (collapseToResolve)
-                    p.AttachColor(0, targets.Resolve, col, targets.ColorRange);
-                else
-                    p.AttachColor(0, targets.Color, col, targets.ColorRange);
-            }
-            // Feature-owned MRT slices, attached verbatim: formats, clears and
-            // locations belong to the contributing provider.
-            for (uint32_t i = 0; i < targets.ExtraColorCount; ++i)
-            {
-                const auto& extra = targets.ExtraColor[i];
-                if (!extra.Texture.IsValid())
-                    continue;
-                if (extra.Resolve.IsValid())
-                    p.AttachColorResolve(extra.Location, extra.Texture, extra.Resolve, extra.Ops);
-                else
-                    p.AttachColor(extra.Location, extra.Texture, extra.Ops);
-            }
-            if (targets.Depth.IsValid())
-            {
-                RenderGraph::RGAttachmentOps dops{};
-                const bool clearDepthNow =
-                    needsClear && view->targets.clearDepth && !suppressDepthClear;
-                dops.Load = clearDepthNow ? RenderGraph::RGLoadOp::Clear : RenderGraph::RGLoadOp::Load;
-                dops.Store = RenderGraph::RGStoreOp::Store;
-                if (clearDepthNow)
-                    dops.Clear.Depth = view->targets.clearDepthValue;
-                // No stencil clear plumbing: D32 depth targets carry no stencil
-                // aspect. The recorder derives the stencil ops from the depth
-                // attach — load DontCare, store None when read-only else DontCare.
-                // dops.Store is likewise advisory: a ReadOnly attach records None.
-                p.AttachDepth(targets.Depth, dops,
-                              depthReadOnly ? RenderGraph::RGDepthAccess::ReadOnly
-                                            : RenderGraph::RGDepthAccess::ReadWrite,
-                              targets.DepthRange);
-            }
+            DeclareWorldPassBufferReads(p, decl);
+            AttachWorldPassTargets(p, decl, attachments);
         },
-        [this, viewId, passKeywords, reliefDepthSource, scope, viewportW, viewportH, letterbox, flipViewportY, phase,
-         sliceCascadeIndex, fwdCommands = std::move(forwardSnapshot),
-         prepassDepth, prepassDepthSampler, volumetricFog, volumetricFogSampler,
-         res = std::move(resources)](RenderGraph::RGContext& ctx) mutable
-        {
-            auto* cl = ctx.Cmd;
-            if (!cl)
-                return;
-
-            if (viewportW != 0 && viewportH != 0)
-            {
-                if (letterbox.active)
-                {
-                    cl->SetViewport(static_cast<float>(letterbox.x),
-                                    static_cast<float>(letterbox.y),
-                                    static_cast<float>(letterbox.width),
-                                    static_cast<float>(letterbox.height));
-                    cl->SetScissor(letterbox.x, letterbox.y, letterbox.width, letterbox.height);
-                }
-                else if (flipViewportY)
-                {
-                    // Flipped-height viewport (origin at the bottom): inverts the
-                    // rasterized winding on both backends so the mirror view's
-                    // geometry isn't back-face culled. Matches the shadow-debug
-                    // overlay's y-flip form.
-                    cl->SetViewport(0.0f, static_cast<float>(viewportH),
-                                    static_cast<float>(viewportW), -static_cast<float>(viewportH));
-                    cl->SetScissor(0, 0, viewportW, viewportH);
-                }
-                else
-                {
-                    cl->SetViewport(0.0f, 0.0f, static_cast<float>(viewportW),
-                                    static_cast<float>(viewportH));
-                    cl->SetScissor(0, 0, viewportW, viewportH);
-                }
-            }
-
-            auto entityKeys = m_WorldDrawBuilder.GetBatchKeys(viewId);
-            LogMeshPassDiagnostic(
-                "color", "pass-enter", viewId,
-                entityKeys.size(), fwdCommands.size(),
-                m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-            // Entity-draw guard: contributors always dispatch when present
-            // (they share targets/viewport but record their own pipelines) —
-            // the regression the contributor-dispatch test pins.
-            const bool runEntityDraws = !entityKeys.empty();
-            const bool hasAnyDraws = runEntityDraws || !fwdCommands.empty();
-            if (!hasAnyDraws)
-            {
-                LogMeshPassDiagnostic(
-                    "color", "pass-no-draws", viewId,
-                    entityKeys.size(), fwdCommands.size(),
-                    m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                return;
-            }
-
-            GPUScene* gpuScene = GetGPUScene();
-            const auto& meshRegistry = GetMeshGPURegistry();
-
-            uint64_t instGpuInstancesAddr = 0;
-            if (m_Device && gpuScene && gpuScene->GetInstanceBuffer().IsValid())
-                instGpuInstancesAddr =
-                    m_Device->GetBufferDeviceAddress(gpuScene->GetInstanceBuffer());
-
-            auto& binder = Materials().Binder();
-            // The camera UBO rides a per-pass descriptor set the binder caches
-            // per (view, keywords, layout, passInstanceIndex) for a whole
-            // frame. A reflection probe bakes six cube faces as six passes of
-            // ONE view, each uploading its own face camera, so the slice and
-            // phase must discriminate the key — otherwise every face binds the
-            // first face's camera.
-            if (prepassDepth.IsValid())
-            {
-                if (const TextureHandle depth = ctx.GetTexture(prepassDepth); depth.IsValid())
-                    res.Textures.push_back({HashStringId("ge_prepassDepth"), depth, prepassDepthSampler});
-            }
-            BindVolumetricFogVolume(ctx, volumetricFog, volumetricFogSampler, res);
-            [[maybe_unused]] const uint64_t uploadedCompatListBytes = UploadedCompatInstanceListBytes(res);
-            auto pass = binder.BeginPass(*cl, viewId, ctx, passKeywords, std::move(res),
-                                         WorldPassInstanceIndex(sliceCascadeIndex, phase));
-
-            // Scratch push-constant storage referenced by each iteration's
-            // DrawBindings.PushConstants span — stable for the whole bind call.
-            ComposedPCInstanced pcInst{};
-
-            // GE_DRAW_ATTRIBUTION: indirect-count draws this pass issued
-            // (the headline consolidation number; per-group when active).
-            uint32_t attribDrawsIssued = 0;
-
-            // Per-pass VB/IB sticky trackers (slots 0-5 cached; higher slots
-            // always rebind — preserved quirk from the old arm).
-            Rendering::BufferHandle boundVbSlot[6]{};
-            Rendering::BufferHandle boundIb{};
-            Rendering::IndexType boundIbType = Rendering::IndexType::Uint16;
-            bool boundIbInit = false;
-            auto setVbSticky = [&](Rendering::BufferHandle want, uint32_t slot)
-            {
-                if (want.IsValid() && (slot >= 6 || boundVbSlot[slot] != want))
-                {
-                    cl->SetVertexBuffer(want, slot);
-                    if (slot < 6) boundVbSlot[slot] = want;
-                }
-            };
-            auto setIbSticky = [&](Rendering::BufferHandle want, Rendering::IndexType type)
-            {
-                if (want.IsValid() && (!boundIbInit || boundIb != want || boundIbType != type))
-                {
-                    cl->SetIndexBuffer(want, type);
-                    boundIb = want;
-                    boundIbType = type;
-                    boundIbInit = true;
-                }
-            };
-
-            // One indirect draw per (Material, mesh) batch via the bucketer-
-            // written slot — or per (class, pool group) under draw
-            // consolidation. `lookup` is the resolved axis pair the scatter
-            // published this batch's range under (ResolveDrawStreamLookupKey).
-            // FindBatchDrawRange at exec; an unpopulated range (first frame
-            // for a newly-spawned batch) is skipped this frame.
-            auto recordEntityBatch = [&](const WorldDrawBuilder::BatchKey& key,
-                                         const DrawStreamLookupKey& lookup)
-            {
-                const Material* material = key.material;
-                if (!material)
-                {
-                    LogMeshDrawSkipDiagnostic(
-                        "color", "material-null", viewId,
-                        key.materialIndex, key.meshIndex,
-                        m_DrawStreamBuilder && m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid(),
-                        false, 0ull, instGpuInstancesAddr,
-                        m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
-                        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                    return;
-                }
-                // Sorted transparent peel (T2/S2): when the sorted transparent pass owns this
-                // view's ORDER-DEPENDENT Blend draws this frame, drop them here so they are
-                // not also drawn unsorted in the opaque batch order. Order-independent blends
-                // (additive/multiply — IsOrderDependentBlendState) stay batched: sorting them
-                // gains nothing. When the sorted path is inactive (no order-dependent Blend
-                // in the view, or a pipeline without the drain node), Blend rides the batched
-                // path as before. Independent of the transmissive scope (peeled in both All
-                // and OpaqueOnly opaque passes). MUST match the collection filter in
-                // BuildSortedTransparentForView and the extraction class bit exactly
-                // (Risk 3) — all three use IsOrderDependentBlendMaterial.
-                if (IsOrderDependentBlendMaterial(*material) && IsSortedTransparentActive(viewId))
-                {
-                    return;
-                }
-                // Transmissive glass is peeled out of the opaque colour pass and drawn in the
-                // dedicated post-grab transmissive pass (and vice-versa). The bucketer slot
-                // exists either way, so FindSlot below is unaffected by which pass draws it. Only the
-                // scoped passes need the keyword read; the All path (every glass-free view) skips it.
-                if (scope != WorldPassDrawScope::All)
-                {
-                    const bool isTransmissive = Rendering::HasKeyword(
-                        material->GetVariantKey().materialKeywords, Rendering::MaterialKeyword::Transmission);
-                    if (scope == WorldPassDrawScope::OpaqueOnly && isTransmissive)
-                    {
-                        LogMeshDrawSkipDiagnostic(
-                            "color", "scope-opaque-filter", viewId,
-                            key.materialIndex, key.meshIndex,
-                            m_DrawStreamBuilder && m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid(),
-                            false, 0ull, instGpuInstancesAddr,
-                            m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
-                            m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                        return;
-                    }
-                    if (scope == WorldPassDrawScope::TransmissiveOnly && !isTransmissive)
-                    {
-                        LogMeshDrawSkipDiagnostic(
-                            "color", "scope-transmissive-filter", viewId,
-                            key.materialIndex, key.meshIndex,
-                            m_DrawStreamBuilder && m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid(),
-                            false, 0ull, instGpuInstancesAddr,
-                            m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
-                            m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                        return;
-                    }
-                }
-                const auto* entry = meshRegistry.Find(key.mesh);
-                if (!entry)
-                {
-                    LogMeshDrawSkipDiagnostic(
-                        "color", "mesh-entry-missing", viewId,
-                        key.materialIndex, key.meshIndex,
-                        m_DrawStreamBuilder && m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid(),
-                        false, 0ull, instGpuInstancesAddr,
-                        m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
-                        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                    return;
-                }
-                Rendering::MeshGPUEntryBindings entryBindings{};
-                const bool drawable = meshRegistry.TryGetDrawableBindings(*entry, entryBindings);
-                if (!drawable || entry->indexCount == 0)
-                {
-                    LogMeshDrawSkipDiagnostic(
-                        "color", !drawable ? kMeshNotDrawableReason : "index-count-zero",
-                        viewId, key.materialIndex, key.meshIndex,
-                        m_DrawStreamBuilder && m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid(),
-                        false, 0ull, instGpuInstancesAddr,
-                        m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
-                        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                    return;
-                }
-
-                const Rendering::VertexAttributeFlags effectiveFlags =
-                    BoundStreamVertexFlags(*entry, entryBindings, material->IgnoresVertexColor());
-
-                const Rendering::MaterialKeyword entityKeywords =
-                    WorldEntityColorKeywords(passKeywords, material->GetVariantKey().materialKeywords,
-                                             material->GetAlphaMode(), reliefDepthSource);
-
-                // Compatibility profile: no GPU scatter and no device addresses.
-                // The CPU draw stream's frustum-culled instance list replaces
-                // the indirection buffer — ONE instanced DrawIndexed per batch,
-                // the batch's offset into the view's CompatInstanceList riding
-                // a push constant the vertex stage adds gl_InstanceIndex to
-                // (instance_io.glsl's compat branch).
-                if (m_Profile.IsCompat())
-                {
-                    const CpuDrawStreamBuilder::InstanceList instances =
-                        m_CpuDrawStream.GetInstances(viewId, key.materialIndex, key.meshIndex,
-                                                     CpuDrawStreamBuilder::InstanceSet::Camera);
-                    if (instances.Count == 0u)
-                        return;
-                    assert(uploadedCompatListBytes == m_CpuDrawStream.GetIndexList(viewId).size_bytes() &&
-                           "the view's instance list was rebuilt after its first pass declared");
-
-                    auto [p, ve] = m_MaterialSystem.Variants().GetOrCompileColorVariant(
-                        *material, effectiveFlags, entry->topology, entityKeywords, m_FrontFace, ctx);
-                    if (!p.IsValid())
-                    {
-                        LogMeshDrawSkipDiagnostic(
-                            "color", "color-pipeline-invalid", viewId,
-                            key.materialIndex, key.meshIndex, false, false, 0ull,
-                            instGpuInstancesAddr, false, 0u);
-                        return;
-                    }
-
-                    setVbSticky(entryBindings.coreVB,    0);
-                    setVbSticky(entryBindings.tangentVB, 1);
-                    setVbSticky(entryBindings.colorVB,   2);
-                    setVbSticky(entryBindings.uv1VB,     3);
-                    setVbSticky(entryBindings.jointsVB,  4);
-                    setVbSticky(entryBindings.weightsVB, 5);
-                    setVbSticky(entryBindings.joints1VB,  6);
-                    setVbSticky(entryBindings.weights1VB, 7);
-                    for (uint32_t i = 0; i < entryBindings.extraUvVB.size(); ++i)
-                        setVbSticky(entryBindings.extraUvVB[i], 8u + i);
-                    setIbSticky(entryBindings.indexBuffer, static_cast<IndexType>(entry->indexType));
-
-                    // firstInstance stays 0: it does not reach gl_InstanceIndex
-                    // through SPIRV-Cross/Metal, so the list offset is the push
-                    // constant on every compat backend.
-                    const uint32_t compatListFirst = instances.First;
-                    Engine::Renderer::DrawBindings compatBindings{};
-                    compatBindings.PushConstants = std::span<const std::byte>(
-                        reinterpret_cast<const std::byte*>(&compatListFirst),
-                        sizeof(compatListFirst));
-
-                    const auto resolvedPipe = binder.BindMaterialForDraw(
-                        pass, *material, effectiveFlags, compatBindings, p,
-                        ve ? ve->VariantMeta.get() : nullptr, /*pipelineSetCount=*/0,
-                        ve ? std::span<const Rendering::DescriptorSetLayoutId>(ve->SetLayouts)
-                           : std::span<const Rendering::DescriptorSetLayoutId>{});
-                    if (!resolvedPipe.IsValid())
-                    {
-                        LogMeshDrawSkipDiagnostic(
-                            "color", "material-bind-invalid", viewId,
-                            key.materialIndex, key.meshIndex, false, false, 0ull,
-                            instGpuInstancesAddr, false, 0u);
-                        return;
-                    }
-
-                    cl->DrawIndexed(entry->indexCount, instances.Count, entry->firstIndex,
-                                    static_cast<int32_t>(entry->vertexOffset),
-                                    /*firstInstance=*/0u);
-                    attribDrawsIssued += 1u;
-                    PushMeshDrawIssuedDiagnostic("color", viewId, key.materialIndex,
-                                                 key.meshIndex, 1u, 0u);
-                    return;
-                }
-
-                if (!m_DrawStreamBuilder || !m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid())
-                {
-                    LogMeshDrawSkipDiagnostic(
-                        "color", "drawstream-pipeline-invalid", viewId,
-                        key.materialIndex, key.meshIndex,
-                        false, false, 0ull, instGpuInstancesAddr,
-                        m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
-                        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                    return;
-                }
-                // The pass's own Color-table slice; the caller resolved both axes.
-                // The representative material (key.material) binds the PSO.
-                const Rendering::GPUDrawStreamBuilder::BatchDrawRange drawRange =
-                    m_DrawStreamBuilder->FindBatchDrawRange(
-                        static_cast<uint32_t>(viewId), sliceCascadeIndex,
-                        lookup.classKey, lookup.meshKey, phase);
-                if (!drawRange.IsValid() || !m_Device)
-                {
-                    LogMeshDrawSkipDiagnostic(
-                        "color", !m_Device ? "device-null" : "draw-range-invalid", viewId,
-                        key.materialIndex, key.meshIndex,
-                        true, drawRange.IsValid(), 0ull, instGpuInstancesAddr,
-                        m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
-                        m_DrawStreamBuilder->GetRangeCount());
-                    return;
-                }
-                // Shared indirection buffer: records carry arena-global
-                // firstInstance, so one BDA serves every batch and slice.
-                const uint64_t slotIndirectionBda =
-                    m_DrawStreamBuilder->GetSharedIndirectionAddress();
-                if (slotIndirectionBda == 0 || instGpuInstancesAddr == 0)
-                {
-                    LogMeshDrawSkipDiagnostic(
-                        "color", slotIndirectionBda == 0 ? "indirection-bda-zero" : "instance-bda-zero",
-                        viewId, key.materialIndex, key.meshIndex,
-                        true, true, slotIndirectionBda, instGpuInstancesAddr,
-                        m_Device->GetCapabilities().supportsBufferDeviceAddress,
-                        m_DrawStreamBuilder->GetRangeCount());
-                    return;
-                }
-
-                pcInst.indirectionAddr  = slotIndirectionBda;
-                pcInst.gpuInstancesAddr = instGpuInstancesAddr;
-                std::span<const std::byte> pcBytes(
-                    reinterpret_cast<const std::byte*>(&pcInst), sizeof(pcInst));
-
-                Engine::Renderer::DrawBindings drawBindings{};
-                drawBindings.PushConstants = pcBytes;
-
-                setVbSticky(entryBindings.coreVB,    0);
-                setVbSticky(entryBindings.tangentVB, 1);
-                setVbSticky(entryBindings.colorVB,   2);
-                setVbSticky(entryBindings.uv1VB,     3);
-                setVbSticky(entryBindings.jointsVB,  4);
-                setVbSticky(entryBindings.weightsVB, 5);
-                setVbSticky(entryBindings.joints1VB,  6);
-                setVbSticky(entryBindings.weights1VB, 7);
-                for (uint32_t i = 0; i < entryBindings.extraUvVB.size(); ++i)
-                    setVbSticky(entryBindings.extraUvVB[i], 8u + i);
-                setIbSticky(entryBindings.indexBuffer, static_cast<IndexType>(entry->indexType));
-
-                // Draw one segment: compile the color variant for its winding
-                // (mirrored instances flip relative to the view base) and its
-                // fade state, bind, and issue the indirect draw. Only segments
-                // present in the range compile a variant, so mirror-free scenes
-                // never compile the flipped winding.
-                auto issueSegment =
-                    [&](Rendering::FrontFace winding, bool crossfading,
-                        const Rendering::GPUDrawStreamBuilder::BatchDrawSegment& seg)
-                {
-                    const size_t   cmdOffset    = seg.cmdByteOffset;
-                    const size_t   countOffset  = seg.countByteOffset;
-                    const uint32_t maxDrawCount = seg.maxDrawCount;
-                    // Per-SEGMENT, never per-view: the dither's `discard` costs
-                    // early-Z on every fragment of every draw it is compiled
-                    // into, and only a tail segment's records can carry a
-                    // non-zero fade code.
-                    const Rendering::MaterialKeyword segmentKeywords =
-                        crossfading ? (entityKeywords | Rendering::MaterialKeyword::LodCrossfade)
-                                    : entityKeywords;
-                    auto variant = m_MaterialSystem.Variants().GetOrCompileColorVariant(
-                        *material, effectiveFlags, entry->topology, segmentKeywords, winding, ctx);
-                    if (!variant.first.IsValid() && crossfading)
-                    {
-                        // Cold LodCrossfade variant: the miss enqueued an async
-                        // compile and would otherwise skip this draw. A fading
-                        // instance writes NO head record, so skipping its tail
-                        // removes it from colour entirely — it vanishes for the
-                        // whole compile window. Fall back to the head variant,
-                        // which this pass already draws and is therefore warm:
-                        // the indirection word's index mask is unconditional
-                        // (lod_crossfade.glsl), so the transform and mesh are
-                        // correct and only the dither is absent. Both levels then
-                        // draw solid, and each still passes the depth its own
-                        // dither half wrote in the prepass, so coverage stays
-                        // complete and the cost is overdraw plus a pop — a
-                        // quality degradation, where a vanish is a correctness
-                        // break.
-                        variant = m_MaterialSystem.Variants().GetOrCompileColorVariant(
-                            *material, effectiveFlags, entry->topology, entityKeywords, winding,
-                            ctx);
-                    }
-                    auto [p, ve] = variant;
-                    if (!p.IsValid())
-                    {
-                        LogMeshDrawSkipDiagnostic(
-                            "color", "color-pipeline-invalid", viewId,
-                            key.materialIndex, key.meshIndex, true,
-                            false, slotIndirectionBda, instGpuInstancesAddr,
-                            m_Device->GetCapabilities().supportsBufferDeviceAddress,
-                            m_DrawStreamBuilder->GetRangeCount());
-                        return;
-                    }
-                    const auto resolvedPipe = binder.BindMaterialForDraw(
-                        pass, *material, effectiveFlags, drawBindings, p,
-                        ve ? ve->VariantMeta.get() : nullptr, /*pipelineSetCount=*/0,
-                        ve ? std::span<const Rendering::DescriptorSetLayoutId>(ve->SetLayouts)
-                           : std::span<const Rendering::DescriptorSetLayoutId>{});
-                    if (!resolvedPipe.IsValid())
-                    {
-                        LogMeshDrawSkipDiagnostic(
-                            "color", "material-bind-invalid", viewId,
-                            key.materialIndex, key.meshIndex,
-                            true, true, slotIndirectionBda, instGpuInstancesAddr,
-                            m_Device->GetCapabilities().supportsBufferDeviceAddress,
-                            m_DrawStreamBuilder->GetRangeCount());
-                        return;
-                    }
-                    PushMeshDrawIssuedDiagnostic(
-                        "color", viewId, key.materialIndex, key.meshIndex,
-                        maxDrawCount,
-                        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
-                    cl->DrawIndexedIndirectCount(
-                        drawRange.recordBuffer,
-                        drawRange.countBuffer,
-                        maxDrawCount, // exact per-batch bound (snapshot capacity)
-                        /*stride=*/5u * sizeof(uint32_t),
-                        cmdOffset,
-                        countOffset);
-                    ++attribDrawsIssued;
-                };
-
-                // Segments(): head AND crossfade tail, per parity — the same
-                // set the depth prepass issues, which is what lets early-Z
-                // admit exactly the fragments the dither below keeps. Tail
-                // segments are absent (maxDrawCount 0) only while the feature is
-                // OFF, which is what makes the default byte-identical; with it
-                // ON they are issued on every frame, at rest included —
-                // Segments() states that cost.
-                const Rendering::FrontFace baseWinding = m_FrontFace;
-                for (const auto& sd : drawRange.Segments())
-                    issueSegment(sd.mirrored ? Rendering::FlipWinding(baseWinding) : baseWinding,
-                                 sd.crossfading, sd.segment);
-            };
-
-            auto recordContributor = [&](const DrawCommand& cmd)
-            {
-                const auto* material = cmd.Material;
-                if (!material)
-                    return;
-
-                const Rendering::MeshGPUEntry* meshEntry = nullptr;
-                Rendering::MeshGPUEntryBindings meshBindings{};
-                Rendering::VertexAttributeFlags effectiveFlags = cmd.VertexFlags;
-                if (cmd.Geometry.Mesh.IsValid())
-                {
-                    meshEntry = meshRegistry.Find(cmd.Geometry.Mesh);
-                    if (!meshEntry || meshEntry->indexCount == 0)
-                        return;
-                    if (!meshRegistry.TryGetDrawableBindings(*meshEntry, meshBindings))
-                        return;
-                    effectiveFlags = BoundStreamVertexFlags(
-                        *meshEntry, meshBindings, material->IgnoresVertexColor());
-                }
-
-                Rendering::PipelineHandle resolvedPipe{};
-                if (cmd.InternedPipeline.IsValid())
-                    resolvedPipe = ctx.GetOrCreatePipelineVariant(cmd.InternedPipeline);
-                const Rendering::ShaderMeta* variantMeta = cmd.PipelineMeta;
-                std::span<const Rendering::DescriptorSetLayoutId> pipelineSetLayouts;
-                if (!resolvedPipe.IsValid())
-                {
-                    const Rendering::MaterialKeyword contributorKeywords =
-                        ContributorColorKeywords(passKeywords, cmd.PassKeywords,
-                                                 meshEntry != nullptr);
-                    // Contributor draws are explicit DrawCommands, not the
-                    // GPU-driven parity-split batches, so they always use the
-                    // view's base winding.
-                    auto [p, ve] = m_MaterialSystem.Variants().GetOrCompileColorVariant(
-                        *material, effectiveFlags, ContributorTopology(meshEntry),
-                        contributorKeywords, m_FrontFace, ctx);
-                    resolvedPipe = p;
-                    if (ve)
-                    {
-                        variantMeta = ve->VariantMeta.get();
-                        pipelineSetLayouts = ve->SetLayouts;
-                    }
-                }
-                if (!resolvedPipe.IsValid())
-                    return;
-
-                if (meshEntry)
-                {
-                    setVbSticky(meshBindings.coreVB,    0);
-                    setVbSticky(meshBindings.tangentVB, 1);
-                    setVbSticky(meshBindings.colorVB,   2);
-                    setVbSticky(meshBindings.uv1VB,     3);
-                    setVbSticky(meshBindings.jointsVB,  4);
-                    setVbSticky(meshBindings.weightsVB, 5);
-                    setVbSticky(meshBindings.joints1VB,  6);
-                    setVbSticky(meshBindings.weights1VB, 7);
-                    for (uint32_t i = 0; i < meshBindings.extraUvVB.size(); ++i)
-                        setVbSticky(meshBindings.extraUvVB[i], 8u + i);
-                    setIbSticky(meshBindings.indexBuffer,
-                                static_cast<IndexType>(meshEntry->indexType));
-                }
-                else
-                {
-                    setVbSticky(cmd.Geometry.AltGeom.VB, 0);
-                    setIbSticky(cmd.Geometry.AltGeom.IB, cmd.Geometry.AltGeom.IndexType);
-                }
-
-                // Empty SetLayouts span: the binder's conservative clear fires
-                // once per contributor pipeline change (at most once per frame
-                // for pinned-pipeline contributors).
-                const auto bound = binder.BindMaterialForDraw(
-                    pass, *material, effectiveFlags, cmd.Bindings, resolvedPipe,
-                    variantMeta, /*pipelineSetCount=*/0, pipelineSetLayouts);
-                if (!bound.IsValid())
-                    return;
-
-                if (cmd.UseIndirect && cmd.IndirectCommandBuffer.IsValid())
-                {
-                    cl->DrawIndexedIndirectCount(
-                        cmd.IndirectCommandBuffer,
-                        cmd.IndirectCountBuffer,
-                        cmd.IndirectMaxDrawCount,
-                        cmd.IndirectStride,
-                        cmd.IndirectCommandOffset,
-                        cmd.IndirectCountOffset);
-                }
-                else if (cmd.SubDraws.empty())
-                {
-                    const uint32_t indexCount = (cmd.IndexCount != 0 || !meshEntry)
-                        ? cmd.IndexCount
-                        : meshEntry->indexCount;
-                    const uint32_t firstIndex = (cmd.IndexCount != 0 || !meshEntry)
-                        ? cmd.FirstIndex
-                        : meshEntry->firstIndex;
-                    const int32_t vertexOffset = (cmd.IndexCount != 0 || !meshEntry)
-                        ? cmd.VertexOffset
-                        : static_cast<int32_t>(meshEntry->vertexOffset);
-                    cl->DrawIndexed(indexCount, cmd.InstanceCount,
-                                    firstIndex, vertexOffset, cmd.FirstInstance);
-                }
-                else
-                {
-                    for (const auto& sub : cmd.SubDraws)
-                    {
-                        cl->DrawIndexed(sub.IndexCount, sub.InstanceCount,
-                                        sub.FirstIndex, sub.VertexOffset, sub.FirstInstance);
-                    }
-                }
-            };
-
-            if (runEntityDraws)
-            {
-                const std::span<const uint32_t> meshGroups = MeshPoolGroupSpanForDraws();
-                // Color-table slices key on the color class whatever their
-                // cascade index: MaterialDependent keeps the depth-class remap
-                // (a Shadow-table concern) out of the resolution.
-                const auto lookupOf = [&](const WorldDrawBuilder::BatchKey& key)
-                {
-                    return ResolveDrawStreamLookupKey(
-                        key, sliceCascadeIndex,
-                        Rendering::MaterialDepthClass::MaterialDependent, meshGroups);
-                };
-                if (meshGroups.empty())
-                {
-                    for (const auto& key : entityKeys)
-                        recordEntityBatch(key, lookupOf(key));
-                }
-                else
-                {
-                    // Draw consolidation: ONE indirect draw per (colorClassId,
-                    // pool group). The first key of a group is its
-                    // representative (keys sort by class then mesh); the
-                    // per-material filters above are class-uniform (blend
-                    // state, transmission, ignoreVertexColor all ride the
-                    // class signature), so evaluating them on the
-                    // representative is exact. Consume-on-attempt: a
-                    // representative skipped by a guard drops its group for
-                    // one frame — the same self-healing semantics as an
-                    // unpopulated range.
-                    std::unordered_set<uint64_t> drawnGroups;
-                    drawnGroups.reserve(entityKeys.size());
-                    for (const auto& key : entityKeys)
-                    {
-                        const DrawStreamLookupKey lookup = lookupOf(key);
-                        if (lookup.meshKey == Rendering::MeshPoolGroupPlan::kAbsentGroup)
-                            continue; // dead mesh row — instances self-reject GPU-side
-                        const uint64_t drawKey =
-                            (static_cast<uint64_t>(lookup.classKey) << 24) | lookup.meshKey;
-                        if (!drawnGroups.insert(drawKey).second)
-                            continue;
-                        recordEntityBatch(key, lookup);
-                    }
-                }
-            }
-            // Forward contributors (ocean surface, terrain, grass, fog) drain in
-            // depth-writing-before-blended order so opaque content emitted after a
-            // blended producer cannot overwrite its depthWrite-off pixels — see
-            // ForwardDrainOrder.h for the emission-order hazard this closes.
-            if (scope != WorldPassDrawScope::TransmissiveOnly)
-            {
-                for (uint32_t i : ForwardDrainOrderOpaqueFirst(fwdCommands))
-                    recordContributor(fwdCommands[i]);
-            }
-
-            if (DrawAttributionEnabled())
-                LogDrawAttribution("color", viewId, entityKeys.size(), attribDrawsIssued,
-                                   pass.PipelineBinds, pass.DescriptorBinds,
-                                   !MeshPoolGroupSpanForDraws().empty(),
-                                   m_MeshPoolGroups.LiveGroupCount());
-
-            binder.EndPass(pass);
-        });
+        [this, data = std::move(execData)](RenderGraph::RGContext& ctx) mutable { RecordWorldPass(ctx, data); });
 
     return result;
+}
+
+bool RenderServices::WorldPassHasWork(ViewId viewId, const ViewDesc* view, const WorldPassTargetsRG& targets,
+                                      bool isRecover)
+{
+    // The old activation predicate, evaluated at declaration: not declared =
+    // not compiled. (The render-layer/external-request term is the
+    // slice-4 spine's job — calling this function IS the request.)
+    const bool hasTargets = targets.Color.IsValid() || targets.Depth.IsValid();
+    // The recover pass never activates just to clear (it always loads) — it only
+    // runs when there is phase-B geometry to draw.
+    const bool anyClearRequested =
+        !isRecover && (view->targets.clearColor || view->targets.clearDepth ||
+                       view->targets.clearStencil);
+    // Phase B only recovers GPU-cullable entity batches. Explicit forward
+    // contributors (terrain, grass, ocean, fog) are not part of the HZB
+    // scatter and were already drawn in phase A; draining them here draws the
+    // entire contributor a second time.
+    const bool hasForwardContributors = !isRecover && HasForwardCommands(viewId);
+    if (!hasTargets ||
+        (!anyClearRequested && m_WorldDrawBuilder.GetBatchKeys(viewId).empty() &&
+         !hasForwardContributors))
+        return false;
+    return true;
+}
+
+void RenderServices::ImportWorldPassSampledInputs(const WorldPassDeclaration& decl, MaterialKeyword passKeywords,
+                                                  bool wantsShadows)
+{
+    // MSM moments: dedup FALLBACK import (feature-owned physical). On MSM4
+    // frames the producer node (ShadowMapNode) owns the import and
+    // handle-dedup lands both sites on one id (RGFrame FindImport) — this arm
+    // only creates the resource when the producer declared nothing this frame
+    // (PCSS frames: nothing writes, so declared ShaderResource is truthful).
+    // On producer frames the world's all-layer Sampled read below is the edge
+    // that homogenizes written layers back to ShaderReadOnly.
+    if (auto* feature = GetFeature<ShadowMapRenderFeature>();
+        wantsShadows && feature && feature->IsInitialized() && !decl.Vfr.MsmMoments.IsValid())
+    {
+        if (auto momentsTex = feature->GetMsmMomentsTexture(decl.ViewId); momentsTex.IsValid())
+        {
+            const auto& cfg = feature->GetConfig();
+            const std::string momentsName =
+                "MsmMoments.View" + std::to_string(static_cast<uint32_t>(decl.ViewId));
+            decl.Vfr.MsmMoments = decl.Frame.ImportExternalTexture(
+                momentsName.c_str(), momentsTex, Rendering::ResourceState::ShaderResource,
+                Rendering::TextureFormat::R16G16B16A16_UNORM, 1, cfg.NumCascades);
+        }
+    }
+}
+
+RenderServices::WorldPassAttachmentPlan RenderServices::PlanWorldPassAttachments(
+    const WorldPassDeclaration& decl)
+{
+    WorldPassAttachmentPlan plan;
+    // Depth-clear suppression + read-only depth: the RenderGraph prepass is declared
+    // only when it runs and always clears, so the old prepassWillExecute
+    // dance collapses to the per-frame record. Texture IDENTITY, not a bool:
+    // a prepass that ran on an override depth didn't write THIS depth, and
+    // suppressing the clear would depth-test against stale content.
+    const bool hasDepthPrepass = decl.Vfr.DepthPrepassDepth.IsValid() && decl.Targets.Depth.IsValid() &&
+                                 decl.Vfr.DepthPrepassDepth.Id == decl.Targets.Depth.Id;
+    // Recover always loads the phase-A depth (the phase-B depth recover already
+    // wrote newly-revealed fragments into it) — never clears.
+    //
+    // The transmissive pass composites over an already-rasterized opaque scene and attaches that
+    // scene's depth read-only: clearing it would both discard depth later passes still read and
+    // leave the glass testing against a cleared buffer. Independent of the prepass, whose absence
+    // would otherwise let the view's clearDepth through on a pass that only ever loads.
+    plan.SuppressDepthClear =
+        hasDepthPrepass || decl.IsRecover || decl.Scope == WorldPassDrawScope::TransmissiveOnly;
+    plan.NeedsClear = decl.View->targets.clearColor ||
+                            (decl.View->targets.clearDepth && !plan.SuppressDepthClear) ||
+                            decl.View->targets.clearStencil;
+
+    // The prepass wrote this view's opaque depth, Mask coverage included (its alpha-tested heads run
+    // the colour pass's own cutoff), and the depth of every forward draw whose producer emitted its
+    // head there (ForwardDrawDepth::Prepass, or PrepassNonOccluding through the non-occluding prepass
+    // after DepthResolve), so the world pass only tests against it. A forward
+    // draw that writes its own depth (ForwardDrawDepth::ColourPass) keeps it writable.
+    const ViewRegistry::PerViewResources* forwardView = m_ViewRegistry.FindPerView(decl.ViewId);
+    plan.DepthReadOnly =
+        hasDepthPrepass && !(forwardView && forwardView->ForwardDrawsWritingDepth != 0u);
+    // The transmissive pass never writes depth: glass composites over the lit opaque scene
+    // and only depth-tests (ReadOnly) against the opaque depth — single-layer, order-independent.
+    if (decl.Scope == WorldPassDrawScope::TransmissiveOnly)
+        plan.DepthReadOnly = true;
+
+    // A parallax material's colour draw reads the relief depth the prepass wrote, from the depth it
+    // attaches read-only (ge_prepassDepth), and rebuilds the hit instead of marching again. The read is
+    // declared only when a parallax material is in view.
+    plan.ReliefDepth = WorldPassReliefDepthSource(
+        hasDepthPrepass, plan.DepthReadOnly && decl.Scope != WorldPassDrawScope::TransmissiveOnly,
+        decl.Targets.Depth.IsValid() ? decl.Frame.Graph().ResourceDesc(decl.Targets.Depth.Id).SampleCount
+                                     : 1u);
+    const auto entityBatchKeys = m_WorldDrawBuilder.GetBatchKeys(decl.ViewId);
+    plan.ReadsReliefDepth =
+        (plan.ReliefDepth == ReliefDepthSource::PrepassReadable ||
+         plan.ReliefDepth == ReliefDepthSource::PrepassReadableMultisample) &&
+        std::any_of(entityBatchKeys.begin(), entityBatchKeys.end(),
+                    [](const WorldDrawBuilder::BatchKey& key)
+                    { return key.material && WritesReliefDepth(key.material->GetVariantKey().materialKeywords); });
+
+    // Recover loads the phase-A colour (additive) — treat it as already
+    // initialized so the attach below takes the Load branch, never Clear.
+    plan.ColorAlreadyInit =
+        decl.IsRecover || m_ViewRegistry.IsViewColorInitialized(decl.ViewId) ||
+        m_ViewRegistry.IsViewSkyBackdropScheduled(decl.ViewId);
+
+    // MSAA resolve three-way, decided from declared descs (old: TryGetTextureDesc).
+    plan.CanResolveColor = false;
+    plan.CollapseToResolve = false;
+    if (decl.Targets.Color.IsValid() && decl.Targets.Resolve.IsValid() &&
+        decl.Targets.Resolve.Id != decl.Targets.Color.Id)
+    {
+        const auto& colorDesc = decl.Frame.Graph().ResourceDesc(decl.Targets.Color.Id);
+        const auto& resolveDesc = decl.Frame.Graph().ResourceDesc(decl.Targets.Resolve.Id);
+        if (resolveDesc.SampleCount == 1u)
+        {
+            if (colorDesc.SampleCount > 1u)
+            {
+                // Resolve requires matching formats (VUID 06865); a mismatch
+                // means the resolve target is wrong for this color — render
+                // to the MSAA color only rather than emit an invalid resolve.
+                if (colorDesc.Format == resolveDesc.Format)
+                    plan.CanResolveColor = true;
+                else
+                {
+                    static std::atomic<int> sFmtWarnBudget{8};
+                    if (sFmtWarnBudget.fetch_sub(1, std::memory_order_relaxed) > 0)
+                        Logger::Log::Warning(
+                            "RenderServices WorldView.Color (RenderGraph): skipping MSAA resolve -- "
+                            "color fmt {} vs resolve fmt {}",
+                            colorDesc.Format, resolveDesc.Format);
+                }
+            }
+            else if (decl.Targets.ResolveFromPipeline)
+            {
+                // MSAA off: render straight into the pipeline's resolve target
+                // so the post-FX chain never samples an uninitialized texture.
+                plan.CollapseToResolve = true;
+            }
+        }
+    }
+    return plan;
+}
+
+void RenderServices::ResolveWorldPassViewport(const WorldPassDeclaration& decl, uint32_t& viewportW,
+                                              uint32_t& viewportH)
+{
+    // Viewport snapshot at declaration (old: exec-time GetTextureSize).
+    const RenderGraph::RGTexture vpTex =
+        decl.Targets.Resolve.IsValid() ? decl.Targets.Resolve : decl.Targets.Color;
+    if (vpTex.IsValid())
+    {
+        const auto& d = decl.Frame.Graph().ResourceDesc(vpTex.Id);
+        viewportW = d.Width;
+        viewportH = d.Height;
+    }
+    // Publish the view's render-target height for the SSE-budget LOD scale
+    // (read at next frame's scatter registration; see PerViewResources).
+    if (viewportH != 0u)
+        m_ViewRegistry.PerView(decl.ViewId).WorldViewportHeight = viewportH;
+    // Publish the color attachment's sample count the same way (grass reads it
+    // at next frame's forward emit to pick alpha-to-coverage vs screen-door
+    // dither; one frame stale across an MSAA toggle, self-heals).
+    if (decl.Targets.Color.IsValid())
+        m_ViewRegistry.PerView(decl.ViewId).WorldColorSampleCount =
+            decl.Frame.Graph().ResourceDesc(decl.Targets.Color.Id).SampleCount;
+}
+
+void RenderServices::DeclareWorldPassContractReads(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl)
+{
+    // A2.4-P0-R: the world/forward+ exec is self-contained — it sets its
+    // own viewport/scissor and binds per draw (CONC-F13), so its interior
+    // may record into a worker secondary under GE_PARALLEL_RECORD.
+    p.RecordInSecondary();
+    // Slice-3 contract reads. SkinPaletteAtlas is the compute→VS
+    // barrier (the VS binds it descriptor-direct, so only this
+    // declared read orders skinning). DrawStreamOrdering is the
+    // bucketer's ordering proxy: the Read must be recorded AFTER its
+    // Write or the edge derives WAR and draws consume frame N−1 slots.
+    if (m_FrameRG.For.IsFor(decl.Frame) && m_FrameRG.SkinPaletteAtlas.IsValid())
+        p.Read(m_FrameRG.SkinPaletteAtlas);
+    else if (m_GPUAnimDataStore.GetInstanceCount() != 0)
+        Logger::Log::Error(
+            "[RenderGraph] AddWorldPassForView(view {}): skinned instances pending but no "
+            "SkinPaletteAtlas value is published — declare "
+            "ScheduleGpuSkinningAndRetarget(frame) BEFORE the world pass",
+            decl.ViewId);
+    if (m_FrameRG.For.IsFor(decl.Frame) && m_FrameRG.DrawStreamOrdering.IsValid())
+        p.Read(m_FrameRG.DrawStreamOrdering, RenderGraph::RGBufferRead::Indirect);
+    else if (m_DrawStreamBuilder && m_DrawStreamBuilder->GetPendingSliceCount() != 0)
+        Logger::Log::Error(
+            "[RenderGraph] AddWorldPassForView(view {}): buckets are registered but no "
+            "DrawStreamOrdering value is published — declare "
+            "ScheduleWorldBucketerDispatches(frame) BEFORE the world pass",
+            decl.ViewId);
+}
+
+void RenderServices::DeclareWorldPassSampledReads(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl,
+                                                  MaterialKeyword passKeywords, RenderGraph::RGTexture shadowArr,
+                                                  bool wantsShadows)
+{
+    if (shadowArr.IsValid())
+        p.Read(shadowArr, RenderGraph::RGTextureRead::Sampled);
+    // PCSS min/max pyramid: the same compute->fragment edge as the RT
+    // mask below, and even more load-bearing — the PCSS early-out reads
+    // the pyramid through a BINDLESS index, so there is no by-name
+    // binding here at all and this read is the ONLY thing ordering the
+    // reduction dispatches before the draw that samples them. Whole
+    // resource (every mip, every cascade layer): the early-out picks its
+    // level per pixel. The pyramid is GENERAL-resident, so the barrier
+    // is a memory dependency, not a layout change.
+    if (wantsShadows && decl.Vfr.ShadowPcssPyramid.IsValid())
+        p.Read(decl.Vfr.ShadowPcssPyramid, RenderGraph::RGTextureRead::Sampled);
+    // Glass transmittance cascade: declare the sampled read so the RG inserts
+    // the RenderTarget->ShaderRead transition + orders the tint cascade writes
+    // before this world sample (the binding alone forms no producer->consumer edge).
+    if (decl.Vfr.TransmittanceShadowArray.IsValid())
+        p.Read(decl.Vfr.TransmittanceShadowArray, RenderGraph::RGTextureRead::Sampled);
+    if (decl.Vfr.MsmMoments.IsValid())
+        p.Read(decl.Vfr.MsmMoments, RenderGraph::RGTextureRead::Sampled);
+    // RT shadow-mask: the declared read forms the compute->fragment
+    // (StorageWrite->Sampled) edge that orders the ray-query mask pass
+    // before this draw — the by-name binding alone forms no edge.
+    if (decl.Vfr.RTShadowMask.IsValid())
+        p.Read(decl.Vfr.RTShadowMask, RenderGraph::RGTextureRead::Sampled);
+    if (decl.Vfr.ScreenSpaceShadowMask.IsValid())
+        p.Read(decl.Vfr.ScreenSpaceShadowMask, RenderGraph::RGTextureRead::Sampled);
+    if (decl.Vfr.AreaShadowMap.IsValid())
+        p.Read(decl.Vfr.AreaShadowMap, RenderGraph::RGTextureRead::Sampled);
+    if (decl.Vfr.SpotShadowMap.IsValid())
+        p.Read(decl.Vfr.SpotShadowMap, RenderGraph::RGTextureRead::Sampled);
+    if (decl.Vfr.PointShadowMap.IsValid())
+        p.Read(decl.Vfr.PointShadowMap, RenderGraph::RGTextureRead::Sampled);
+    // IBL bake -> world edge: these Reads land on the same ids the IBLGen
+    // bake's StorageWrites produced (dedup-by-handle), inserting the
+    // StorageWrite->Sampled barrier and ordering the bake before this draw.
+    if (decl.Vfr.IblIrradiance.IsValid())
+        p.Read(decl.Vfr.IblIrradiance, RenderGraph::RGTextureRead::Sampled);
+    if (decl.Vfr.IblPrefilter.IsValid())
+        p.Read(decl.Vfr.IblPrefilter, RenderGraph::RGTextureRead::Sampled);
+    if (decl.Vfr.IblBrdfLut.IsValid())
+        p.Read(decl.Vfr.IblBrdfLut, RenderGraph::RGTextureRead::Sampled);
+    for (uint32_t i = 0; i < ImageBasedLightingFeature::kMaxLocalProbes; ++i)
+    {
+        if (decl.Vfr.IblLocalIrradiance[i].IsValid())
+            p.Read(decl.Vfr.IblLocalIrradiance[i], RenderGraph::RGTextureRead::Sampled);
+        if (decl.Vfr.IblLocalPrefilter[i].IsValid())
+            p.Read(decl.Vfr.IblLocalPrefilter[i], RenderGraph::RGTextureRead::Sampled);
+    }
+    // ge_gtao samples the AO node's storage-written output: this read is
+    // the compute->fragment RAW edge AND the General->ShaderReadOnly
+    // transition that matches the descriptor's SHADER_READ_ONLY claim
+    // (VUID-vkCmdDraw-None-09600 fired every frame without it — the
+    // by-name binding alone forms no edge). Gated exactly like the
+    // ge_gtao binding in BuildPassResourcesRG.
+    if (decl.Targets.GTAO.IsValid() && HasKeyword(passKeywords, MaterialKeyword::GTAO))
+        p.Read(decl.Targets.GTAO, RenderGraph::RGTextureRead::Sampled);
+    // ge_skyBackdrop and ge_volumetricFog: the sky-view LUT and the froxel volume are written
+    // by compute earlier in the frame; the by-name bindings alone form no edge.
+    DeclareForwardFogReads(p, decl.Targets, passKeywords);
+
+    // ge_ddgiResolveRough/Glossy sample the DDGI glossy-resolve
+    // compute outputs: same compute->fragment RAW edge + layout
+    // transition the ge_gtao read above provides, gated exactly like
+    // their bindings in BuildPassResourcesRG.
+    if (decl.Targets.DDGIResolveRough.IsValid() && decl.Targets.DDGIResolveGlossy.IsValid() &&
+        decl.Targets.DDGIResolveIrradiance.IsValid() &&
+        HasKeyword(passKeywords, MaterialKeyword::DDGI))
+    {
+        p.Read(decl.Targets.DDGIResolveRough, RenderGraph::RGTextureRead::Sampled);
+        p.Read(decl.Targets.DDGIResolveGlossy, RenderGraph::RGTextureRead::Sampled);
+        p.Read(decl.Targets.DDGIResolveIrradiance, RenderGraph::RGTextureRead::Sampled);
+    }
+    // ge_sceneColor samples the transmission grab: the read is the
+    // copy->draw RAW edge the grab's contract requires (SceneColorGrab.h)
+    // — without it ordering rides only the scheduler's declaration-order
+    // tie-break. Gated exactly like the ge_sceneColor binding.
+    if (decl.Targets.SceneGrab.IsValid() &&
+        HasKeyword(passKeywords, MaterialKeyword::SceneColorGrab))
+        p.Read(decl.Targets.SceneGrab, RenderGraph::RGTextureRead::Sampled);
+    // Producer-emitted forward draws that sample render-graph textures
+    // descriptor-direct registered their imports at emit time
+    // (EmitForwardSampledRead — ocean cascades in probe-face captures).
+    // Declaring them here orders the writing sim before this draw and
+    // restores ShaderReadOnly; without it the draw samples the sim's
+    // Storage-state output (the export batch only lands at end of
+    // frame). SampledVertex: emitted draws can displace vertices. The
+    // stamp check matches the emit's import frame (RGTexture ids are
+    // frame-local; a foreign frame must not consume them).
+    {
+        const auto& pvRes = m_ViewRegistry.PerView(decl.ViewId);
+        if (pvRes.ForwardSampledFor.IsFor(decl.Frame))
+        {
+            for (const auto& texture : pvRes.ForwardSampledRG)
+            {
+                if (texture.IsValid())
+                    p.Read(texture, RenderGraph::RGTextureRead::SampledVertex);
+            }
+        }
+        // Buffers a GPU-driven node reads as indirect args / index /
+        // vertex-stage SSBOs (CBT terrain, terrain grass). Each carries
+        // its access so the arg buffer gets an Indirect edge (not
+        // Storage), ordering the producing compute pass before the draw,
+        // and its own import frame, since nodes emit from the frame they
+        // declare in.
+        for (const auto& bufferRead : pvRes.ForwardSampledBufferRG)
+        {
+            if (bufferRead.For.IsFor(decl.Frame) && bufferRead.Buffer.IsValid())
+                p.Read(bufferRead.Buffer, bufferRead.Access);
+        }
+    }
+    // ge_sceneDepth samples the resolved depth when it is a DISTINCT
+    // texture — that read needs its own edge (the AttachDepth below
+    // covers only targets.Depth).
+    if (decl.Targets.DepthResolved.IsValid() && decl.Targets.DepthResolved.Id != decl.Targets.Depth.Id)
+        p.Read(decl.Targets.DepthResolved, RenderGraph::RGTextureRead::Sampled);
+}
+
+void RenderServices::DeclareWorldPassBufferReads(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl)
+{
+    // Precise pipeline-buffer reads (the old arm's blanket
+    // ReadBuffer-over-everything): only Graph-valid entries — the
+    // device-local pool imports (ClusterBuffer, LightIndexBuffer)
+    // whose compute writers must order before this pass. Upload
+    // allocs are host-coherent and get no edge.
+    if (auto* instance = m_FrameOrchestrator.PipelineInstanceForFrame(decl.Frame))
+    {
+        if (const auto* fr = instance->FrameResourcesFor(&decl.Frame))
+        {
+            fr->ForEachBufferBinding(
+                decl.ViewId,
+                [&](const std::string&, const Pipeline::PipelineBufferBindingRG& b)
+                {
+                    if (b.Graph.IsValid())
+                        p.Read(b.Graph, RenderGraph::RGBufferRead::Storage);
+                });
+        }
+    }
+    // Local shadow data UBOs are upload-ring allocs (host-coherent): no
+    // declaration needed.
+}
+
+void RenderServices::AttachWorldPassTargets(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl,
+                                            const WorldPassAttachmentPlan& attachments)
+{
+    if (decl.Targets.Color.IsValid())
+    {
+        RenderGraph::RGAttachmentOps col{};
+        if (decl.View->targets.clearColor && !attachments.ColorAlreadyInit &&
+            decl.Scope != WorldPassDrawScope::TransmissiveOnly)
+        {
+            col.Load = RenderGraph::RGLoadOp::Clear;
+            col.Clear.Color[0] = decl.View->targets.clearColorValue[0];
+            col.Clear.Color[1] = decl.View->targets.clearColorValue[1];
+            col.Clear.Color[2] = decl.View->targets.clearColorValue[2];
+            col.Clear.Color[3] = decl.View->targets.clearColorValue[3];
+        }
+        else
+        {
+            col.Load = RenderGraph::RGLoadOp::Load;
+        }
+        col.Store = RenderGraph::RGStoreOp::Store;
+
+        if (attachments.CanResolveColor)
+            p.AttachColorResolve(0, decl.Targets.Color, decl.Targets.Resolve, col);
+        else if (attachments.CollapseToResolve)
+            p.AttachColor(0, decl.Targets.Resolve, col, decl.Targets.ColorRange);
+        else
+            p.AttachColor(0, decl.Targets.Color, col, decl.Targets.ColorRange);
+    }
+    // Feature-owned MRT slices, attached verbatim: formats, clears and
+    // locations belong to the contributing provider.
+    for (uint32_t i = 0; i < decl.Targets.ExtraColorCount; ++i)
+    {
+        const auto& extra = decl.Targets.ExtraColor[i];
+        if (!extra.Texture.IsValid())
+            continue;
+        if (extra.Resolve.IsValid())
+            p.AttachColorResolve(extra.Location, extra.Texture, extra.Resolve, extra.Ops);
+        else
+            p.AttachColor(extra.Location, extra.Texture, extra.Ops);
+    }
+    if (decl.Targets.Depth.IsValid())
+    {
+        RenderGraph::RGAttachmentOps dops{};
+        const bool clearDepthNow =
+            attachments.NeedsClear && decl.View->targets.clearDepth && !attachments.SuppressDepthClear;
+        dops.Load = clearDepthNow ? RenderGraph::RGLoadOp::Clear : RenderGraph::RGLoadOp::Load;
+        dops.Store = RenderGraph::RGStoreOp::Store;
+        if (clearDepthNow)
+            dops.Clear.Depth = decl.View->targets.clearDepthValue;
+        // No stencil clear plumbing: D32 depth targets carry no stencil
+        // aspect. The recorder derives the stencil ops from the depth
+        // attach — load DontCare, store None when read-only else DontCare.
+        // dops.Store is likewise advisory: a ReadOnly attach records None.
+        p.AttachDepth(decl.Targets.Depth, dops,
+                      attachments.DepthReadOnly ? RenderGraph::RGDepthAccess::ReadOnly
+                                    : RenderGraph::RGDepthAccess::ReadWrite,
+                      decl.Targets.DepthRange);
+    }
+}
+
+void RenderServices::RecordWorldPass(RenderGraph::RGContext& ctx, WorldPassExecData& data)
+{
+    auto* cl = ctx.Cmd;
+    if (!cl)
+        return;
+
+    SetWorldPassViewport(cl, data.ViewportW, data.ViewportH, data.Letterbox, data.FlipViewportY);
+
+    auto entityKeys = m_WorldDrawBuilder.GetBatchKeys(data.ViewId);
+    LogMeshPassDiagnostic(
+        "color", "pass-enter", data.ViewId,
+        entityKeys.size(), data.FwdCommands.size(),
+        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
+    // Entity-draw guard: contributors always dispatch when present
+    // (they share targets/viewport but record their own pipelines) —
+    // the regression the contributor-dispatch test pins.
+    const bool runEntityDraws = !entityKeys.empty();
+    const bool hasAnyDraws = runEntityDraws || !data.FwdCommands.empty();
+    if (!hasAnyDraws)
+    {
+        LogMeshPassDiagnostic(
+            "color", "pass-no-draws", data.ViewId,
+            entityKeys.size(), data.FwdCommands.size(),
+            m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
+        return;
+    }
+
+    GPUScene* gpuScene = GetGPUScene();
+    const auto& meshRegistry = GetMeshGPURegistry();
+
+    uint64_t instGpuInstancesAddr = 0;
+    if (m_Device && gpuScene && gpuScene->GetInstanceBuffer().IsValid())
+        instGpuInstancesAddr =
+            m_Device->GetBufferDeviceAddress(gpuScene->GetInstanceBuffer());
+
+    auto& binder = Materials().Binder();
+    // The camera UBO rides a per-pass descriptor set the binder caches
+    // per (view, keywords, layout, passInstanceIndex) for a whole
+    // frame. A reflection probe bakes six cube faces as six passes of
+    // ONE view, each uploading its own face camera, so the slice and
+    // phase must discriminate the key — otherwise every face binds the
+    // first face's camera.
+    if (data.PrepassDepth.IsValid())
+    {
+        if (const TextureHandle depth = ctx.GetTexture(data.PrepassDepth); depth.IsValid())
+            data.Resources.Textures.push_back({HashStringId("ge_prepassDepth"), depth, data.PrepassDepthSampler});
+    }
+    BindVolumetricFogVolume(ctx, data.VolumetricFog, data.VolumetricFogSampler, data.Resources);
+    const uint64_t uploadedCompatListBytes = UploadedCompatInstanceListBytes(data.Resources);
+    auto pass = binder.BeginPass(*cl, data.ViewId, ctx, data.PassKeywords, std::move(data.Resources),
+                                 WorldPassInstanceIndex(data.SliceCascadeIndex, data.Phase));
+
+    WorldPassRecordState state{ctx,          cl,
+                               data.ViewId,  data.PassKeywords,
+                               data.ReliefDepth, data.Scope,
+                               data.Phase,   data.SliceCascadeIndex,
+                               meshRegistry, instGpuInstancesAddr,
+                               binder,       pass,
+                               uploadedCompatListBytes};
+
+    // One traversal orders entity batches and forward contributors (ocean
+    // surface, terrain, grass, fog) before either can emit a blended draw, so
+    // opaque content recorded later cannot overwrite depthWrite-off pixels —
+    // see ForwardDrainOrder.h. Lookup, consolidation and draw guards stay in
+    // the entity recorder.
+    if (runEntityDraws)
+    {
+        state.MeshGroups = MeshPoolGroupSpanForDraws();
+        if (!state.MeshGroups.empty())
+            state.DrawnGroups.reserve(entityKeys.size());
+    }
+    const auto recordEntity = [&](const WorldDrawBuilder::BatchKey& key)
+    { RecordWorldEntityBatches(state, std::span<const WorldDrawBuilder::BatchKey>(&key, 1)); };
+    const auto recordContributor = [&](const DrawCommand& cmd) { RecordWorldContributor(state, cmd); };
+    DrainWorldForwardOpaqueFirst(
+        runEntityDraws ? entityKeys : std::span<const WorldDrawBuilder::BatchKey>{},
+        data.Scope != WorldPassDrawScope::TransmissiveOnly ? std::span<const DrawCommand>(data.FwdCommands)
+                                                           : std::span<const DrawCommand>{},
+        recordEntity, recordContributor);
+
+    if (DrawAttributionEnabled())
+        LogDrawAttribution("color", data.ViewId, entityKeys.size(), state.AttribDrawsIssued,
+                           pass.PipelineBinds, pass.DescriptorBinds,
+                           !MeshPoolGroupSpanForDraws().empty(),
+                           m_MeshPoolGroups.LiveGroupCount());
+
+    binder.EndPass(pass);
+}
+
+// Records `entityKeys` against the pass's pool-group span (state.MeshGroups).
+// Under draw consolidation it issues ONE indirect draw per (colorClassId, pool
+// group) across every call of the pass: the first key of a group is its
+// representative; the per-material filters in RecordWorldEntityBatch are
+// class-uniform (blend state, transmission, ignoreVertexColor all ride the
+// class signature), so evaluating them on the representative is exact.
+// Consume-on-attempt: a representative skipped by a guard drops its group for
+// one frame — the same self-healing semantics as an unpopulated range.
+void RenderServices::RecordWorldEntityBatches(WorldPassRecordState& state,
+                                              std::span<const WorldDrawBuilder::BatchKey> entityKeys)
+{
+    for (const auto& key : entityKeys)
+    {
+        // Color-table slices key on the color class whatever their
+        // cascade index: MaterialDependent keeps the depth-class remap
+        // (a Shadow-table concern) out of the resolution.
+        const DrawStreamLookupKey lookup = ResolveDrawStreamLookupKey(
+            key, state.SliceCascadeIndex, Rendering::MaterialDepthClass::MaterialDependent, state.MeshGroups);
+        if (!state.MeshGroups.empty())
+        {
+            if (lookup.meshKey == Rendering::MeshPoolGroupPlan::kAbsentGroup)
+                continue; // dead mesh row — instances self-reject GPU-side
+            const uint64_t drawKey = (static_cast<uint64_t>(lookup.classKey) << 24) | lookup.meshKey;
+            if (!state.DrawnGroups.insert(drawKey).second)
+                continue;
+        }
+        RecordWorldEntityBatch(state, key, lookup);
+    }
+}
+
+// One indirect draw per (Material, mesh) batch via the bucketer-
+// written slot — or per (class, pool group) under draw
+// consolidation. `lookup` is the resolved axis pair the scatter
+// published this batch's range under (ResolveDrawStreamLookupKey).
+// FindBatchDrawRange at exec; an unpopulated range (first frame
+// for a newly-spawned batch) is skipped this frame.
+void RenderServices::RecordWorldEntityBatch(WorldPassRecordState& state, const WorldDrawBuilder::BatchKey& key,
+                                            const DrawStreamLookupKey& lookup)
+{
+    const Material* material = key.material;
+    if (!material)
+    {
+        LogWorldBatchSkip(state, key, "material-null");
+        return;
+    }
+    // Sorted transparent peel (T2/S2): when the sorted transparent pass owns this
+    // view's ORDER-DEPENDENT Blend draws this frame, drop them here so they are
+    // not also drawn unsorted in the opaque batch order. Order-independent blends
+    // (additive/multiply — IsOrderDependentBlendState) stay batched: sorting them
+    // gains nothing. When the sorted path is inactive (no order-dependent Blend
+    // in the view, or a pipeline without the drain node), Blend rides the batched
+    // path as before. Independent of the transmissive scope (peeled in both All
+    // and OpaqueOnly opaque passes). MUST match the collection filter in
+    // BuildSortedTransparentForView and the extraction class bit exactly
+    // (Risk 3) — all three use IsOrderDependentBlendMaterial.
+    if (IsOrderDependentBlendMaterial(*material) && IsSortedTransparentActive(state.ViewId))
+    {
+        return;
+    }
+    // Transmissive glass is peeled out of the opaque colour pass and drawn in the
+    // dedicated post-grab transmissive pass (and vice-versa). The scatter publishes
+    // this batch's draw range either way, so the FindBatchDrawRange lookup in
+    // RecordIndirectEntityBatch is unaffected by which pass draws it. Only the
+    // scoped passes need the keyword read; the All path (every glass-free view) skips it.
+    if (state.Scope != WorldPassDrawScope::All)
+    {
+        const bool isTransmissive = Rendering::HasKeyword(
+            material->GetVariantKey().materialKeywords, Rendering::MaterialKeyword::Transmission);
+        if (state.Scope == WorldPassDrawScope::OpaqueOnly && isTransmissive)
+        {
+            LogWorldBatchSkip(state, key, "scope-opaque-filter");
+            return;
+        }
+        if (state.Scope == WorldPassDrawScope::TransmissiveOnly && !isTransmissive)
+        {
+            LogWorldBatchSkip(state, key, "scope-transmissive-filter");
+            return;
+        }
+    }
+    const auto* entry = state.MeshRegistry.Find(key.mesh);
+    if (!entry)
+    {
+        LogWorldBatchSkip(state, key, "mesh-entry-missing");
+        return;
+    }
+    Rendering::MeshGPUEntryBindings entryBindings{};
+    const bool drawable = state.MeshRegistry.TryGetDrawableBindings(*entry, entryBindings);
+    if (!drawable || entry->indexCount == 0)
+    {
+        LogWorldBatchSkip(state, key, !drawable ? kMeshNotDrawableReason : "index-count-zero");
+        return;
+    }
+
+    const Rendering::VertexAttributeFlags effectiveFlags =
+        BoundStreamVertexFlags(*entry, entryBindings, material->IgnoresVertexColor());
+
+    const Rendering::MaterialKeyword entityKeywords =
+        WorldEntityColorKeywords(state.PassKeywords, material->GetVariantKey().materialKeywords,
+                                 material->GetAlphaMode(), state.ReliefDepth);
+
+
+    const WorldEntityBatch batch{key, material, entry, entryBindings, effectiveFlags, entityKeywords};
+    if (m_Profile.IsCompat())
+    {
+        RecordCompatEntityBatch(state, batch);
+        return;
+    }
+    RecordIndirectEntityBatch(state, batch, lookup);
+}
+
+void RenderServices::LogWorldBatchSkip(const WorldPassRecordState& state, const WorldDrawBuilder::BatchKey& key,
+                                       const char* reason)
+{
+    LogMeshDrawSkipDiagnostic(
+        "color", reason, state.ViewId,
+        key.materialIndex, key.meshIndex,
+        m_DrawStreamBuilder && m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid(),
+        false, 0ull, state.InstGpuInstancesAddr,
+        m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
+        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
+}
+
+// Compatibility profile: no GPU scatter and no device addresses.
+// The CPU draw stream's frustum-culled instance list replaces
+// the indirection buffer — ONE instanced DrawIndexed per batch,
+// the batch's offset into the view's CompatInstanceList riding
+// a push constant the vertex stage adds gl_InstanceIndex to
+// (instance_io.glsl's compat branch).
+void RenderServices::RecordCompatEntityBatch(WorldPassRecordState& state, const WorldEntityBatch& batch)
+{
+    const CpuDrawStreamBuilder::InstanceList instances =
+        m_CpuDrawStream.GetInstances(state.ViewId, batch.Key.materialIndex, batch.Key.meshIndex,
+                                     CpuDrawStreamBuilder::InstanceSet::Camera);
+    if (instances.Count == 0u)
+        return;
+    assert(state.UploadedCompatListBytes == m_CpuDrawStream.GetIndexList(state.ViewId).size_bytes() &&
+           "the view's instance list was rebuilt after its first pass declared");
+
+    auto [p, ve] = m_MaterialSystem.Variants().GetOrCompileColorVariant(
+        *batch.BatchMaterial, batch.EffectiveFlags, batch.Entry->topology, batch.EntityKeywords, m_FrontFace,
+        state.Ctx);
+    if (!p.IsValid())
+    {
+        LogMeshDrawSkipDiagnostic(
+            "color", "color-pipeline-invalid", state.ViewId,
+            batch.Key.materialIndex, batch.Key.meshIndex, false, false, 0ull,
+            state.InstGpuInstancesAddr, false, 0u);
+        return;
+    }
+
+    state.BindMeshBuffersSticky(batch.EntryBindings, static_cast<IndexType>(batch.Entry->indexType));
+
+    // firstInstance stays 0: it does not reach gl_InstanceIndex
+    // through SPIRV-Cross/Metal, so the list offset is the push
+    // constant on every compat backend.
+    const uint32_t compatListFirst = instances.First;
+    Engine::Renderer::DrawBindings compatBindings{};
+    compatBindings.PushConstants = std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(&compatListFirst),
+        sizeof(compatListFirst));
+
+    const auto resolvedPipe = state.Binder.BindMaterialForDraw(
+        state.Pass, *batch.BatchMaterial, batch.EffectiveFlags, compatBindings, p,
+        ve ? ve->VariantMeta.get() : nullptr, /*pipelineSetCount=*/0,
+        ve ? std::span<const Rendering::DescriptorSetLayoutId>(ve->SetLayouts)
+           : std::span<const Rendering::DescriptorSetLayoutId>{});
+    if (!resolvedPipe.IsValid())
+    {
+        LogMeshDrawSkipDiagnostic(
+            "color", "material-bind-invalid", state.ViewId,
+            batch.Key.materialIndex, batch.Key.meshIndex, false, false, 0ull,
+            state.InstGpuInstancesAddr, false, 0u);
+        return;
+    }
+
+    state.Cl->DrawIndexed(batch.Entry->indexCount, instances.Count, batch.Entry->firstIndex,
+                          static_cast<int32_t>(batch.Entry->vertexOffset),
+                          /*firstInstance=*/0u);
+    state.AttribDrawsIssued += 1u;
+    PushMeshDrawIssuedDiagnostic("color", state.ViewId, batch.Key.materialIndex,
+                                 batch.Key.meshIndex, 1u, 0u);
+}
+
+
+void RenderServices::RecordIndirectEntityBatch(WorldPassRecordState& state, const WorldEntityBatch& batch,
+                                               const DrawStreamLookupKey& lookup)
+{
+    if (!m_DrawStreamBuilder || !m_DrawStreamBuilder->GetOrCreateScatterPipeline().IsValid())
+    {
+        LogMeshDrawSkipDiagnostic(
+            "color", "drawstream-pipeline-invalid", state.ViewId,
+            batch.Key.materialIndex, batch.Key.meshIndex,
+            false, false, 0ull, state.InstGpuInstancesAddr,
+            m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
+            m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
+        return;
+    }
+    // The pass's own Color-table slice; the caller resolved both axes.
+    // The representative material (key.material) binds the PSO.
+    const Rendering::GPUDrawStreamBuilder::BatchDrawRange drawRange =
+        m_DrawStreamBuilder->FindBatchDrawRange(
+            static_cast<uint32_t>(state.ViewId), state.SliceCascadeIndex,
+            lookup.classKey, lookup.meshKey, state.Phase);
+    if (!drawRange.IsValid() || !m_Device)
+    {
+        LogMeshDrawSkipDiagnostic(
+            "color", !m_Device ? "device-null" : "draw-range-invalid", state.ViewId,
+            batch.Key.materialIndex, batch.Key.meshIndex,
+            true, drawRange.IsValid(), 0ull, state.InstGpuInstancesAddr,
+            m_Device ? m_Device->GetCapabilities().supportsBufferDeviceAddress : false,
+            m_DrawStreamBuilder->GetRangeCount());
+        return;
+    }
+    // Shared indirection buffer: records carry arena-global
+    // firstInstance, so one BDA serves every batch and slice.
+    const uint64_t slotIndirectionBda =
+        m_DrawStreamBuilder->GetSharedIndirectionAddress();
+    if (slotIndirectionBda == 0 || state.InstGpuInstancesAddr == 0)
+    {
+        LogMeshDrawSkipDiagnostic(
+            "color", slotIndirectionBda == 0 ? "indirection-bda-zero" : "instance-bda-zero",
+            state.ViewId, batch.Key.materialIndex, batch.Key.meshIndex,
+            true, true, slotIndirectionBda, state.InstGpuInstancesAddr,
+            m_Device->GetCapabilities().supportsBufferDeviceAddress,
+            m_DrawStreamBuilder->GetRangeCount());
+        return;
+    }
+
+    state.PcInst.indirectionAddr  = slotIndirectionBda;
+    state.PcInst.gpuInstancesAddr = state.InstGpuInstancesAddr;
+    std::span<const std::byte> pcBytes(
+        reinterpret_cast<const std::byte*>(&state.PcInst), sizeof(state.PcInst));
+
+    Engine::Renderer::DrawBindings drawBindings{};
+    drawBindings.PushConstants = pcBytes;
+
+    state.BindMeshBuffersSticky(batch.EntryBindings, static_cast<IndexType>(batch.Entry->indexType));
+
+    // Segments(): head AND crossfade tail, per parity — the same
+    // set the depth prepass issues, which is what lets early-Z
+    // admit exactly the fragments the dither below keeps. Tail
+    // segments are absent (maxDrawCount 0) only while the feature is
+    // OFF, which is what makes the default byte-identical; with it
+    // ON they are issued on every frame, at rest included —
+    // Segments() states that cost.
+    const Rendering::FrontFace baseWinding = m_FrontFace;
+    for (const auto& sd : drawRange.Segments())
+        IssueWorldEntitySegment(state, batch, drawRange, drawBindings, slotIndirectionBda,
+                                sd.mirrored ? Rendering::FlipWinding(baseWinding) : baseWinding,
+                                sd.crossfading, sd.segment);
+}
+
+// Draw one segment: compile the color variant for its winding
+// (mirrored instances flip relative to the view base) and its
+// fade state, bind, and issue the indirect draw. Only segments
+// present in the range compile a variant, so mirror-free scenes
+// never compile the flipped winding.
+void RenderServices::IssueWorldEntitySegment(WorldPassRecordState& state, const WorldEntityBatch& batch,
+                                             const Rendering::GPUDrawStreamBuilder::BatchDrawRange& drawRange,
+                                             const DrawBindings& drawBindings, uint64_t slotIndirectionBda,
+                                             Rendering::FrontFace winding, bool crossfading,
+                                             const Rendering::GPUDrawStreamBuilder::BatchDrawSegment& seg)
+{
+    const size_t   cmdOffset    = seg.cmdByteOffset;
+    const size_t   countOffset  = seg.countByteOffset;
+    const uint32_t maxDrawCount = seg.maxDrawCount;
+    // Per-SEGMENT, never per-view: the dither's `discard` costs
+    // early-Z on every fragment of every draw it is compiled
+    // into, and only a tail segment's records can carry a
+    // non-zero fade code.
+    const Rendering::MaterialKeyword segmentKeywords =
+        crossfading ? (batch.EntityKeywords | Rendering::MaterialKeyword::LodCrossfade)
+                    : batch.EntityKeywords;
+    auto variant = m_MaterialSystem.Variants().GetOrCompileColorVariant(
+        *batch.BatchMaterial, batch.EffectiveFlags, batch.Entry->topology, segmentKeywords, winding, state.Ctx);
+    if (!variant.first.IsValid() && crossfading)
+    {
+        // Cold LodCrossfade variant: the miss enqueued an async
+        // compile and would otherwise skip this draw. A fading
+        // instance writes NO head record, so skipping its tail
+        // removes it from colour entirely — it vanishes for the
+        // whole compile window. Fall back to the head variant,
+        // which this pass already draws and is therefore warm:
+        // the indirection word's index mask is unconditional
+        // (lod_crossfade.glsl), so the transform and mesh are
+        // correct and only the dither is absent. Both levels then
+        // draw solid, and each still passes the depth its own
+        // dither half wrote in the prepass, so coverage stays
+        // complete and the cost is overdraw plus a pop — a
+        // quality degradation, where a vanish is a correctness
+        // break.
+        variant = m_MaterialSystem.Variants().GetOrCompileColorVariant(
+            *batch.BatchMaterial, batch.EffectiveFlags, batch.Entry->topology, batch.EntityKeywords, winding,
+            state.Ctx);
+    }
+    auto [p, ve] = variant;
+    if (!p.IsValid())
+    {
+        LogMeshDrawSkipDiagnostic(
+            "color", "color-pipeline-invalid", state.ViewId,
+            batch.Key.materialIndex, batch.Key.meshIndex, true,
+            false, slotIndirectionBda, state.InstGpuInstancesAddr,
+            m_Device->GetCapabilities().supportsBufferDeviceAddress,
+            m_DrawStreamBuilder->GetRangeCount());
+        return;
+    }
+    const auto resolvedPipe = state.Binder.BindMaterialForDraw(
+        state.Pass, *batch.BatchMaterial, batch.EffectiveFlags, drawBindings, p,
+        ve ? ve->VariantMeta.get() : nullptr, /*pipelineSetCount=*/0,
+        ve ? std::span<const Rendering::DescriptorSetLayoutId>(ve->SetLayouts)
+           : std::span<const Rendering::DescriptorSetLayoutId>{});
+    if (!resolvedPipe.IsValid())
+    {
+        LogMeshDrawSkipDiagnostic(
+            "color", "material-bind-invalid", state.ViewId,
+            batch.Key.materialIndex, batch.Key.meshIndex,
+            true, true, slotIndirectionBda, state.InstGpuInstancesAddr,
+            m_Device->GetCapabilities().supportsBufferDeviceAddress,
+            m_DrawStreamBuilder->GetRangeCount());
+        return;
+    }
+    PushMeshDrawIssuedDiagnostic(
+        "color", state.ViewId, batch.Key.materialIndex, batch.Key.meshIndex,
+        maxDrawCount,
+        m_DrawStreamBuilder ? m_DrawStreamBuilder->GetRangeCount() : 0u);
+    state.Cl->DrawIndexedIndirectCount(
+        drawRange.recordBuffer,
+        drawRange.countBuffer,
+        maxDrawCount, // exact per-batch bound (snapshot capacity)
+        /*stride=*/5u * sizeof(uint32_t),
+        cmdOffset,
+        countOffset);
+    ++state.AttribDrawsIssued;
+}
+
+void RenderServices::RecordWorldContributor(WorldPassRecordState& state, const DrawCommand& cmd)
+{
+    const auto* material = cmd.Material;
+    if (!material)
+        return;
+
+    const Rendering::MeshGPUEntry* meshEntry = nullptr;
+    Rendering::MeshGPUEntryBindings meshBindings{};
+    Rendering::VertexAttributeFlags effectiveFlags = cmd.VertexFlags;
+    if (cmd.Geometry.Mesh.IsValid())
+    {
+        meshEntry = state.MeshRegistry.Find(cmd.Geometry.Mesh);
+        if (!meshEntry || meshEntry->indexCount == 0)
+            return;
+        if (!state.MeshRegistry.TryGetDrawableBindings(*meshEntry, meshBindings))
+            return;
+        effectiveFlags = BoundStreamVertexFlags(
+            *meshEntry, meshBindings, material->IgnoresVertexColor());
+    }
+
+    Rendering::PipelineHandle resolvedPipe{};
+    if (cmd.InternedPipeline.IsValid())
+        resolvedPipe = state.Ctx.GetOrCreatePipelineVariant(cmd.InternedPipeline);
+    const Rendering::ShaderMeta* variantMeta = cmd.PipelineMeta;
+    std::span<const Rendering::DescriptorSetLayoutId> pipelineSetLayouts;
+    if (!resolvedPipe.IsValid())
+    {
+        const Rendering::MaterialKeyword contributorKeywords =
+            ContributorColorKeywords(state.PassKeywords, cmd.PassKeywords,
+                                     meshEntry != nullptr);
+        // Contributor draws are explicit DrawCommands, not the
+        // GPU-driven parity-split batches, so they always use the
+        // view's base winding.
+        auto [p, ve] = m_MaterialSystem.Variants().GetOrCompileColorVariant(
+            *material, effectiveFlags, ContributorTopology(meshEntry),
+            contributorKeywords, m_FrontFace, state.Ctx);
+        resolvedPipe = p;
+        if (ve)
+        {
+            variantMeta = ve->VariantMeta.get();
+            pipelineSetLayouts = ve->SetLayouts;
+        }
+    }
+    if (!resolvedPipe.IsValid())
+        return;
+
+    if (meshEntry)
+    {
+        state.BindMeshBuffersSticky(meshBindings, static_cast<IndexType>(meshEntry->indexType));
+    }
+    else
+    {
+        state.SetVertexBufferSticky(cmd.Geometry.AltGeom.VB, 0);
+        state.SetIndexBufferSticky(cmd.Geometry.AltGeom.IB, cmd.Geometry.AltGeom.IndexType);
+    }
+
+    // Empty SetLayouts span: the binder's conservative clear fires
+    // once per contributor pipeline change (at most once per frame
+    // for pinned-pipeline contributors).
+    const auto bound = state.Binder.BindMaterialForDraw(
+        state.Pass, *material, effectiveFlags, cmd.Bindings, resolvedPipe,
+        variantMeta, /*pipelineSetCount=*/0, pipelineSetLayouts);
+    if (!bound.IsValid())
+        return;
+
+    if (cmd.UseIndirect && cmd.IndirectCommandBuffer.IsValid())
+    {
+        state.Cl->DrawIndexedIndirectCount(
+            cmd.IndirectCommandBuffer,
+            cmd.IndirectCountBuffer,
+            cmd.IndirectMaxDrawCount,
+            cmd.IndirectStride,
+            cmd.IndirectCommandOffset,
+            cmd.IndirectCountOffset);
+    }
+    else if (cmd.SubDraws.empty())
+    {
+        const uint32_t indexCount = (cmd.IndexCount != 0 || !meshEntry)
+            ? cmd.IndexCount
+            : meshEntry->indexCount;
+        const uint32_t firstIndex = (cmd.IndexCount != 0 || !meshEntry)
+            ? cmd.FirstIndex
+            : meshEntry->firstIndex;
+        const int32_t vertexOffset = (cmd.IndexCount != 0 || !meshEntry)
+            ? cmd.VertexOffset
+            : static_cast<int32_t>(meshEntry->vertexOffset);
+        state.Cl->DrawIndexed(indexCount, cmd.InstanceCount,
+                        firstIndex, vertexOffset, cmd.FirstInstance);
+    }
+    else
+    {
+        for (const auto& sub : cmd.SubDraws)
+        {
+            state.Cl->DrawIndexed(sub.IndexCount, sub.InstanceCount,
+                            sub.FirstIndex, sub.VertexOffset, sub.FirstInstance);
+        }
+    }
 }
 
 Rendering::RenderGraph::RGPass RenderServices::AddForwardCommandPassForView(
@@ -2264,6 +2430,11 @@ Rendering::RenderGraph::RGPass RenderServices::AddForwardCommandPassForView(
                 p.Read(vfr.IblPrefilter, RenderGraph::RGTextureRead::Sampled);
             if (vfr.IblBrdfLut.IsValid())
                 p.Read(vfr.IblBrdfLut, RenderGraph::RGTextureRead::Sampled);
+            for (uint32_t i = 0; i < ImageBasedLightingFeature::kMaxLocalProbes; ++i)
+            {
+                if (vfr.IblLocalIrradiance[i].IsValid()) p.Read(vfr.IblLocalIrradiance[i], RenderGraph::RGTextureRead::Sampled);
+                if (vfr.IblLocalPrefilter[i].IsValid()) p.Read(vfr.IblLocalPrefilter[i], RenderGraph::RGTextureRead::Sampled);
+            }
             // ge_gtao: same compute->fragment edge + General->ShaderReadOnly
             // transition as the entity world pass (the by-name binding alone
             // forms no edge; VUID-vkCmdDraw-None-09600 otherwise). Gated
@@ -2425,7 +2596,7 @@ Rendering::RenderGraph::RGPass RenderServices::AddForwardCommandPassForView(
             for (const DrawCommand& cmd : passCommands)
             {
                 const auto* material = cmd.Material;
-                if (!material)
+                if (!material && (!cmd.InternedPipeline.IsValid() || !cmd.PipelineMeta))
                     continue;
 
                 const Rendering::MeshGPUEntry* meshEntry = nullptr;
@@ -2439,7 +2610,7 @@ Rendering::RenderGraph::RGPass RenderServices::AddForwardCommandPassForView(
                     if (!meshRegistry.TryGetDrawableBindings(*meshEntry, meshBindings))
                         continue;
                     effectiveFlags = BoundStreamVertexFlags(
-                        *meshEntry, meshBindings, material->IgnoresVertexColor());
+                        *meshEntry, meshBindings, material && material->IgnoresVertexColor());
                 }
 
                 Rendering::PipelineHandle resolvedPipe{};
@@ -2447,7 +2618,7 @@ Rendering::RenderGraph::RGPass RenderServices::AddForwardCommandPassForView(
                     resolvedPipe = ctx.GetOrCreatePipelineVariant(cmd.InternedPipeline);
                 const Rendering::ShaderMeta* variantMeta = cmd.PipelineMeta;
                 std::span<const Rendering::DescriptorSetLayoutId> pipelineSetLayouts;
-                if (!resolvedPipe.IsValid())
+                if (!resolvedPipe.IsValid() && material)
                 {
                     const Rendering::MaterialKeyword contributorKeywords =
                         ContributorColorKeywords(passKeywords, cmd.PassKeywords,
@@ -2487,9 +2658,13 @@ Rendering::RenderGraph::RGPass RenderServices::AddForwardCommandPassForView(
                     setIbSticky(cmd.Geometry.AltGeom.IB, cmd.Geometry.AltGeom.IndexType);
                 }
 
-                const auto bound = binder.BindMaterialForDraw(
-                    pass, *material, effectiveFlags, cmd.Bindings, resolvedPipe,
-                    variantMeta, /*pipelineSetCount=*/0, pipelineSetLayouts);
+                const auto bound = material
+                    ? binder.BindMaterialForDraw(pass, *material, effectiveFlags, cmd.Bindings,
+                                                resolvedPipe, variantMeta, cmd.PipelineSetCount,
+                                                pipelineSetLayouts)
+                    : binder.BindPipelineForDraw(pass, resolvedPipe, *cmd.PipelineMeta,
+                                                cmd.Bindings, cmd.PipelineSetCount,
+                                                pipelineSetLayouts);
                 if (!bound.IsValid())
                     continue;
 

@@ -1,8 +1,9 @@
 #include "PhysicsECS/PhysicsWorldService.h"
 
+#include "Core/Engine.h"
 #include "PhysicsECS/PhysicsEntityEventCallbacks.h"
-
 #include "Logger/Logger.h"
+#include "PhysicsECS/ContactSurfaceTable.h"
 
 namespace GameEngine::PhysicsECS
 {
@@ -25,6 +26,16 @@ void PhysicsWorldService::Initialize(const Physics::PhysicsWorldSettings& settin
     s_LastCharactersComposed = 0;
     ++s_WorldGeneration;
     s_World = std::make_unique<Physics::PhysicsWorld>(settings);
+    // One-way surfaces and .physmat materials are engine behaviour: every world
+    // gets the default predicate, and starts from an empty material table so a
+    // previous world's indices cannot be read back through a stale body.
+    ContactSurfaceTable::Reset();
+    ContactSurfaceTable::Install(*s_World);
+    // Editing a .physmat retunes the surfaces already baked into bodies, so the
+    // table follows the file rather than the first read of it.
+    auto& engine = EngineCore::GetInstance();
+    if (engine.IsInitialized())
+        ContactSurfaceTable::SubscribeToAssetChanges(engine.GetAssetManager().GetEventDispatcher());
     Logger::Log::Info("[PhysicsECS] PhysicsWorld initialized");
 }
 
@@ -32,6 +43,8 @@ void PhysicsWorldService::Shutdown()
 {
     PhysicsEntityEventCallbacks::ClearAll();
     s_World.reset();
+    ContactSurfaceTable::UnsubscribeFromAssetChanges();
+    ContactSurfaceTable::Reset();
     s_RenderInterpolationAlpha = 1.0f;
     s_LastStepMs = 0.0f;
     s_LastBodiesComposed = 0;

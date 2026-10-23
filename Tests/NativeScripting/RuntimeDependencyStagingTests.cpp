@@ -8,6 +8,7 @@
 #include "Engine/Build/RuntimeDependencyStaging.h"
 
 #include "Engine/Build/BuildPipeline.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
@@ -73,9 +74,8 @@ struct StagingDirs
 
     explicit StagingDirs(const char* name)
     {
-        Root = fs::temp_directory_path() / name;
+        Root = GameEngine::TestUtils::MakeUniqueTempDirectory(name);
         std::error_code ec;
-        fs::remove_all(Root, ec);
         Source = Root / "editor";
         Dest = Root / "game";
         fs::create_directories(Source, ec);

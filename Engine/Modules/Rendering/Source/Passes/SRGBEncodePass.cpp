@@ -20,6 +20,7 @@
 #include "Rendering/Materials/ShaderMeta.h"
 #include "Rendering/ShaderCache/ShaderPackageIO.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 namespace GameEngine {
 namespace Rendering {
@@ -143,11 +144,7 @@ FinalizeQuantizer SelectTransferQuantizer(bool sourceIsEncoded, TextureFormat so
 // switch.
 bool IsOutputDitherEnabled()
 {
-	static const bool s_Enabled = []
-	{
-		const char* value = std::getenv("GE_OUTPUT_DITHER");
-		return !(value && value[0] == '0' && value[1] == '\0');
-	}();
+	static const bool s_Enabled = Platform::EnvironmentSwitchEnabled("GE_OUTPUT_DITHER", true);
 	return s_Enabled;
 }
 
@@ -171,8 +168,7 @@ const OutputDebandSettings& GetOutputDebandSettings()
 	static const OutputDebandSettings s_Settings = []
 	{
 		OutputDebandSettings s{};
-		if (const char* value = std::getenv("GE_DEBAND"); value && value[0] == '0' && value[1] == '\0')
-			s.Enabled = false;
+		s.Enabled = Platform::EnvironmentSwitchEnabled("GE_DEBAND", s.Enabled);
 		if (const char* value = std::getenv("GE_DEBAND_THRESHOLD"))
 		{
 			char* end = nullptr;

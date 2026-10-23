@@ -283,7 +283,7 @@ layout(std430, set = 0, binding = 0) readonly buffer ModifierBuffer
 
 layout(r32f, set = 0, binding = 1) uniform writeonly image2D gAtlasHeightStorage;
 
-// ---- Base fill: value noise (mirror Heightfield.cpp NoiseHash / SmoothNoise). ----
+// ---- Base fill: value noise (mirror Noise/ValueNoise2D.h ValueLatticeHash / ValueNoise2D). ----
 float BaseNoiseHash(int x, int z, uint seed)
 {
     uint h = uint(x) * 374761393u + uint(z) * 668265263u + seed * 1274126177u;

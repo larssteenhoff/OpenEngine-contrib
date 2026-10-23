@@ -8,7 +8,7 @@ namespace GameEngine::Rendering
 {
 
 // FNV-1a 64-bit offset basis as the hash seed across this file.
-static constexpr uint64_t kHashSeed = 0xcbf29ce484222325ULL;
+static constexpr uint64_t kHashSeed = Hashing::kFnv1a64OffsetBasis;
 
 uint64_t PipelineFormatKey::Hash() const noexcept
 {

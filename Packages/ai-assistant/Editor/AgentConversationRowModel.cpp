@@ -122,6 +122,8 @@ AgentConversationRowModel AgentConversationRowModel::From(const ConversationMess
         row.FromUser = true;
         for (const MarkupToken& token : MarkupContext::FindTokens(message.Text))
             row.MarkupChips.push_back({token.Text, ChipLabel(token, message.Markups.Mentions)});
+        for (const PromptFile& file : message.Files)
+            row.FileChips.push_back(file.Name);
         return row;
     }
 

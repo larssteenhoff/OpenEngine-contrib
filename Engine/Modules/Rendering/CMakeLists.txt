@@ -34,6 +34,8 @@ option(RENDERING_ENABLE_GPU_CULLING "Build GPU culling examples" OFF)
 # classify as Linux.
 if(EMSCRIPTEN)
     set(RENDERING_PLATFORM_WEB TRUE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(RENDERING_PLATFORM_IOS TRUE)
 elseif(WIN32)
     set(RENDERING_PLATFORM_WINDOWS TRUE)
 elseif(UNIX AND NOT APPLE)
@@ -117,7 +119,9 @@ endif()
 # vcpkg-provided headers/loader rather than a hard-coded local SDK path.
 # Validation layers come from the system Vulkan SDK install (registered with
 # the Vulkan loader via OS config), not from vcpkg.
-find_package(Vulkan QUIET)
+if(RENDERING_BUILD_VULKAN)
+    find_package(Vulkan QUIET)
+endif()
 
 # On macOS, if CMake did not find Vulkan but the official Vulkan SDK
 # (MoltenVK) is installed and VULKAN_SDK is set, fall back to using that
@@ -166,7 +170,7 @@ else()
 endif()
 
 # Metal (macOS only)
-if(RENDERING_PLATFORM_MACOS AND RENDERING_BUILD_METAL)
+if((RENDERING_PLATFORM_MACOS OR RENDERING_PLATFORM_IOS) AND RENDERING_BUILD_METAL)
     set(RENDERING_HAS_METAL TRUE)
     message(STATUS "Metal backend enabled (macOS)")
 else()
@@ -203,7 +207,7 @@ include(FetchContent)
 
 # GLFW via vcpkg (required on desktop). On wasm the GLFW API is emscripten's
 # JS implementation: headers ship in the sysroot, -s USE_GLFW=3 links it.
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND NOT GE_MOBILE)
     find_package(glfw3 CONFIG REQUIRED)
     message(STATUS "GLFW found via find_package (glfw3 CONFIG)")
 
@@ -274,6 +278,10 @@ if(GLSLC_EXECUTABLE)
     set(GE_VOLUMETRIC_FOG_SHADER_DIR "${CMAKE_SOURCE_DIR}/Engine/Modules/VolumetricFog/Shaders")
     if(EXISTS "${GE_VOLUMETRIC_FOG_SHADER_DIR}")
         list(APPEND GE_SHADER_SOURCE_DIRS "${GE_VOLUMETRIC_FOG_SHADER_DIR}")
+    endif()
+    set(GE_TILEMAP_SHADER_DIR "${CMAKE_SOURCE_DIR}/Engine/Modules/TileMapECS/Shaders")
+    if(EXISTS "${GE_TILEMAP_SHADER_DIR}")
+        list(APPEND GE_SHADER_SOURCE_DIRS "${GE_TILEMAP_SHADER_DIR}")
     endif()
     # Ocean lives in a SUBdirectory of the shader root, and the auto-glob below
     # is not recursive, so none of it was ever compiled: the module fell back to
@@ -354,6 +362,9 @@ if(GLSLC_EXECUTABLE)
     list(APPEND VERTEX_SHADERS lens_flare.vert)
     list(APPEND FRAGMENT_SHADERS lens_flare.frag)
 
+    # 2D sprites (instanced world-space quads, unlit + alpha blended)
+    list(APPEND VERTEX_SHADERS sprite2d.vert)
+    list(APPEND FRAGMENT_SHADERS sprite2d.frag)
     # Sun glare (analytic additive veiling halo)
     list(APPEND VERTEX_SHADERS sun_glare.vert)
     list(APPEND VERTEX_SHADERS sun_glare_ms.vert)
@@ -841,22 +852,13 @@ set(RENDERING_WEBGPU_SOURCES
     Source/WebGPU/WebGpuUnsupported.cpp
 )
 
-# Only the surface bridge consumes Platform's header-only native-window access.
-# Standalone renderer consumers need no Platform runtime objects for this.
-set_property(SOURCE Source/WebGPU/WebGpuSurfaceBridge.cpp APPEND PROPERTY
-    INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include)
-
-# The window frame reads GE_ASYNC_COMPUTE through Platform's header-only
-# environment switch, the one rule every GE_ switch follows.
-set_property(SOURCE Source/Core/RenderGraph/RGWindowFrame.cpp APPEND PROPERTY
-    INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include)
-
 set(RENDERING_METAL_SOURCES
     # Single TU that defines the metal-cpp *_PRIVATE_IMPLEMENTATION symbols.
     Source/Metal/MetalCppImpl.cpp
     Source/Metal/MetalDevice.cpp
     Source/Metal/MetalHdrOutput.cpp
     Source/Metal/MetalCommandList.cpp
+    Source/Metal/MetalDirectDescriptorBinding.cpp
     Source/Metal/MetalResources.cpp
     Source/Metal/MetalTransientDescriptorArena.cpp
     Source/Metal/MetalSwapchain.cpp
@@ -1064,8 +1066,15 @@ if(EMSCRIPTEN)
     # runtime's JS GLFW, pulled in at executable link.
     target_link_options(GameEngineRendering INTERFACE "SHELL:-s USE_GLFW=3")
 else()
-    # We already require glfw3 via find_package above
-    target_link_libraries(GameEngineRendering PUBLIC glfw)
+    if(GE_MOBILE)
+        find_package(SDL3 CONFIG REQUIRED)
+        target_link_libraries(GameEngineRendering PUBLIC SDL3::SDL3)
+        if(RENDERING_PLATFORM_IOS)
+            target_link_libraries(GameEngineRendering PUBLIC "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework IOSurface")
+        endif()
+    else()
+        target_link_libraries(GameEngineRendering PUBLIC glfw)
+    endif()
 endif()
 
 # Mirror the Engine-level profiling switch so RenderGraph can strip per-pass
@@ -1174,6 +1183,13 @@ target_include_directories(GameEngineRendering
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Source
 )
+
+# Platform's header-only pieces: the environment switch every GE_ switch reads
+# through (Rendering/Core/GPUInstanceDepthClass.h reads one inline, so the path
+# is public) and the WebGPU surface bridge's native-window access. Include path
+# only: standalone renderer consumers need no Platform runtime objects.
+target_include_directories(GameEngineRendering PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include>)
 
 # Compiler-specific settings
 if(MSVC)
@@ -1327,6 +1343,8 @@ if (TARGET CompileShaders AND (TARGET ShaderReflect OR GE_SHADERREFLECT_EXECUTAB
         DEPENDS ${GE_SHADER_COMMON_INCLUDES}
         COMMENT "Compiling vertex shader: sky_stars_billboard_fog.vert")
     _ge_add_shaderpkg_graphics(lens_flare lens_flare.vert lens_flare.frag)
+    _ge_add_shaderpkg_graphics(tilemap tilemap.vert tilemap.frag)
+    _ge_add_shaderpkg_graphics(sprite2d sprite2d.vert sprite2d.frag)
     _ge_add_shaderpkg_graphics(sun_glare sun_glare.vert sun_glare.frag)
     # MSAA variant: same fragment stage, a sampler2DMS depth probe in the vertex stage.
     _ge_add_shaderpkg_graphics(sun_glare_ms sun_glare_ms.vert sun_glare.frag)
@@ -1440,6 +1458,9 @@ if (TARGET CompileShaders AND (TARGET ShaderReflect OR GE_SHADERREFLECT_EXECUTAB
     _ge_add_shaderpkg_graphics(cas fullscreen_noinput.vert cas.frag)
     _ge_add_shaderpkg_graphics(fast_blur_dof fullscreen_noinput.vert fast_blur_dof.frag)
     _ge_add_shaderpkg_graphics(heat_distortion fullscreen_noinput.vert heat_distortion.frag)
+    _ge_add_shaderpkg_graphics(camera_rain fullscreen_noinput.vert camera_rain.frag)
+    _ge_add_shaderpkg_graphics(rain_streaks rain_streaks.vert rain_streaks.frag)
+    _ge_add_shaderpkg_graphics(depth_pixelation fullscreen_noinput.vert depth_pixelation.frag)
     _ge_add_shaderpkg_compute(sssr_classify sssr_classify.comp)
     _ge_add_shaderpkg_compute(sssr_prepare_args sssr_prepare_args.comp)
     _ge_add_shaderpkg_compute(sssr_intersect sssr_intersect.comp)
@@ -1447,6 +1468,8 @@ if (TARGET CompileShaders AND (TARGET ShaderReflect OR GE_SHADERREFLECT_EXECUTAB
     _ge_add_shaderpkg_compute(sssr_prefilter sssr_prefilter.comp)
     _ge_add_shaderpkg_compute(sssr_temporal sssr_temporal.comp)
     _ge_add_shaderpkg_compute(sssr_composite sssr_composite.comp)
+    _ge_add_shaderpkg_compute(planar_reflection_blur planar_reflection_blur.comp)
+    _ge_add_shaderpkg_compute(planar_reflection_composite planar_reflection_composite.comp)
     _ge_add_shaderpkg_graphics(fog_glow_prefilter fullscreen_noinput.vert fog_glow_prefilter.frag)
     _ge_add_shaderpkg_graphics(fog_glow_fast fullscreen_noinput.vert fog_glow_fast.frag)
     _ge_add_shaderpkg_graphics(fog_glow_downsample fullscreen_noinput.vert fog_glow_downsample.frag)
@@ -1709,6 +1732,7 @@ if(GTest_FOUND OR TARGET GTest::gtest)
         GTest::gtest
         GTest::gtest_main
     )
+    target_include_directories(ShaderGraphCompilerTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
     # rendering_test_link_image splices Logger's objects in; do not also link Logger
     # directly or its .obj files get pulled in twice (LNK2005).
     rendering_test_link_image(ShaderGraphCompilerTests)
@@ -2074,6 +2098,7 @@ if(GTest_FOUND OR TARGET GTest::gtest)
         GTest::gtest
         GTest::gtest_main
     )
+    target_include_directories(DeviceRecoveryTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
     rendering_test_shader_paths(DeviceRecoveryTests)
     target_include_directories(DeviceRecoveryTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     # The device-loss routing lint proves "no unrouted VK_ERROR_DEVICE_LOST site
@@ -2600,6 +2625,7 @@ if(GTest_FOUND)
             ${PARALLAX_OCCLUSION_HEADER}
             ${PARALLAX_STEPS_VIEW_HEADER}
             ${PARALLAX_DEPTH_HEADER}
+            Tests/ClusterProjectionTests.cpp
             Tests/ParallaxOcclusionTests.cpp
             Tests/RendererProfileTests.cpp
             Tests/ShaderVariantKeyTests.cpp
@@ -2624,6 +2650,7 @@ if(GTest_FOUND)
             Tests/VertexDeformationClockTests.cpp
             Tests/DeformationMotionVariantTests.cpp)
         target_link_libraries(ShaderVariantKeyTests PRIVATE GameEngineRendering FileSystemObjects GTest::gtest GTest::gtest_main)
+        target_include_directories(ShaderVariantKeyTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
         # Module-private headers (Source/Materials/ShaderSourceCache.h) by module path.
         target_include_directories(ShaderVariantKeyTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
             ${GLSL_HOST_SHIM_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -2722,8 +2749,11 @@ if(GTest_FOUND)
         rendering_test_shader_paths(PipelineWarmProbeTests)
         add_test(NAME PipelineWarmProbeTests COMMAND $<TARGET_FILE:PipelineWarmProbeTests>)
 
-        # Pipeline cache intern + concrete + LRU + L1 tests.
-        add_executable(PipelineDescHashTests Tests/PipelineDescHashTests.cpp)
+        # Pipeline cache intern + concrete + LRU + L1 tests, and the
+        # SpecializationConstants container that pipeline descs carry.
+        add_executable(PipelineDescHashTests
+            Tests/PipelineDescHashTests.cpp
+            Tests/SpecializationConstantsTest.cpp)
         target_link_libraries(PipelineDescHashTests PRIVATE GameEngineRendering FileSystemObjects GTest::gtest GTest::gtest_main)
         rendering_test_link_image(PipelineDescHashTests)
         rendering_test_shader_paths(PipelineDescHashTests)
@@ -3674,7 +3704,10 @@ if(RENDERING_HAS_WEBGPU AND BUILD_TESTING AND TARGET Engine)
         )
         ge_set_output_tests(WebGpuDeviceSmokeTests)
         ge_stage_runtime_dependencies(WebGpuDeviceSmokeTests)
-        add_test(NAME WebGpuDeviceSmokeTests COMMAND $<TARGET_FILE:WebGpuDeviceSmokeTests>)
+        # Run from the build root, where the cooked Shaders/*.shaderpkg are staged: the pass layout
+        # case loads the sky and lens flare packages by working-dir-relative name.
+        add_test(NAME WebGpuDeviceSmokeTests COMMAND $<TARGET_FILE:WebGpuDeviceSmokeTests>
+                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     endif()
 endif()
 

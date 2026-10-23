@@ -96,12 +96,7 @@ struct WorldConfig {
     size_t ExpectedEntityCount = 65'536;           // Pre-allocate for this many entities (grows on demand)
     size_t CommandBufferSize = 32768;              // Command buffer size per thread
     bool EnableDebugLogging = false;               // Enable detailed ECS debug logging
-    bool EnableBulkOperations = true;              // Enable direct bulk operations mode
     float ArchetypeGrowthFactor = 1.5f;            // Growth factor for archetype storage
-
-    // Archetype management
-    bool EnableArchetypePruning = false;           // Enable automatic pruning of empty archetypes
-    size_t ArchetypePruningThreshold = 100;        // Prune after this many command processing cycles
 };
 
 // SPSC (single-producer, single-consumer) lock-free command ring buffer.
@@ -721,6 +716,14 @@ public:
     void GetComponentsBatch(std::span<const EntityHandle> entities,
                             std::span<std::tuple<const Ts*...>> out) const;
 
+    // Batched write grant, the batch form of GetComponentForWrite: for each
+    // handle, writes the entity's mutable T into `out` (nullptr where the
+    // entity is dead or lacks T) and stamps T's column of the owning chunk,
+    // under one worldMutex shared-lock hold and one version for the batch.
+    // Pointer lifetime matches GetComponentsBatch.
+    template<Component T>
+    void GetComponentsBatchForWrite(std::span<const EntityHandle> entities, std::span<T*> out);
+
     // Check if entity has component
     template<Component T>
     bool HasComponent(EntityHandle entity) const;
@@ -928,16 +931,9 @@ public:
 
     // ARCHETYPE MANAGEMENT
 
-    // Prune empty archetypes (optional optimization)
-    size_t PruneEmptyArchetypes();
-
     // Compact empty chunks across all archetypes. Frees memory and updates entity metadata.
     // Returns total chunks freed. Safe to call periodically (e.g. after ProcessCommands).
     size_t CompactAllChunks();
-
-    // Configure archetype pruning
-    void SetArchetypePruningEnabled(bool enabled) { config.EnableArchetypePruning = enabled; }
-    void SetArchetypePruningThreshold(size_t threshold) { config.ArchetypePruningThreshold = threshold; }
 
     // Access component size registry (public for ArchetypeTable initialization).
     const std::unordered_map<ComponentTypeId, std::size_t>& GetComponentSizes() const { return componentSizes; }
@@ -992,7 +988,7 @@ public:
     uint64 GetEntityColumnVersion(EntityHandle entity, ComponentTypeId typeId) const;
 
     // Record write grants for a batch of entities' `typeId` column — the same
-    // stamp GetComponentForWrite and a Write<T> query visit issue, for writers
+    // stamp GetComponentForWrite and a Writable<T> write issue, for writers
     // that mutate through pointers cached OUTSIDE the granting call (today:
     // the transform hierarchy's node cache, whose WorldTransform pointers are
     // captured once at topology rebuild). Without it the write is invisible to
@@ -1431,17 +1427,13 @@ private:
     // holds worldMutex.
     bool IsParentInactive(const Archetype* archetype, const EntityMetadata& metadata) const;
 
-    // Per-entity serialization/JSON plumbing for the public
-    // SerializeWorld/DeserializeWorld pair (and the debug JSON dump).
+    // Per-entity serialization plumbing for the public SerializeWorld/DeserializeWorld pair.
     std::vector<uint8_t> SerializeEntity(EntityHandle entity);
     EntityHandle DeserializeEntity(std::span<const uint8_t> data, EntityHandle entity);
-    std::string GetEntityAsJson(EntityHandle entity);
-    std::string GetWorldAsJson();
 
-    // Lock-free internal variants of serialization/JSON methods.
+    // Lock-free internal variant of SerializeEntity.
     // Caller must already hold worldMutex (shared or unique).
     std::vector<uint8_t> SerializeEntityUnsafe(EntityHandle entity) const;
-    std::string GetEntityAsJsonUnsafe(EntityHandle entity) const;
 
     ComponentHookToken InstallComponentHook(ComponentHookKind kind, ComponentTypeId typeId, ComponentHook hook);
     ScopedSubscription CreateComponentHookSubscription(ComponentHookToken token);

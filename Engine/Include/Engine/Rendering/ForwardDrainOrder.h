@@ -13,6 +13,7 @@
 
 #include "Engine/Rendering/DrawCommand.h"
 #include "Engine/Rendering/Material.h"
+#include "Engine/Rendering/WorldDrawBuilder.h"
 #include "Rendering/Materials/MaterialAlphaMode.h"
 
 #include <cstdint>
@@ -25,6 +26,27 @@ namespace GameEngine::Engine::Renderer
 inline bool IsBlendedContributor(const DrawCommand& cmd)
 {
     return cmd.Material && cmd.Material->GetAlphaMode() == MaterialAlphaMode::Blend;
+}
+
+// Dispatch both sources together: finishing entities before starting contributors
+// can still put a blended entity ahead of an opaque contributor. The callbacks
+// are the world pass's actual draw recorders; guards and range consolidation stay
+// with those recorders. Each phase preserves each source's existing order.
+template <typename RecordEntity, typename RecordContributor>
+void DrainWorldForwardOpaqueFirst(std::span<const WorldDrawBuilder::BatchKey> entities,
+                                 std::span<const DrawCommand> contributors,
+                                 const RecordEntity& recordEntity,
+                                 const RecordContributor& recordContributor)
+{
+    for (bool blendPhase : {false, true})
+    {
+        for (const auto& key : entities)
+            if (bool(key.material && key.material->GetAlphaMode() == MaterialAlphaMode::Blend) == blendPhase)
+                recordEntity(key);
+        for (const auto& command : contributors)
+            if (IsBlendedContributor(command) == blendPhase)
+                recordContributor(command);
+    }
 }
 
 // Indices into `commands` in drain order: depth-writing (opaque / masked /

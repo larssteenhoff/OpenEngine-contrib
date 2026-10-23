@@ -264,9 +264,10 @@ struct Transform
 //
 // A THIRD channel — the per-(chunk, column) write grant that
 // Changed<WorldTransform> consumers filter on (the terrain modifier dirty
-// scan) — is issued for you whenever you reach the component through a
-// Write<WorldTransform> query visit or GetComponentForWrite. It is NOT issued
-// by writing through a pointer cached outside such a call; that writer must
+// scan) — is issued for you whenever you reach the component through
+// Writable<WorldTransform>::Mutable() or Set() in a query callback, a
+// pointer-shape Write<WorldTransform> visit, or GetComponentForWrite. It is NOT
+// issued by writing through a pointer cached outside such a call; that writer must
 // stamp explicitly (World::StampComponentWriteBatch). The transform
 // hierarchy's node cache is the only writer of that shape today.
 //

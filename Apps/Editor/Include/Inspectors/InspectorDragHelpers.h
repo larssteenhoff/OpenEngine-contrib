@@ -135,20 +135,12 @@ inline UIElement* FindDragHighlightRow(Label* label)
 
 // Toggle the scrub-drag highlight: the label brightens and the enclosing row
 // gets one .dragging class so CSS highlights every value field inside it,
-// independent of the row's internal structure.
+// independent of the row's internal structure. AddClass/RemoveClass restyle
+// the element's whole subtree when the class changes.
 inline void SetLabelDragHighlight(Label* label, bool on)
 {
     if (!label)
         return;
-
-    const unsigned flags = UIElement::StyleDirty | UIElement::VisualDirty;
-    std::function<void(UIElement*)> markSubtree = [&markSubtree](UIElement* el) {
-        if (!el)
-            return;
-        el->MarkDirty(flags);
-        for (const auto& ch : el->GetChildren())
-            markSubtree(ch.get());
-    };
 
     if (on)
     {
@@ -158,7 +150,6 @@ inline void SetLabelDragHighlight(Label* label, bool on)
     {
         label->RemoveClass("dragging");
     }
-    label->MarkDirty(flags);
 
     if (UIElement* row = FindDragHighlightRow(label))
     {
@@ -170,7 +161,6 @@ inline void SetLabelDragHighlight(Label* label, bool on)
         {
             row->RemoveClass("dragging");
         }
-        markSubtree(row);
     }
 }
 

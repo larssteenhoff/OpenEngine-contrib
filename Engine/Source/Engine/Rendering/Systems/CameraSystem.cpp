@@ -7,6 +7,7 @@
 #include "Engine/Rendering/CameraAspectRatio.h"
 #include "Engine/Rendering/PlanetCameraFraming.h"
 #include "Engine/Rendering/RenderServices.h"
+#include "Engine/Rendering/TileMapCameraPixelGrid.h"
 
 namespace GameEngine { namespace Engine::Renderer {
 using namespace ::GameEngine::Rendering;
@@ -50,6 +51,15 @@ void CameraSystem::Update(ECS::World& world, float32 /*deltaTime*/) {
     // View applies, shared so the game / Player camera doesn't clip a planet from orbit.
     // Transient: reverts once the planet is disabled or deleted.
     cameraComp.FarZ = ExpandFarClipForSphericalTerrain(world, cameraComp.FarZ);
+
+    // Same shape as the far clip above: an authored value resolved against the
+    // scene each frame. Auto pixel-perfect cameras take their texel density from
+    // the tilemap art rather than a hand-typed number. Transient, never persisted.
+    if (cameraComp.PixelPerfect && !cameraComp.Perspective)
+    {
+        cameraComp.PixelPerfectPixelsPerUnit =
+            static_cast<uint32>(ResolvePixelPerfectPixelsPerUnit(world, cameraComp));
+    }
 
     uint32 viewportW = 0;
     uint32 viewportH = 0;

@@ -46,7 +46,8 @@ typedef enum GE_Result {
     GE_Result_NotFound = -3,
     GE_Result_NotInitialized = -4,
     GE_Result_AlreadyInitialized = -5,
-    GE_Result_BufferFull = -6
+    GE_Result_BufferFull = -6,
+    GE_Result_Busy = -7            // The same operation is already running; retry later
 } GE_Result;
 
 typedef enum GE_LogLevel {
@@ -201,7 +202,9 @@ GE_API uint32_t GE_CDECL GE_ScriptingGetAbiVersion(void);
 // 3.2 adds GE_Animator_PollEventsOnEntity and GE_AnimationEventRecord (AnimatorABI.h) — additive, minor bump.
 // 4.0 removes the GE_Input_* exports and GE_InputActionState: scripts reach Input through its generated
 // table (GE_Input_GetInterface). It adds GE_GetLastScriptError.
-static const uint32_t GE_ABI_VERSION_CURRENT = GE_ABI_VERSION_ENCODE(4u, 0u);
+// 4.1 adds GE_Result_Busy, which GE_SwapPreloadedContext returns while another swap is
+// running — additive, minor bump.
+static const uint32_t GE_ABI_VERSION_CURRENT = GE_ABI_VERSION_ENCODE(4u, 1u);
 
 // Forward declarations for function pointer types used in the interface
 typedef GE_Result (GE_CDECL *GE_Log_Fn)(GE_LogLevel level, const char* msg, uint32_t msgLen);

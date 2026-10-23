@@ -282,3 +282,16 @@ Prefer dedicated APIs:
 
 Inline `style` and arbitrary attributes are intended for XML/CSS parsing rather
 than runtime code.
+
+## Prepare text before display
+
+Call `UIManager::LoadFont` on the UI thread with the family, weight, style, and UTF-8 strings the destination will show. Include menu labels, the level title, and digits needed by counters. An empty family selects the explicitly installed default face.
+
+```cpp title="Prepare a level title"
+UIManager::FontFaceRequest title;
+title.Family = "Level Title";
+title.Text = "Forest — Start New Game — Load Game — 0123456789";
+const auto status = ui.LoadFont(title);
+```
+
+Call it each frame after the UI update until it returns `Loaded` or `Failed`. `Loading` means the face the UI draws this family, weight and style with is still loading. `Failed` means that face could not be loaded; handle it before revealing the destination. A fallback face never counts as `Loaded`. `Loaded` means the glyphs for the text are ready; their textures may still upload on first draw.

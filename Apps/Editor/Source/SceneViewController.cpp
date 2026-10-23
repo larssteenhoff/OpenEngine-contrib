@@ -4,6 +4,7 @@
 #include "Components/Rendering/ReflectionProbe.h"
 #include "Core/CpuProfiler.h"
 #include "Core/Engine.h"
+#include "Editor/SceneViewPixelPerfect.h"
 #include "Engine/GameUI/GameUIHost.h" // complete type for m_GameUI's unique_ptr dtor
 #include "ECS/ECSTemplates.h"
 #include "Engine/Rendering/ExposureReadbackFeature.h"
@@ -12,12 +13,14 @@
 #include "SceneView/SceneViewLayerFilter.h"
 #include "Engine/Rendering/PlanetCameraFraming.h"
 #include "Engine/Rendering/RenderServices.h"
+#include "Engine/Rendering/TileMapCameraPixelGrid.h"
 #include "Engine/Rendering/ViewReadbackUtils.h"
 #include "Scene/SceneTlas.h"
 #include "Mathematics/Geometry.h"
 #include "Mathematics/MatrixOps.h"
 #include "Mathematics/VectorOps.h"
 #include "Rendering/CameraTypes.h"
+#include "SceneView/SceneOverlayPick.h"
 #include "SceneView/SceneViewCameraRig.h"
 #include "SceneView/SceneViewPostProcessSwitches.h"
 #include "Rendering/Common/Math.h"
@@ -30,13 +33,13 @@
 #include "Rendering/Core/NoneCullingStrategy.h"
 #include "Rendering/Core/PipelineDescTranslator.h"
 #include "Rendering/ShaderCache/ShaderPackageIO.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <utility>
 #include <atomic>
 #include <cassert>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -56,6 +59,7 @@
 #include "Components/HierarchyQueries.h"
 #include "ECS/Components.h"
 #include "Components/Transform.h"
+#include "Components/Rendering/WorldSectorCoord.h"
 #include "Components/TransformDirtyFeed.h"
 #include "Engine/Rendering/Camera.h"
 #include "Engine/Rendering/CameraAspectRatio.h"
@@ -72,6 +76,7 @@
 #include "Picking/PickRootResolver.h"
 #include "UI/Controls/Widgets/CameraBookmarksWidget.h"
 #include "Core/Application.h" // PathUtils::GetExecutableDirectory
+#include "Editor/Entities/EntityWorldPose.h"
 #include "Editor/Settings/SceneViewSettings.h"
 #include "SceneView/SceneViewFraming.h"
 #include "SceneView/SceneViewOverlayShared.h"
@@ -97,63 +102,21 @@ std::shared_ptr<GameEngine::Rendering::ICullingStrategy> FixedOrthographicSceneV
     return s_Strategy;
 }
 
-bool GetEntityWorldMatrixForMeasure(GameEngine::ECS::World* world,
-                                    GameEngine::ECS::EntityHandle entity,
-                                    GameEngine::Mathematics::Matrix4x4& out,
-                                    int depth = 0);
-
 bool GetEntityPositionForMeasure(GameEngine::ECS::World* world,
                                  GameEngine::ECS::EntityHandle entity,
                                  GameEngine::Mathematics::Vector3& out)
 {
-    if (!world || !entity.IsValid() || !world->IsValid(entity))
-        return false;
-
     GameEngine::Mathematics::Matrix4x4 worldMatrix;
-    if (GetEntityWorldMatrixForMeasure(world, entity, worldMatrix))
-    {
-        out = GameEngine::Mathematics::Vector3(worldMatrix[3].x, worldMatrix[3].y, worldMatrix[3].z);
-        return true;
-    }
-
-    return false;
-}
-
-bool GetEntityWorldMatrixForMeasure(GameEngine::ECS::World* world,
-                                    GameEngine::ECS::EntityHandle entity,
-                                    GameEngine::Mathematics::Matrix4x4& out,
-                                    int depth)
-{
-    if (!world || !entity.IsValid() || !world->IsValid(entity) || depth > 64)
+    if (!GameEngine::Editor::TryComputeEntityWorldMatrix(world, entity, worldMatrix))
         return false;
 
-    if (const auto* transform = world->GetComponent<GameEngine::Components::Transform>(entity))
-    {
-        GameEngine::Mathematics::Matrix4x4 local = GameEngine::Mathematics::Matrix4x4::FromColumnMajor(transform->matrix);
-        if (const auto* parent = world->GetComponent<GameEngine::Components::Parent>(entity);
-            parent && parent->parent.IsValid())
-        {
-            GameEngine::Mathematics::Matrix4x4 parentWorld;
-            if (GetEntityWorldMatrixForMeasure(world, parent->parent, parentWorld, depth + 1))
-            {
-                out = parentWorld * local;
-                return true;
-            }
-        }
-
-        out = local;
-        return true;
-    }
-
-    if (const auto* worldTransform = world->GetComponent<GameEngine::Components::WorldTransform>(entity))
-    {
-        out = GameEngine::Mathematics::Matrix4x4::FromColumnMajor(worldTransform->matrix);
-        return true;
-    }
-
-    return false;
+    out = GameEngine::Mathematics::Vector3(worldMatrix[3].x, worldMatrix[3].y, worldMatrix[3].z);
+    return true;
 }
 
+// `point` is an absolute world position, the space GetEntityPositionForMeasure
+// reports. Transform and WorldTransform are sector-local, so the entity's own
+// sector offset comes off before either is written.
 void SetEntityPositionForMeasure(GameEngine::ECS::World* world,
                                  GameEngine::ECS::EntityHandle entity,
                                  const GameEngine::Mathematics::Vector3& point)
@@ -161,18 +124,26 @@ void SetEntityPositionForMeasure(GameEngine::ECS::World* world,
     if (!world || !entity.IsValid() || !world->IsValid(entity))
         return;
 
+    const GameEngine::Components::WorldTransform sectorOrigin = GameEngine::Components::ComposeEffectiveWorldTransform(
+        GameEngine::Components::WorldTransform{},
+        world->GetComponent<GameEngine::Components::WorldSectorCoord>(entity),
+        GameEngine::Components::kWorldSectorSize);
+    const GameEngine::Mathematics::Vector3 sectorLocalPoint(point.x - sectorOrigin.matrix[12],
+                                                           point.y - sectorOrigin.matrix[13],
+                                                           point.z - sectorOrigin.matrix[14]);
+
     if (auto* transform = world->GetComponentForWrite<GameEngine::Components::Transform>(entity))
     {
-        GameEngine::Mathematics::Vector3 localPoint = point;
+        GameEngine::Mathematics::Vector3 localPoint = sectorLocalPoint;
         if (const auto* parent = world->GetComponent<GameEngine::Components::Parent>(entity);
             parent && parent->parent.IsValid())
         {
             GameEngine::Mathematics::Matrix4x4 parentWorld;
-            if (GetEntityWorldMatrixForMeasure(world, parent->parent, parentWorld))
+            if (GameEngine::Editor::TryComputeHierarchyWorldMatrix(world, parent->parent, parentWorld))
             {
                 const GameEngine::Mathematics::Matrix4x4 invParent =
                     GameEngine::Mathematics::Inverse(parentWorld);
-                localPoint = invParent.TransformPoint(point);
+                localPoint = invParent.TransformPoint(sectorLocalPoint);
             }
         }
 
@@ -183,9 +154,9 @@ void SetEntityPositionForMeasure(GameEngine::ECS::World* world,
 
     if (auto* worldTransform = world->GetComponentForWrite<GameEngine::Components::WorldTransform>(entity))
     {
-        worldTransform->matrix[12] = point.x;
-        worldTransform->matrix[13] = point.y;
-        worldTransform->matrix[14] = point.z;
+        worldTransform->matrix[12] = sectorLocalPoint.x;
+        worldTransform->matrix[13] = sectorLocalPoint.y;
+        worldTransform->matrix[14] = sectorLocalPoint.z;
         GameEngine::Components::BumpWorldTransform(*world, entity, *worldTransform);
     }
 }
@@ -642,6 +613,7 @@ SceneViewController::SceneViewController(Engine::Renderer::RenderServices* rende
     m_SelectionTool = std::make_unique<SelectionTool>(*this);
     m_TransformTool = std::make_unique<TransformTool>(world);
     m_NavGridBrushTool = std::make_unique<NavGridBrushTool>(*this);
+    m_MeasureTool = std::make_unique<MeasureTool>(*this);
     m_SplineSceneGizmo.SetSelectionQuery([this]() -> GameEngine::ECS::EntityHandle {
         return m_SelectedEntities.empty() ? GameEngine::ECS::EntityHandle{} : m_SelectedEntities.front();
     });
@@ -1066,6 +1038,12 @@ std::shared_ptr<Rendering::RGReadbackTicket> SceneViewController::RequestPreview
                                                "SceneView.BookmarkPreview.Readback");
 }
 
+std::string_view SceneViewController::ActiveToolStatusText() const
+{
+    const Editor::SceneTools::ISceneTool* tool = m_ToolContext.GetActiveTool();
+    return tool != nullptr ? tool->StatusText() : std::string_view{};
+}
+
 void SceneViewController::SetActiveTool(ToolKind kind)
 {
     const bool changed = m_ActiveToolKind != kind;
@@ -1092,6 +1070,9 @@ void SceneViewController::SetActiveTool(ToolKind kind)
         }
         m_ActiveToolKind = ToolKind::Selection;
         m_ToolContext.SetActiveTool(m_SelectionTool.get());
+        break;
+    case ToolKind::Measure:
+        m_ToolContext.SetActiveTool(m_MeasureTool.get());
         break;
     default:
         m_ToolContext.SetActiveTool(m_SelectionTool.get());
@@ -1416,8 +1397,9 @@ void SceneViewController::SyncMeasureFromEndpointEntityTransform(
         return;
 
     world->Query<ECS::Write<Components::MeasureComponent>>()
-        .Each([&](ECS::EntityHandle measureEntity, Components::MeasureComponent& measure)
+        .Each([&](ECS::EntityHandle measureEntity, ECS::Writable<Components::MeasureComponent> measureRow)
         {
+            const Components::MeasureComponent& measure = measureRow.Get();
 
             std::uint8_t endpoint = 0;
             if (measure.StartEntity == endpointEntity)
@@ -1428,10 +1410,12 @@ void SceneViewController::SyncMeasureFromEndpointEntityTransform(
             if (endpoint == 0u)
                 return;
 
-            float* target = endpoint == 1u ? measure.Start : measure.End;
-            if (target[0] == point.x && target[1] == point.y && target[2] == point.z)
+            const float* current = endpoint == 1u ? measure.Start : measure.End;
+            if (current[0] == point.x && current[1] == point.y && current[2] == point.z)
                 return;
 
+            Components::MeasureComponent& written = measureRow.Mutable();
+            float* target = endpoint == 1u ? written.Start : written.End;
             target[0] = point.x;
             target[1] = point.y;
             target[2] = point.z;
@@ -1457,18 +1441,6 @@ void SceneViewController::NotifyMeasureEndpointChanged(
     {
         m_ChangeNotifications->NotifyComponentChange<Components::Transform>(world, entity, kind);
     }
-}
-
-bool SceneViewController::HasMeasureEndpointAtPointer(const Editor::SceneTools::ScenePointerEvent& event)
-{
-    if (event.button != Editor::SceneTools::PointerButton::Left ||
-        event.phase != Editor::SceneTools::PointerPhase::Down)
-    {
-        return false;
-    }
-
-    Editor::SceneTools::GizmoHitResult hit = m_MeasureSceneGizmo.HitTest(event.ray);
-    return hit.hit;
 }
 
 void SceneViewController::RebuildSelectionDescendants()
@@ -1724,6 +1696,18 @@ Editor::SceneTools::ScenePickOutcome SceneViewController::PickViaClickThrough(
     {
         m_DeferredClick = event;
         return {{}, /*Deferred=*/true};
+    }
+
+    // An outline drawn in the overlay pass with no mesh behind it (SceneOverlayPick.h) picks
+    // before the mesh under the pointer, as an icon does, unless scene geometry hides it.
+    const auto isPickable = [this](GameEngine::ECS::EntityHandle entity) { return IsEntityPickable(entity); };
+    if (GameEngine::ECS::EntityHandle overlayPick = Editor::SceneTools::PickSceneOverlay(*world, event, isPickable);
+        overlayPick.IsValid())
+    {
+        m_DepthCycleAnchor = false;
+        OnEntityPicked(overlayPick, shift, ctrl, /*skipPickRootResolve=*/true);
+        rememberClickPos();
+        return {overlayPick};
     }
 
     // A depth-cycle pick (Ctrl/Cmd+scroll) is "anchored": the first click
@@ -2780,6 +2764,9 @@ void SceneViewController::Set2DMode(bool is2D)
     }
     m_Is2DMode = is2D;
     Sync2DModeToTransformTool();
+    // Instant entry (bookmark recall) has no tween to finish, so the ortho
+    // height would otherwise keep whatever the 3D orbit distance was.
+    ApplyPixelPerfectIfActive();
 }
 
 void SceneViewController::Sync2DModeToTransformTool()
@@ -2803,16 +2790,38 @@ void SceneViewController::ApplyPixelPerfectIfActive()
     if (effectiveH == 0)
         return;
 
-    // In 2D mode, m_CamDistance is the ortho visible height in world units.
-    // One world unit maps to one source texel, so pixelScale screen pixels cover
-    // one world unit: scale 1 is true 1:1 (one texel = one pixel), scale 2 is 2x,
-    // and so on.
-    int scale = Editor::SceneViewSettings::Get().GetPixelPerfectScale();
-    if (scale < 1) scale = 1;
-    if (scale > 64) scale = 64;
-    const float newHeight = static_cast<float>(effectiveH) / static_cast<float>(scale);
-    if (newHeight > 0.0f)
-        m_CamDistance = newHeight;
+    // In 2D mode, m_CamDistance is the ortho visible height in world units. The
+    // pixel scale counts render pixels per SOURCE TEXEL, so the scene's texel
+    // density has to be folded in: a 16 px tile on a one-unit cell is 16 pixels
+    // per unit, and 1x must show one atlas texel in one render pixel.
+    m_PixelPerfectPixelsPerUnit = ResolvePixelPerfectPixelsPerUnit();
+    const Editor::PixelPerfect2DGrid grid = Editor::ComputePixelPerfect2DGrid(
+        effectiveH, Editor::SceneViewSettings::Get().GetPixelPerfectScale(),
+        m_PixelPerfectPixelsPerUnit);
+    m_PixelPerfectWorldUnitsPerTexel = grid.WorldUnitsPerTexel;
+    if (grid.OrthoHeight > 0.0f)
+        m_CamDistance = grid.OrthoHeight;
+}
+
+float SceneViewController::ResolvePixelPerfectPixelsPerUnit() const
+{
+    ECS::World* world = EngineCore::GetInstance().GetPrimaryWorld();
+    // The game camera's auto density reads the same function, so the Scene View
+    // and the camera agree on one scene.
+    const float scenePixelsPerUnit = world ? Engine::Renderer::ResolveScenePixelsPerUnit(*world) : 0.0f;
+    return (scenePixelsPerUnit > 0.0f) ? scenePixelsPerUnit
+                                       : Editor::kPixelPerfectDefaultPixelsPerUnit;
+}
+
+void SceneViewController::SnapPixelPerfectCamera(double* camPos, float halfWidth,
+                                                 float halfHeight) const
+{
+    if (!camPos || !m_Is2DMode || !Editor::SceneViewSettings::Get().GetPixelPerfect2D())
+        return;
+    // Snap the PUBLISHED camera, not m_CamPos: panning stays continuous in
+    // controller state while every rendered frame lands on the texel grid.
+    Editor::SnapOrthoWindowToTexelGrid(camPos[0], camPos[1], halfWidth, halfHeight,
+                                       m_PixelPerfectWorldUnitsPerTexel);
 }
 
 void SceneViewController::RefreshPixelPerfect2D()
@@ -2832,15 +2841,8 @@ void SceneViewController::SetOrthoHeight2D(float requestedHeight)
         m_Is2DMode || m_Orthographic);
     if (settings.GetPixelPerfect2D() && effectiveH > 0)
     {
-        // Visible height = effectiveH / scale. Pick the largest power-of-2 scale
-        // (most zoomed in) that still fits the requested height.
-        const float ratio = static_cast<float>(effectiveH) / requestedHeight;
-        int snapped = 1;
-        while (snapped * 2 <= static_cast<int>(ratio) && snapped < 64)
-            snapped *= 2;
-        if (snapped < 1) snapped = 1;
-        if (snapped > 64) snapped = 64;
-        settings.SetPixelPerfectScale(snapped);
+        settings.SetPixelPerfectScale(Editor::SnapPixelPerfectScaleToHeight(
+            effectiveH, requestedHeight, ResolvePixelPerfectPixelsPerUnit()));
         ApplyPixelPerfectIfActive();
         return;
     }
@@ -2870,8 +2872,7 @@ bool SceneViewController::ZoomPixelPerfectAtCursor(int scaleDelta, float /*local
         for (int i = 0; i < -scaleDelta; ++i)
             newScale = (newScale > 1) ? (newScale / 2) : 1;
     }
-    if (newScale < 1) newScale = 1;
-    if (newScale > 64) newScale = 64;
+    newScale = std::clamp(newScale, Editor::kPixelPerfectScaleMin, Editor::kPixelPerfectScaleMax);
     if (newScale == oldScale)
         return false;
 
@@ -3168,20 +3169,17 @@ void SceneViewController::UpdateCamera(float deltaSeconds, bool moveForward, boo
         // (eye+look)-eye in fp32, which quantizes the rotation basis to
         // ULP(|eye|)-sized angular steps at planetary coordinates (~0.22 deg at
         // |eye| 5e4) — the scene-view rotation jitter at planet scale.
-        Matrix4x4 viewM;
-        Editor::CameraRig::BuildViewMatrixLH(
-            Editor::CameraRig::Vec3d{m_CamPos[0], m_CamPos[1], m_CamPos[2]},
-            m_CamYawDeg, m_CamPitchDeg, viewM.Data());
-
         float nearClip = 0.1f;
         float farClip = 200.0f;
         GetSceneViewClipPlanes(&GetWorld(), nearClip, farClip);
 
+        double camPos[3] = {m_CamPos[0], m_CamPos[1], m_CamPos[2]};
         Matrix4x4 projM;
         if (m_Is2DMode || m_Orthographic)
         {
             const float halfH = m_CamDistance * 0.5f;
             const float halfW = halfH * aspect;
+            SnapPixelPerfectCamera(camPos, halfW, halfH);
             projM = GameEngine::Mathematics::MakeOrthographicLH_ZO_ReverseZ(
                 -halfW, halfW, -halfH, halfH, nearClip, farClip);
         }
@@ -3192,6 +3190,11 @@ void SceneViewController::UpdateCamera(float deltaSeconds, bool moveForward, boo
             projM = GameEngine::Mathematics::MakePerspectiveLH_ZO_ReverseZ(
                 fovRad, aspect, nearClip, farClip);
         }
+
+        Matrix4x4 viewM;
+        Editor::CameraRig::BuildViewMatrixLH(
+            Editor::CameraRig::Vec3d{camPos[0], camPos[1], camPos[2]},
+            m_CamYawDeg, m_CamPitchDeg, viewM.Data());
         Matrix4x4 viewProjM = projM * viewM;
 
         CameraData cam{};
@@ -3204,9 +3207,9 @@ void SceneViewController::UpdateCamera(float deltaSeconds, bool moveForward, boo
             cam.proj[i] = projSrc[i];
             cam.viewProj[i] = viewProjSrc[i];
         }
-        cam.cameraPos[0] = static_cast<float>(m_CamPos[0]);
-        cam.cameraPos[1] = static_cast<float>(m_CamPos[1]);
-        cam.cameraPos[2] = static_cast<float>(m_CamPos[2]);
+        cam.cameraPos[0] = static_cast<float>(camPos[0]);
+        cam.cameraPos[1] = static_cast<float>(camPos[1]);
+        cam.cameraPos[2] = static_cast<float>(camPos[2]);
         cam.cameraPos[3] = m_Is2DMode ? 1.0f : 0.0f;
         if (m_RenderServices)
         {
@@ -3316,6 +3319,14 @@ bool SceneViewController::ZoomOrthographicStep(int direction)
     if (!m_Orthographic || m_Is2DMode || direction == 0) return false;
     uint32_t rasterHeight = SceneViewEffectiveViewportHeight(&GetWorld(), m_LastW, m_LastH, true);
     if (rasterHeight == 0) return false;
+    if (m_RenderServices)
+        if (const auto* view = m_RenderServices->Views().FindViewDesc(m_ViewId))
+        {
+            const auto& pp = m_RenderServices->GetEffectivePostProcessSettings(m_ViewId, view->worldId);
+            if (pp.DepthPixelationIntensity > 0 || pp.DepthPixelationDebugRanges != 0)
+                rasterHeight = Engine::Renderer::RenderServices::DepthPixelationRasterExtent(
+                    pp, 0, m_LastW, rasterHeight)[1];
+        }
     const double next = Editor::CameraRig::StepOrthographicPixelZoom(m_CamDistance, rasterHeight, direction);
     if (next < GetSceneViewMinOrbitDistance(&GetWorld()) ||
         (next > Editor::SceneViewSettings::Get().GetMaxDistance() && next > m_CamDistance)) return false;
@@ -3443,7 +3454,7 @@ void SceneViewController::FrameOrigin()
             if (world->IsValid(targetEntity))
             {
                 Mathematics::Matrix4x4 targetWorld = Mathematics::Matrix4x4::Identity();
-                if (GetEntityWorldMatrixForMeasure(world, targetEntity, targetWorld))
+                if (Editor::TryComputeEntityWorldMatrix(world, targetEntity, targetWorld))
                 {
                     // Extract position from world transform matrix
                     target = Mathematics::Vector3(targetWorld[3].x, targetWorld[3].y, targetWorld[3].z);
@@ -4000,12 +4011,7 @@ bool SceneViewController::DeclareTargetsRG(Rendering::RenderGraph::RGFrame& fram
     // probes / GameView (those controllers set their own strategy). Read
     // once; the strategy is stateless (prevVisible history lives in
     // GPUCullingPipeline keyed by viewId).
-    static const bool kHzbOcclusionEnabled = []
-    {
-        if (const char* env = std::getenv("GE_HZB_OCCLUSION"))
-            return env[0] != '0';
-        return true;
-    }();
+    static const bool kHzbOcclusionEnabled = Platform::EnvironmentSwitchEnabled("GE_HZB_OCCLUSION", true);
     if (m_FixedViewOrientation != FixedViewOrientation::Free)
         rs->Views().SetViewCullingStrategy(m_ViewId, FixedOrthographicSceneViewCullingStrategy());
     else if (kHzbOcclusionEnabled)
@@ -4025,22 +4031,17 @@ bool SceneViewController::DeclareTargetsRG(Rendering::RenderGraph::RGFrame& fram
         if (sceneAspect)
             aspect = sceneAspect->projectionAspect;
 
-        // Double-precision view build — identical math to UpdateCamera so both
-        // arms produce the same matrices (see the rotation-jitter note there).
-        Matrix4x4 viewM;
-        Editor::CameraRig::BuildViewMatrixLH(
-            Editor::CameraRig::Vec3d{m_CamPos[0], m_CamPos[1], m_CamPos[2]},
-            m_CamYawDeg, m_CamPitchDeg, viewM.Data());
-
         float nearClip = 0.1f;
         float farClip = 200.0f;
         GetSceneViewClipPlanes(&GetWorld(), nearClip, farClip);
 
+        double camPos[3] = {m_CamPos[0], m_CamPos[1], m_CamPos[2]};
         Matrix4x4 projM;
         if (m_Is2DMode || m_Orthographic)
         {
             const float halfH = m_CamDistance * 0.5f;
             const float halfW = halfH * aspect;
+            SnapPixelPerfectCamera(camPos, halfW, halfH);
             projM = GameEngine::Mathematics::MakeOrthographicLH_ZO_ReverseZ(
                 -halfW, halfW, -halfH, halfH, nearClip, farClip);
         }
@@ -4051,6 +4052,13 @@ bool SceneViewController::DeclareTargetsRG(Rendering::RenderGraph::RGFrame& fram
             projM = GameEngine::Mathematics::MakePerspectiveLH_ZO_ReverseZ(fovRad, aspect,
                                                                            nearClip, farClip);
         }
+
+        // Double-precision view build — identical math to UpdateCamera so both
+        // arms produce the same matrices (see the rotation-jitter note there).
+        Matrix4x4 viewM;
+        Editor::CameraRig::BuildViewMatrixLH(
+            Editor::CameraRig::Vec3d{camPos[0], camPos[1], camPos[2]},
+            m_CamYawDeg, m_CamPitchDeg, viewM.Data());
         Matrix4x4 viewProjM = projM * viewM;
 
         CameraData cam{};
@@ -4063,9 +4071,9 @@ bool SceneViewController::DeclareTargetsRG(Rendering::RenderGraph::RGFrame& fram
             cam.proj[i] = projSrc[i];
             cam.viewProj[i] = viewProjSrc[i];
         }
-        cam.cameraPos[0] = static_cast<float>(m_CamPos[0]);
-        cam.cameraPos[1] = static_cast<float>(m_CamPos[1]);
-        cam.cameraPos[2] = static_cast<float>(m_CamPos[2]);
+        cam.cameraPos[0] = static_cast<float>(camPos[0]);
+        cam.cameraPos[1] = static_cast<float>(camPos[1]);
+        cam.cameraPos[2] = static_cast<float>(camPos[2]);
         cam.cameraPos[3] = m_Is2DMode ? 1.0f : 0.0f;
 
         m_FrameCameraData = cam;

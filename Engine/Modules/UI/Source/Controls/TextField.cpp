@@ -1,10 +1,12 @@
 #include "UI/Controls/TextField.h"
 #include "UI/TextSegmentation.h"
+#include "../TextSegmentation_Unicode.h"
 #include "UI/Utf8Helpers.h"
 #include "Input/InputSystem.h"
 #include "Input/KeyCodes.h"
 #include "Platform/SystemMetrics.h"
 #include "Types/ColorUtils.h"
+#include "Types/Fnv1a.h"
 #include "UI/CaretBlink.h"
 #include "UI/Parsers/CSSParser.h"
 #include "UI/UIManager.h"
@@ -38,26 +40,6 @@ using namespace Rendering::Geometry;
 // C4127 (conditional expression is constant) warnings.
 static bool kTextInputPointerDebug = false;
 #endif
-
-namespace
-{
-static inline std::uint64_t Fnv1a64TextField(const void* data, size_t size, std::uint64_t seed = 14695981039346656037ull)
-{
-    const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(data);
-    std::uint64_t h = seed;
-    for (size_t i = 0; i < size; ++i)
-    {
-        h ^= (std::uint64_t)p[i];
-        h *= 1099511628211ull;
-    }
-    return h;
-}
-
-static inline std::uint64_t HashString64TextField(const std::string& s, std::uint64_t seed)
-{
-    return s.empty() ? seed : Fnv1a64TextField(s.data(), s.size(), seed);
-}
-} // namespace
 
 // Find the caret index for a given logical screen X by snapping to the
 // *nearest* caret position. The map is the measure cache's physical-px caret
@@ -573,7 +555,7 @@ bool TextInput::OnKey(int key, int mods, UI::IPlatformApi* platform)
             if (pos > 0)
             {
                 BeginEditingSession();
-                size_t prev = Utf8::Prev(s, pos);
+                size_t prev = TextSegmentation::PrevGrapheme(s, pos);
                 s.erase(prev, pos - prev);
                 m_CaretIndex = (int)prev;
                 ClearSelection();
@@ -597,7 +579,7 @@ bool TextInput::OnKey(int key, int mods, UI::IPlatformApi* platform)
             if (pos < s.size())
             {
                 BeginEditingSession();
-                size_t next = Utf8::Next(s, pos);
+                size_t next = TextSegmentation::NextGrapheme(s, pos);
                 s.erase(pos, next - pos);
                 ClearSelection();
                 SetValue(s);
@@ -607,28 +589,10 @@ bool TextInput::OnKey(int key, int mods, UI::IPlatformApi* platform)
         }
         return true;
     case Input::kKeyCode_Left:
-    {
-        size_t pos = (size_t)std::clamp(m_CaretIndex, 0, (int)s.size());
-        int newCaret = primaryMod ? (int)TextSegmentation::PrevBoundary(s, pos)
-                                  : (int)Utf8::Prev(s, pos);
-        if (shift)
-        {
-            AnchorSelectionForExtend();
-            m_CaretIndex = newCaret;
-            m_SelectionEnd = m_CaretIndex;
-        }
-        else
-        {
-            m_CaretIndex = newCaret;
-            ClearSelection();
-        }
-        return true;
-    }
     case Input::kKeyCode_Right:
     {
-        size_t pos = (size_t)std::clamp(m_CaretIndex, 0, (int)s.size());
-        int newCaret = primaryMod ? (int)TextSegmentation::NextBoundary(s, pos)
-                                  : (int)Utf8::Next(s, pos);
+        const size_t pos = (size_t)std::clamp(m_CaretIndex, 0, (int)s.size());
+        const int newCaret = HorizontalCaretStop(s, pos, key == Input::kKeyCode_Right, primaryMod);
         if (shift)
         {
             AnchorSelectionForExtend();
@@ -805,26 +769,38 @@ void TextInput::SelectWordAt(float mouseX, float x, float y, float W, float H,
     MarkDirty(VisualDirty);
 }
 
+int TextInput::HorizontalCaretStop(const std::string& text, size_t pos, bool forward, bool byWord)
+{
+    if (auto* owner = GetOwnerManager())
+        if (auto* font = owner->ResolveFontForStyle(GetResolvedStyle()))
+        {
+            // The render path's size and cache: an arrow key reshapes only when the text changed.
+            const auto& visual = GetResolvedStyle().Visual;
+            const float scale = owner->GetContentScale();
+            const auto& measured = EnsureMeasureCache(font, std::max(1.0f, visual.FontSize * scale),
+                                                      visual.LetterSpacing * scale);
+            return static_cast<int>(byWord
+                ? TextSegmentation::Detail::VisualWordBoundary(text, pos, forward, measured.caretXByByte)
+                : measured.NextVisualCaret(pos, forward));
+        }
+    // Without a font there is no visual order: step in logical order.
+    if (byWord)
+        return static_cast<int>(forward ? TextSegmentation::NextBoundary(text, pos) : TextSegmentation::PrevBoundary(text, pos));
+    return static_cast<int>(forward ? TextSegmentation::NextGrapheme(text, pos) : TextSegmentation::PrevGrapheme(text, pos));
+}
+
 const Rendering::Text::FontAtlas::MeasureResult& TextInput::EnsureMeasureCache(
     Rendering::Text::FontAtlas* font, float pixelSize, float letterSpacingPx) const
 {
     const std::string& value = GetValue();
     const std::uintptr_t fptr = reinterpret_cast<std::uintptr_t>(font);
-    std::uint64_t key = 14695981039346656037ull;
-    // FNV-1a over value bytes, pixelSize, letter-spacing, and font pointer
-    for (char c : value)
-    {
-        key ^= static_cast<std::uint64_t>(static_cast<unsigned char>(c));
-        key *= 1099511628211ull;
-    }
-    auto fnv = [](const void* data, size_t len, std::uint64_t h) -> std::uint64_t {
-        const auto* p = static_cast<const unsigned char*>(data);
-        for (size_t i = 0; i < len; ++i) { h ^= p[i]; h *= 1099511628211ull; }
-        return h;
-    };
-    key = fnv(&pixelSize, sizeof(pixelSize), key);
-    key = fnv(&letterSpacingPx, sizeof(letterSpacingPx), key);
-    key = fnv(&fptr, sizeof(fptr), key);
+    // FNV-1a over the value bytes, pixel size, letter spacing, font pointer and the
+    // font's layout revision (a fallback or language change re-shapes the same text).
+    std::uint64_t key = Hashing::Fnv1a64(value);
+    key = Hashing::Fnv1a64Value(key, pixelSize);
+    key = Hashing::Fnv1a64Value(key, letterSpacingPx);
+    key = Hashing::Fnv1a64Value(key, fptr);
+    key = Hashing::Fnv1a64Value(key, font->GetLayoutRevision());
 
     if (!m_MeasureCacheValid || m_MeasureCacheKey != key)
     {

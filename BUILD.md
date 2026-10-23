@@ -165,6 +165,7 @@ On every platform (`cmake --list-presets` lists every configuration):
 - To open a project directly: `build/macos-arm64-local/bin/Debug/Apps/Editor/Editor.app/Contents/MacOS/Editor --project ~/GameProjects/MyGame`.
 - IDE: `open build/macos-arm64-local/*.xcodeproj`, select the **Editor** scheme, press **⌘R**.
 - The Ninja presets (`macos-arm64-ninja`, `macos-x64-ninja`) are faster for command-line iteration and emit `compile_commands.json`. If you delete the `.app` in a Ninja tree, configure again to regenerate its `Info.plist`.
+- `macos-arm64-ninja-sccache` adds sccache (`brew install sccache`). Run `./Tools/Scripts/sccache-worktrees.sh` after `git worktree add`: it restarts the sccache server with every worktree as a base directory, so a fresh worktree reuses the objects another one compiled. It turns sccache's direct mode off, because with base directories direct mode can return another branch's object.
 - The Editor build stages the Vulkan SDK's MoltenVK into `Editor.app`. To stage your own build, configure with `-DGE_MOLTENVK_SOURCE_LIB=<path>/libMoltenVK.dylib -DGE_MOLTENVK_SOURCE_ICD=<path>/MoltenVK_icd.json`.
 
 ### Linux

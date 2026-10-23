@@ -264,6 +264,29 @@ const std::vector<ShortcutCatalogEntry>& GetShortcutCatalog()
         {"Transform Tool", "Scale Mode",         0, 0, kKeyCode_R, 0, false},
         {"Transform Tool", "Toggle World/Local", 0, 0, kKeyCode_X, 0, false},
 
+        // --- Tile Map Tool (consumed by TileMapPaintTool) -----------------
+        {"Tile Map Tool", "Brush Tool",      0, 0, kKeyCode_1, 0, false},
+        {"Tile Map Tool", "Eraser Tool",     0, 0, kKeyCode_2, 0, false},
+        {"Tile Map Tool", "Picker Tool",     0, 0, kKeyCode_3, 0, false},
+        {"Tile Map Tool", "Fill Tool",       0, 0, kKeyCode_4, 0, false},
+        {"Tile Map Tool", "Rect Tool",       0, 0, kKeyCode_5, 0, false},
+        {"Tile Map Tool", "Marquee Tool",    0, 0, kKeyCode_6, 0, false},
+        {"Tile Map Tool", "Terrain Tool",    0, 0, kKeyCode_7, 0, false},
+        {"Tile Map Tool", "IntGrid Tool",    0, 0, kKeyCode_8, 0, false},
+        {"Tile Map Tool", "Flip Horizontal", 0, 0, kKeyCode_H, 0, false},
+        {"Tile Map Tool", "Flip Vertical",   0, 0, kKeyCode_V, 0, false},
+        {"Tile Map Tool", "Rotate Stamp",    0, 0, kKeyCode_R, kModShift, false},
+        {"Tile Map Tool", "Clear Selection", 0, 0, kKeyCode_Escape, 0, false},
+        {"Tile Map Tool", "Erase Selection", 0, 0, kKeyCode_Delete, 0, false,
+                                             kKeyCode_Backspace, 0},
+        {"Tile Map Tool", "Copy Tiles",      0, 0, kKeyCode_C, kDefaultPrimaryShortcutModifier, false},
+        {"Tile Map Tool", "Cut Tiles",       0, 0, kKeyCode_X, kDefaultPrimaryShortcutModifier, false},
+        {"Tile Map Tool", "Paste Tiles",     0, 0, kKeyCode_V, kDefaultPrimaryShortcutModifier, false},
+        {"Tile Map Tool", "Nudge Left",      0, 0, kKeyCode_Left,  0, false},
+        {"Tile Map Tool", "Nudge Right",     0, 0, kKeyCode_Right, 0, false},
+        {"Tile Map Tool", "Nudge Up",        0, 0, kKeyCode_Up,    0, false},
+        {"Tile Map Tool", "Nudge Down",      0, 0, kKeyCode_Down,  0, false},
+
         // --- Hierarchy Panel (hardcoded) ----------------------------------
         {"Hierarchy", "Duplicate", 0, 0, kKeyCode_D,      kDefaultPrimaryShortcutModifier, false,
                                          kKeyCode_D,      kAlternatePrimaryShortcutModifier},
@@ -523,6 +546,25 @@ bool MatchesCatalogShortcut(const char* groupLabel, const char* displayName,
         return false;
     }
     return false;
+}
+
+std::string CatalogShortcutLabel(const char* groupLabel, const char* displayName)
+{
+    if (!groupLabel || !displayName)
+        return {};
+    const auto& catalog = GetShortcutCatalog();
+    const auto& cached = CachedCatalogBindings();
+    for (size_t i = 0; i < catalog.size(); ++i)
+    {
+        const auto& entry = catalog[i];
+        if (std::strcmp(entry.groupLabel, groupLabel) != 0 ||
+            std::strcmp(entry.displayName, displayName) != 0)
+            continue;
+        if (cached[i].empty())
+            return {};
+        return FormatShortcutBinding(cached[i].front().key, cached[i].front().mods);
+    }
+    return {};
 }
 
 bool MatchesItemResizeGesture(int mods)

@@ -389,17 +389,6 @@ static bool ParseJsonMaterial(const std::string& text, MaterialDocument& outDoc,
     return true;
 }
 
-static std::string TrimCopy(std::string value)
-{
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char c) {
-        return !std::isspace(c);
-    }));
-    value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char c) {
-        return !std::isspace(c);
-    }).base(), value.end());
-    return value;
-}
-
 static std::string CanonicalGuidString(const std::string& raw)
 {
     GUID guid(raw.c_str());
@@ -469,7 +458,7 @@ static bool ParseUnityMaterial(const std::string& text,
     std::smatch nameMatch;
     if (std::regex_search(text, nameMatch, std::regex(R"(\bm_Name:\s*([^\r\n]+))")) && nameMatch.size() >= 2)
     {
-        const std::string name = TrimCopy(nameMatch[1].str());
+        const std::string name = TrimWhitespace(nameMatch[1].str());
         if (!name.empty())
             doc.materialName = name;
     }

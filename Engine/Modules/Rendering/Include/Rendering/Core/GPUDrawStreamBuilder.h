@@ -1334,6 +1334,60 @@ class GPUDrawStreamBuilder
     };
     std::vector<RetiredBuffer> m_RetiredBuffers;
 
+    // ---- ScheduleUnifiedScatter phases ----
+    // One consolidation run: consecutive table rows sharing (classKey, pool
+    // group, parity), published as one consumer range.
+    struct TableRun
+    {
+        uint32_t startRow;
+        uint32_t capacity; // Σ member row capacities = the range's maxDrawCount
+    };
+    struct TableRunLayout
+    {
+        std::vector<TableRun>                runs;
+        std::vector<std::array<uint32_t, 2>> rowRun; // per row: {runStart, runIndex}
+    };
+    // Per-call run layouts of the color and shadow tables. Read only while the
+    // call schedules (uploads, range publication, elision record), so one
+    // instance each is reused across calls and keeps its capacity.
+    TableRunLayout m_ColorRunScratch;
+    TableRunLayout m_ShadowRunScratch;
+    // Schedule-time state of one call that never reaches the pass closure.
+    struct ScatterCallPlan;
+    // Everything the scatter pass's exec closure reads when the graph executes.
+    struct ScatterPassData;
+    static bool SliceCrossfades(const SliceRegistration& slice);
+    static bool IsCameraSlice(const SliceRegistration& slice);
+    static void ComputeTableRuns(std::span<const BatchTableEntry> table, bool groupActive,
+                                 std::span<const uint32_t> orderedToGroup, TableRunLayout& out);
+    bool ValidateScatterBindings(RenderGraph::RGBuffer visibility, RenderGraph::RGBuffer instances,
+                                 RenderGraph::RGBuffer meshes, RenderGraph::RGBuffer scatterHot);
+    bool BuildScatterTables(ScatterCallPlan& plan, ScatterPassData& pass, const BatchRegistry& registry,
+                            std::span<const uint8_t> materialDepthClass);
+    void PlanScatterArenaLayout(ScatterCallPlan& plan, ScatterPassData& pass);
+    bool ScatterArenaExhausted(uint32_t neededRecords, uint32_t neededCursors,
+                               size_t combinedTableBytes) const;
+    bool ReserveScatterArena(const ScatterCallPlan& plan, const ScatterPassData& pass,
+                             const char* passNameSuffix);
+    void ClaimScatterArena(ScatterPassData& pass, const ScatterCallPlan& plan);
+    RecomputeElisionGate::Decision EvaluateScatterElision(const ScatterCallPlan& plan,
+                                                          const ScatterPassData& pass, int32_t rgPassPhase,
+                                                          const char* passNameSuffix);
+    void ClaimScatterStatsRows(ScatterPassData& pass);
+    uint32_t UploadToTableRing(void* mapped, size_t align, const void* src, size_t bytes);
+    bool UploadScatterTables(const ScatterCallPlan& plan, ScatterPassData& pass, bool elided);
+    void PublishScatterRanges(const ScatterCallPlan& plan, const ScatterPassData& pass);
+    void ResolveSliceHistoryBindings(const ScatterCallPlan& plan, ScatterPassData& pass);
+    static void RecordScatterPass(RenderGraph::RGContext& ctx, const ScatterPassData& pass);
+    static void ClearScatterCallState(RenderGraph::RGContext& ctx, IDevice* device,
+                                      const ScatterPassData& pass);
+    static void DispatchScatterSlices(RenderGraph::RGContext& ctx, IDevice* device,
+                                      const ScatterPassData& pass, BufferHandle visBuf,
+                                      BufferHandle instBuf, BufferHandle meshBuf);
+    static void DispatchGroupCompaction(RenderGraph::RGContext& ctx, IDevice* device,
+                                        const ScatterPassData& pass);
+    static void MirrorScatterReadback(RenderGraph::RGContext& ctx, const ScatterPassData& pass);
+
     static ShaderLoaderFunc s_ShaderLoader;
 };
 

@@ -256,6 +256,9 @@ class ScriptManager
 
     /**
      * @brief Get compiled assemblies directory
+     *
+     * Safe to call from any thread: it returns a copy, and RebindProjectScripts
+     * can replace the directory at any time.
      */
     std::filesystem::path GetAssembliesDirectory() const;
 
@@ -484,7 +487,12 @@ class ScriptManager
     std::atomic<bool> m_Initialized;
     std::filesystem::path m_WorkspaceRoot;
     std::filesystem::path m_ScriptsDirectory;
+    // Written by Initialize and RebindProjectScripts on the owning thread and read
+    // by compile jobs and watcher threads, so every write, and every read off the
+    // owning thread, holds m_AssembliesDirectoryMutex. Off-thread code reads it
+    // only through GetAssembliesDirectory.
     std::filesystem::path m_AssembliesDirectory;
+    mutable std::mutex m_AssembliesDirectoryMutex;
     std::filesystem::path m_GeneratedProjectRoot;
     // Packaged-game mode (ScriptsConfig::prebuiltAssemblyPath): load exactly
     // this staged assembly; every compile path is disabled while set.

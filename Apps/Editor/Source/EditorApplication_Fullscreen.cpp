@@ -2,6 +2,7 @@
 #include "EditorPanelIds.h"
 #include "UI/Layout/Docking.h"
 #include "UI/Controls/DockspaceElement.h"
+#include "UI/Controls/EditorTopToolbar.h"
 #include "UI/UIManager.h"
 #include "PlayMode/PlayModeManager.h"
 #include "Platform/Window.h"
@@ -98,6 +99,13 @@ void EditorApplication::ExitPlayFullscreen()
     }
     m_PlayFullscreenActive = false;
     m_PlayFullscreenFocusFrames = 0;
+}
+
+void EditorApplication::EndPlayFullscreen()
+{
+    ExitPlayFullscreen();
+    if (m_TopToolbar)
+        m_TopToolbar->SetFullscreenActive(m_PlayFullscreenOnEnter);
 }
 
 void EditorApplication::RequestEnterPlayFullscreenAndPlay()

@@ -41,8 +41,8 @@ struct BenchResult { std::size_t count; uint64_t micros; };
 BenchResult RunEach(World& w) {
     auto start = std::chrono::high_resolution_clock::now();
     std::size_t cnt = 0;
-    w.Query<Write<Position>, Read<Velocity>>().Each([&](EntityHandle, Position& p, const Velocity& v){
-        p.x += v.x * 0.016f; ++cnt;
+    w.Query<Write<Position>, Read<Velocity>>().Each([&](EntityHandle, Writable<Position> p, const Velocity& v){
+        p.Mutable().x += v.x * 0.016f; ++cnt;
     });
     auto end = std::chrono::high_resolution_clock::now();
     return {cnt, (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end-start).count()};
@@ -51,8 +51,8 @@ BenchResult RunEach(World& w) {
 BenchResult RunParallel(World& w, std::size_t minBatch) {
     auto start = std::chrono::high_resolution_clock::now();
     std::atomic<std::size_t> cnt{0};
-    w.Query<Write<Position>, Read<Velocity>>().Parallel([&](EntityHandle, Position& p, const Velocity& v){
-        p.x += v.x * 0.016f; cnt.fetch_add(1, std::memory_order_relaxed);
+    w.Query<Write<Position>, Read<Velocity>>().Parallel([&](EntityHandle, Writable<Position> p, const Velocity& v){
+        p.Mutable().x += v.x * 0.016f; cnt.fetch_add(1, std::memory_order_relaxed);
     }, minBatch); // synchronous fork-join (slice 5)
     auto end = std::chrono::high_resolution_clock::now();
     return {cnt.load(), (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end-start).count()};
@@ -100,7 +100,7 @@ TEST(QueryBenchmarks, ParallelVsSequential_VaryingBatchSizes) {
 
     // Median timings for parallel variants (light sampling)
     for (std::size_t batch : {128ull, 512ull}) {
-        auto medianPar = MeasureMedianMicros(0, 3, [&]{ w.Query<Write<Position>, Read<Velocity>>().Parallel([](EntityHandle, Position& p, const Velocity& v){ p.x += v.x * 0.016f; }); });
+        auto medianPar = MeasureMedianMicros(0, 3, [&]{ w.Query<Write<Position>, Read<Velocity>>().Parallel([](EntityHandle, Writable<Position> p, const Velocity& v){ p.Mutable().x += v.x * 0.016f; }); });
         Logger::Log::Info("[Bench] Parallel(minBatch={}): median={}us", batch, medianPar);
     }
 
@@ -452,7 +452,7 @@ TEST(QueryBenchmarks, FreshConstructionOnArchetypeSpread) {
     PopulateArchetypeSpread(w, kArchetypeCount);
 
     std::size_t visited = 0;
-    const auto visit = [&visited](EntityHandle, const Position&, Velocity&) { ++visited; };
+    const auto visit = [&visited](EntityHandle, const Position&, Writable<Velocity>) { ++visited; };
 
     visited = 0;
     w.Query<Read<Position>, Write<Velocity>>().Each(visit);

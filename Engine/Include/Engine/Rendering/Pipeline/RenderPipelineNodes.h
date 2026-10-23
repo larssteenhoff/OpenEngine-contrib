@@ -92,6 +92,8 @@ struct ViewDeclare
     // at scale 1.0). See Names::View::OutputColor/OutputDepth.
     Rendering::RenderGraph::RGTexture ViewOutputColor{};
     Rendering::RenderGraph::RGTexture ViewOutputDepth{};
+    // Integer pixel-perfect upscale owns the render-to-display crossing for this view.
+    bool PixelPerfectCrossing = false;
     // True if this pipeline contains a TransmissiveRender node. The world pass only peels glass into
     // the dedicated transmissive pass when one exists; otherwise glass renders inline (env-cube
     // fallback) so it never vanishes on pipelines/previews that lack the node.
@@ -106,6 +108,9 @@ struct ViewDeclare
     // publication overwrites (a node republishing "View.Depth" redirects every
     // LATER node in blueprint order — declaration order is the only ordering).
     Rendering::RenderGraph::RGTexture ResolveTexture(const std::string& ref) const;
+    // Lookup only: read another view's published output from THIS pipeline/frame.
+    // Missing output returns an invalid handle; it never allocates a fallback.
+    Rendering::RenderGraph::RGTexture FindPublishedViewTexture(Rendering::ViewId view, const std::string& ref) const;
     PipelineBufferBindingRG ResolveBuffer(const std::string& ref) const;
     void PublishTexture(const std::string& name, Rendering::RenderGraph::RGTexture t);
     void PublishBuffer(const std::string& name, const PipelineBufferBindingRG& b);
@@ -156,6 +161,12 @@ class IRenderPipelineNode
     {
     }
     virtual void DeclareForView(ViewDeclare& /*d*/) {}
+
+    // Whether this node filters the view color as a post effect. A host that
+    // composites game UI before post-processing does so ahead of the first such
+    // node, so the effect sees the UI. A node that discards the incoming view
+    // color must answer false, or the composited UI is lost.
+    virtual bool IsViewColorPostEffect() const { return false; }
 
     // Return the base PipelineDesc for PSO pre-warming, or nullptr if this node
     // Returns the interned base pipeline id for nodes that drive a graphics

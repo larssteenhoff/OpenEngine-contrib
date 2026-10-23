@@ -13,6 +13,7 @@
 #include "Engine/Rendering/ServedGenerationTable.h"
 #include "Engine/Rendering/ShaderCompilationCache.h"
 #include "Rendering/Core/Device.h"
+#include "Rendering/Core/HashUtils.h"
 #include "Rendering/Core/PipelineIdentifiers.h"
 #include "Rendering/Materials/ShaderMeta.h"
 
@@ -113,23 +114,16 @@ class PipelineVariantCache
     {
         size_t operator()(const InstancedVariantKey& k) const noexcept
         {
-            size_t h = std::hash<const void*>{}(k.material);
-            h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(k.VertexFlags))
-                 + 0x9e3779b9 + (h << 6) + (h >> 2);
-            h ^= std::hash<uint64_t>{}(static_cast<uint64_t>(k.PassKeywords))
-                 + 0x9e3779b9 + (h << 6) + (h >> 2);
-            h ^= std::hash<uint32_t>{}(k.SampleCount)
-                 + 0x9e3779b9 + (h << 6) + (h >> 2);
-            h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(k.Topology))
-                 + 0x9e3779b9 + (h << 6) + (h >> 2);
-            h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(k.CullMode))
-                 + 0x9e3779b9 + (h << 6) + (h >> 2);
-            h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(k.Winding))
-                 + 0x9e3779b9 + (h << 6) + (h >> 2);
-            h ^= std::hash<uint32_t>{}((k.DepthBiasEnable ? 1u : 0u)
-                                       | (k.DepthClampEnable ? 2u : 0u))
-                 + 0x9e3779b9 + (h << 6) + (h >> 2);
-            return h;
+            using ::GameEngine::Rendering::HashUtils::HashCombine;
+            uint64_t h = std::hash<const void*>{}(k.material);
+            h = HashCombine(h, static_cast<uint32_t>(k.VertexFlags));
+            h = HashCombine(h, static_cast<uint64_t>(k.PassKeywords));
+            h = HashCombine(h, k.SampleCount);
+            h = HashCombine(h, static_cast<uint32_t>(k.Topology));
+            h = HashCombine(h, static_cast<uint32_t>(k.CullMode));
+            h = HashCombine(h, static_cast<uint32_t>(k.Winding));
+            h = HashCombine(h, (k.DepthBiasEnable ? 1u : 0u) | (k.DepthClampEnable ? 2u : 0u));
+            return static_cast<size_t>(h);
         }
     };
     // One published variant, served as an indivisible unit: the pipeline the
@@ -402,12 +396,15 @@ class PipelineVariantCache
         const InstancedVariantKey& key) const;
     // Test seam: seed a queued color-variant publish exactly as a compile worker
     // would, without running a compile — the late-publish shape (a worker that
-    // outlives its material's unregister queues after the purge). Drive
-    // ApplyPendingVariantPublishes to exercise the drop-vs-insert decision.
+    // outlives its material's unregister queues after the purge). The GUID and
+    // registration generation are what the serial drain snapshots from the
+    // material when it submits the compile. Drive ApplyPendingVariantPublishes
+    // to exercise the drop-vs-insert decision.
     void EnqueueColorVariantPublishForTesting(const InstancedVariantKey& key,
                                               GraphicsPipelineId pipelineId,
                                               uint32_t materialVersion,
-                                              const GUID& materialGuid);
+                                              const GUID& materialGuid,
+                                              uint64_t registrationGeneration);
 
     // Device-rebuilt hook (RenderServices::OnDeviceRebuilt, alongside the device
     // cache's ClearConcreteOnly): the waits describe builds against the
@@ -535,6 +532,10 @@ class PipelineVariantCache
         MaterialBuildContext BuildContext;
         std::string Name;
         uint32_t MaterialVersion = 0;
+        // The registry binding the compile was submitted for: the material's
+        // GUID and its MaterialRegistry registration generation at the drain.
+        GUID MaterialGuid;
+        uint64_t RegistrationGeneration = 0;
         GraphicsPipelineId BaseGraphicsPipelineId{}; // color only (base template copy)
         bool IsDepth = false;
     };
@@ -554,8 +555,10 @@ class PipelineVariantCache
     void ReleaseVariantCompile(const InstancedVariantKey& key, bool isDepth);
 
     // A compiled variant unit handed back by a worker (or the inline headless
-    // path), waiting for the serial apply. Carries the material GUID for the
-    // VariantPublished event — Key.material is never dereferenced at apply.
+    // path), waiting for the serial apply. Carries the registry binding its
+    // compile was submitted for: the apply drops the unit unless that binding
+    // is still current, and the GUID names the VariantPublished event.
+    // Key.material is never dereferenced at apply.
     struct PendingVariantPublish
     {
         InstancedVariantKey Key;
@@ -564,6 +567,7 @@ class PipelineVariantCache
         std::vector<DescriptorSetLayoutId> SetLayouts;
         std::shared_ptr<ShaderMeta> VariantMeta;
         GUID MaterialGuid;
+        uint64_t RegistrationGeneration = 0;
         bool IsDepth = false;
     };
     void QueueVariantPublish(PendingVariantPublish&& publish);

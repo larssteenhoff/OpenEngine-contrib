@@ -212,6 +212,14 @@ class RenderPipelineInstance
         std::function<void(Rendering::RenderGraph::RGFrame&, RenderPipelineInstance&)>;
     void DeferDeclare(DeferredDeclareFn fn) { m_DeferredDeclares.push_back(std::move(fn)); }
 
+    // UI hosts register before the first fullscreen post-process node so the
+    // camera's effect chain sees the game UI in the same image as the scene.
+    using BeforePostProcessFn = std::function<void(ViewDeclare&)>;
+    void SetBeforePostProcessCallback(const void* owner, BeforePostProcessFn fn)
+    {
+        if (owner && fn)
+            m_BeforePostProcessCallbacks[owner] = std::move(fn);
+    }
     Engine::Renderer::RenderServices& GetRenderServices() const { return m_Rs; }
 
     // The view's ExposureHistory buffer for a texture holding scene colour stored at the frame's
@@ -290,6 +298,7 @@ class RenderPipelineInstance
     // Late declares queued during the current Declare's node loop (cleared
     // with the blackboard at the top of every Declare).
     std::vector<DeferredDeclareFn> m_DeferredDeclares;
+    std::unordered_map<const void*, BeforePostProcessFn> m_BeforePostProcessCallbacks;
 
     // Framework-level pass name cache for BuildForView().
     // Keyed by (nodeIndex << 48 | suffixHash << 32 | viewId) to remain stable

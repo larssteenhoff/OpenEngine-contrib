@@ -100,6 +100,7 @@ static void SA_DebugWrite(const char* msg)
 //   -2 => GE_Result_InvalidArg
 //   -3 => GE_Result_NotFound
 //   -4 => GE_Result_NotInitialized
+//   -9 => GE_Result_Busy (HotReloadManager.SwapPreloadedContext while another swap runs)
 //   any other negative => GE_Result_Fail
 static GE_Result MapManagedRcToGeResult(int rc)
 {
@@ -113,6 +114,8 @@ static GE_Result MapManagedRcToGeResult(int rc)
         return GE_Result_NotFound;
     case -4:
         return GE_Result_NotInitialized;
+    case -9:
+        return GE_Result_Busy;
     default:
         return GE_Result_Fail;
     }

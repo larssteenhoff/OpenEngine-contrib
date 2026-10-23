@@ -32,6 +32,9 @@ target_include_directories(Scene
         $<TARGET_PROPERTY:FileWatcher,INTERFACE_INCLUDE_DIRECTORIES>
         # RenderExtractionSystem.h holds a Particles::ParticleExtraction by value.
         ${CMAKE_SOURCE_DIR}/Engine/Modules/Particles/Include
+        # Platform's header-only environment switch: the TLAS switches and the
+        # Rendering headers above read through it.
+        ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include
 )
 
 target_link_libraries(Scene

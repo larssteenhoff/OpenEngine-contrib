@@ -1,18 +1,14 @@
 #pragma once
 
-// ShaderCompilationCache: two-level shader compilation cache.
-//
-// Level 1 (global dedup): Materials with the same shader sources and variant
-// key share compiled SPIR-V. Keyed on (ShaderVariantKey + surface/vertex paths).
-//
-// Level 2 (per-material fast-path): Maps (Material*, passKeywords) to the
-// resolved SharedShaderVariant. Inner storage is a small vector (2-4 entries)
-// since each material only sees a handful of pass keyword combinations.
+// ShaderCompilationCache: global shader compilation cache. Materials with the
+// same shader sources and variant key share compiled SPIR-V. Keyed on
+// (ShaderVariantKey + surface/vertex paths).
 //
 // Owned by RenderServices.
 
 #include "Engine/Rendering/MaterialCompileSpec.h"
 #include "Rendering/Core/Device.h"
+#include "Rendering/Core/HashUtils.h"
 #include "Rendering/Materials/MaterialBuildService.h"
 #include "Rendering/Materials/ShaderMeta.h"
 #include "Rendering/Materials/ShaderVariantKey.h"
@@ -43,7 +39,6 @@ namespace GameEngine
 {
 namespace Engine::Renderer
 {
-class Material;
 class ShaderCompileErrorLog;
 
 struct SharedShaderVariant
@@ -131,13 +126,13 @@ struct std::hash<GameEngine::Engine::Renderer::ShaderSourceKey>
 {
     size_t operator()(const GameEngine::Engine::Renderer::ShaderSourceKey& k) const noexcept
     {
-        size_t h = std::hash<std::string>{}(k.SurfaceShaderPath);
-        h ^= std::hash<std::string>{}(k.VertexModifierPath) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        using GameEngine::Rendering::HashUtils::HashCombine;
+        uint64_t h = std::hash<std::string>{}(k.SurfaceShaderPath);
+        h = HashCombine(h, std::hash<std::string>{}(k.VertexModifierPath));
         // Normalized for hashing while operator== compares the raw path: equal
         // keys still hash equal, and two spellings of one path merely collide.
-        h ^= std::hash<std::string>{}(k.MaterialAssetPath.lexically_normal().string()) + 0x9e3779b9
-             + (h << 6) + (h >> 2);
-        return h;
+        h = HashCombine(h, std::hash<std::string>{}(k.MaterialAssetPath.lexically_normal().string()));
+        return static_cast<size_t>(h);
     }
 };
 
@@ -146,10 +141,9 @@ struct std::hash<GameEngine::Engine::Renderer::ShaderCacheKey>
 {
     size_t operator()(const GameEngine::Engine::Renderer::ShaderCacheKey& k) const noexcept
     {
-        size_t h = static_cast<size_t>(k.VariantKey.Hash());
-        h ^= std::hash<GameEngine::Engine::Renderer::ShaderSourceKey>{}(k.Source) + 0x9e3779b9
-             + (h << 6) + (h >> 2);
-        return h;
+        const uint64_t h = GameEngine::Rendering::HashUtils::HashCombine(
+            k.VariantKey.Hash(), std::hash<GameEngine::Engine::Renderer::ShaderSourceKey>{}(k.Source));
+        return static_cast<size_t>(h);
     }
 };
 
@@ -175,27 +169,6 @@ class ShaderCompilationCache
         const Rendering::MaterialBuildContext& buildContext,
         const std::string& debugName,
         Rendering::ShaderSourceKind kind);
-
-    // --- Per-material variant resolution ---
-
-    // Resolve a variant for a specific material + pass keyword combination.
-    // On per-material cache hit, returns immediately. On miss, builds a
-    // ShaderCacheKey from the material's compile spec and variant key, checks
-    // the global dedup cache (or compiles), then stores the result.
-    // Takes const Material& -- the mutable variant map lives here, not on Material.
-    std::shared_ptr<SharedShaderVariant> GetOrCompileVariant(
-        const Material& material,
-        Rendering::MaterialKeyword passKeywords,
-        const Rendering::MaterialBuildContext& buildContext,
-        Rendering::ShaderSourceKind kind,
-        Rendering::VertexAttributeFlags meshVertexFlags = Rendering::VertexAttributeFlags::None);
-
-    // Clear all per-material variant entries (called on pipeline rebuild).
-    void ClearAllMaterialVariants();
-
-    // Clear per-material entries for a specific material. Must be called
-    // before the Material pointer is freed (during MaterialRegistry::Unregister).
-    void ClearVariantsForMaterial(const Material* material);
 
     // Drop a global dedup entry so the next GetOrCompile re-reads surface sources
     // from disk. Needed when shader file content changes but paths stay the same.
@@ -251,40 +224,18 @@ class ShaderCompilationCache
         std::lock_guard lock(m_Mutex);
         return m_Cache.size();
     }
-    size_t GetMaterialVariantCount() const
-    {
-        std::lock_guard lock(m_Mutex);
-        return m_MaterialVariants.size();
-    }
-    bool HasVariantsForMaterial(const Material* material) const
-    {
-        std::lock_guard lock(m_Mutex);
-        return m_MaterialVariants.find(material) != m_MaterialVariants.end();
-    }
 
-    // Drop the compiled entries, the per-material memos and the in-flight
-    // election: shutdown, and project switch. Entries are keyed by path rather
-    // than content, so an identity with an EMPTY material asset path (primitives,
-    // graph previews, headless registrations) is identical in both projects while
-    // the roots its references resolve against have just moved — a retained entry
-    // serves the old project's SPIR-V for a reference that now names a different
-    // file.
+    // Drop the compiled entries and the in-flight election: shutdown, and
+    // project switch. Entries are keyed by path rather than content, so an
+    // identity with an EMPTY material asset path (primitives, graph previews,
+    // headless registrations) is identical in both projects while the roots its
+    // references resolve against have just moved — a retained entry serves the
+    // old project's SPIR-V for a reference that now names a different file.
     //
     // Closure ROWS survive this call. See m_SurfaceClosures.
     void Clear();
 
   private:
-    struct VariantCacheKey
-    {
-        Rendering::MaterialKeyword passKeywords;
-        Rendering::VertexAttributeFlags vertexFlags;
-        bool operator==(const VariantCacheKey& o) const
-        {
-            return passKeywords == o.passKeywords && vertexFlags == o.vertexFlags;
-        }
-    };
-    using VariantEntry = std::pair<VariantCacheKey, std::shared_ptr<SharedShaderVariant>>;
-
     // Global dedup cache: ShaderCacheKey -> compiled variant.
     std::unordered_map<ShaderCacheKey, std::shared_ptr<SharedShaderVariant>> m_Cache;
 
@@ -303,10 +254,6 @@ class ShaderCompilationCache
     // later request to that stale future forever.
     using CompileFuture = std::shared_future<std::shared_ptr<SharedShaderVariant>>;
     std::unordered_map<ShaderCacheKey, CompileFuture> m_InFlight;
-
-    // Per-material fast-path cache. Inner vector holds 2-4 entries — linear
-    // scan beats hash lookup for this size, fits in 1-2 cache lines.
-    std::unordered_map<const Material*, std::vector<VariantEntry>> m_MaterialVariants;
 
     // Recorded include closures, one row per ShaderSourceKey. Values are
     // LOWERCASED FILENAMES of every file any build of that identity read:
@@ -359,28 +306,26 @@ class ShaderCompilationCache
     void RecordSurfaceClosureLocked(const ShaderCacheKey& key,
                                     std::vector<std::string>&& closureFilenames);
 
-    // Guards both caches. Recursive because GetOrCompileVariant calls
-    // GetOrCompile internally; the latter must re-acquire on the same thread.
-    // The slow shaderc work runs OUTSIDE the lock — the mutex only covers
-    // the cache check + insert.
-    mutable std::recursive_mutex m_Mutex;
+    // Guards the cache, the in-flight map, the closure rows, the epoch and the
+    // test hook. The slow shaderc work runs OUTSIDE the lock — the mutex only
+    // covers the cache check + insert.
+    mutable std::mutex m_Mutex;
 
-    // Invalidation epoch, bumped by InvalidateEntriesForShaderFile. GetOrCompile
-    // snapshots it under its first lock and publish() skips the m_Cache insert
-    // when it has moved; GetOrCompileVariant mirrors the guard on the memo
-    // insert. Without it, a compile already in flight when an edit notification
-    // lands republishes its PRE-EDIT SPIR-V after the invalidation swept the
-    // cache, leaving half-new/half-old variants on screen until the next save —
+    // Invalidation epoch, bumped by InvalidateEntriesForShaderFile,
+    // InvalidateGlobalEntry and Clear. GetOrCompile snapshots it under its first
+    // lock and publish() skips the m_Cache insert when it has moved. Without it,
+    // a compile already in flight when an edit notification lands republishes
+    // its PRE-EDIT SPIR-V after the invalidation swept the cache, leaving
+    // half-new/half-old variants on screen until the next save —
     // and rapid save bursts (the core authoring workload) are exactly when
     // in-flight compiles overlap edits.
     //
-    // One global counter, not per-file: an edit therefore also suppresses
-    // in-flight compiles of UNRELATED shaders. That costs at most one redundant
-    // recompile of the handful in flight at that instant, and never a stale
-    // pixel. Clear() advances it for the same reason the sweep does. Never
-    // RESET — a wrapping-free monotonic counter is what makes a stale snapshot
-    // detectable, and a counter that returned to a previous value would let a
-    // pre-clear snapshot compare equal again.
+    // One global counter, not per-file or per-key: any invalidation therefore
+    // also suppresses in-flight compiles of UNRELATED shaders. That costs at most
+    // one redundant recompile of the handful in flight at that instant, and never
+    // a stale pixel. Never RESET — a wrapping-free monotonic counter is what
+    // makes a stale snapshot detectable, and a counter that returned to a
+    // previous value would let a pre-clear snapshot compare equal again.
     uint64_t m_InvalidationEpoch = 0;
 
     // See SetCompileEnteredHookForTesting.

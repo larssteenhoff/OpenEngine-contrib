@@ -17,6 +17,7 @@
 #include "AssetDatabase/RedirectChain.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Logger/Logger.h"
+#include "Types/Fnv1a.h"
 #include "Types/StringUtils.h"
 #include <algorithm>
 #include <cassert>
@@ -421,26 +422,14 @@ static std::string ComputePartialHash_Fnv1a64(const std::filesystem::path& path,
     if (!in.IsOpen())
         return {};
 
-    uint64_t h = 14695981039346656037ULL;
-    auto fnvStep = [&](uint8_t b)
-    {
-        h ^= static_cast<uint64_t>(b);
-        h *= 1099511628211ULL;
-    };
-
     // Mix in file size (helps distinguish small collisions).
-    for (int i = 0; i < 8; ++i)
-    {
-        fnvStep(static_cast<uint8_t>((sizeForMix >> (i * 8)) & 0xFF));
-    }
+    uint64_t h = Hashing::Fnv1a64Value(Hashing::kFnv1a64OffsetBasis, sizeForMix);
 
     std::vector<uint8_t> buf;
     buf.resize(maxBytes);
     const int64_t got = in.Read(buf.data(), buf.size());
-    for (int64_t i = 0; i < got; ++i)
-    {
-        fnvStep(buf[static_cast<size_t>(i)]);
-    }
+    if (got > 0)
+        h = Hashing::Fnv1a64(buf.data(), static_cast<size_t>(got), h);
 
     return HashToHex(h);
 }
@@ -478,18 +467,8 @@ static std::string ComputeSparseHash_Fnv1a64(const std::filesystem::path& path, 
         usize > kSampleSize ? usize - kSampleSize : 0
     };
 
-    uint64_t h = 14695981039346656037ULL;
-    auto fnvStep = [&](uint8_t b)
-    {
-        h ^= static_cast<uint64_t>(b);
-        h *= 1099511628211ULL;
-    };
-
     // Mix in file size first.
-    for (int i = 0; i < 8; ++i)
-    {
-        fnvStep(static_cast<uint8_t>((static_cast<uint64_t>(fileSize) >> (i * 8)) & 0xFF));
-    }
+    uint64_t h = Hashing::Fnv1a64Value(Hashing::kFnv1a64OffsetBasis, static_cast<uint64_t>(fileSize));
 
     // Mix in offset marker to distinguish samples at different positions.
     std::vector<uint8_t> buf(kSampleSize);
@@ -497,20 +476,15 @@ static std::string ComputeSparseHash_Fnv1a64(const std::filesystem::path& path, 
     {
         const size_t offset = offsets[sampleIdx];
 
-        // Mix in offset as a position marker.
-        for (int i = 0; i < 8; ++i)
-        {
-            fnvStep(static_cast<uint8_t>((offset >> (i * 8)) & 0xFF));
-        }
+        // Mix in offset as a position marker, always 8 bytes wide.
+        h = Hashing::Fnv1a64Value(h, static_cast<uint64_t>(offset));
 
         if (!in.SeekTo(offset))
             continue;
 
         const int64_t got = in.Read(buf.data(), kSampleSize);
-        for (int64_t i = 0; i < got; ++i)
-        {
-            fnvStep(buf[static_cast<size_t>(i)]);
-        }
+        if (got > 0)
+            h = Hashing::Fnv1a64(buf.data(), static_cast<size_t>(got), h);
     }
 
     return HashToHex(h);
@@ -5999,95 +5973,6 @@ Vector<AssetRegistry::MissingAssetInfo> AssetRegistry::GetMissingAssets() const
     return out;
 }
 
-bool AssetRegistry::TryRelinkAssetPath(const GUID& guid, const std::filesystem::path& newPath)
-{
-    if (guid.IsNull() || newPath.empty())
-    {
-        return false;
-    }
-
-    const std::filesystem::path projectRoot = GetAssetRoot();
-    const std::filesystem::path normNew = NormalizePathForMap(
-        newPath.is_relative() ? (projectRoot / newPath) : newPath);
-
-    std::error_code ec;
-    if (!std::filesystem::exists(normNew, ec) || !std::filesystem::is_regular_file(normNew, ec))
-    {
-        return false;
-    }
-
-    AssetDatabase::IAssetStore* store = nullptr;
-    AssetDatabase::IAssetDbCache* cache = nullptr;
-    std::filesystem::path assetRoot;
-    {
-        std::shared_lock<std::shared_mutex> readLock(m_RegistryMutex);
-        store = ProjectStore();
-        cache = ProjectCache();
-        assetRoot = ProjectRoot();
-    }
-
-    if (!store)
-    {
-        return false;
-    }
-
-    std::string canonicalRel;
-    if (!AssetPaths::TryMakeCanonicalRelativePath(assetRoot, normNew, canonicalRel))
-    {
-        canonicalRel = AssetDatabase::AssetStore_TextJsonl::NormalizeCanonicalPath(normNew.generic_string());
-    }
-
-    AssetDatabase::AssetRecord rec{};
-    if (!store->TryGetAsset(guid, rec))
-    {
-        rec.guid = guid;
-    }
-    rec.path = canonicalRel;
-    if (!IsRecognizedAssetType(rec.type))
-    {
-        rec.type = AssetType::Unknown;
-    }
-    const AssetType inferredType = ClassifyAssetType(normNew);
-    if (inferredType != AssetType::Unknown)
-    {
-        rec.type = inferredType;
-        rec.typeId = AssetTypeToString(inferredType);
-    }
-    rec.missing = false;
-
-    (void)store->UpsertAsset(rec, nullptr);
-    (void)store->MarkMissing(guid, false, nullptr);
-    if (auto pinnedDirty = ProjectSourcePinned())
-        pinnedDirty->StoreDirty.store(true, std::memory_order_relaxed);
-
-    if (cache)
-    {
-        (void)cache->UpsertAsset(rec, nullptr);
-
-        int64_t size = 0;
-        int64_t mtime = 0;
-        if (TryGetFileStats(normNew, size, mtime))
-        {
-            const std::string fileId = ReadFileIdentity(normNew).ToString();
-            std::string hash;
-            if (size <= (256 * 1024))
-            {
-                hash = ComputePartialHash_Fnv1a64(normNew, 64 * 1024, static_cast<uint64_t>(size));
-            }
-            else
-            {
-                // For large files, use sparse sampling for future reconciliation.
-                hash = ComputeSparseHash_Fnv1a64(normNew, size);
-            }
-            (void)cache->UpdateFileFingerprint(guid, mtime, size, hash, fileId, nullptr);
-        }
-    }
-
-    // Register/update in-memory metadata entry for the relinked asset.
-    (void)RegisterAsset(normNew);
-    return true;
-}
-
 // ============================================================================
 // Provenance: importer-time produced -> producer relationships.
 // ============================================================================
@@ -7607,24 +7492,6 @@ std::future<size_t> AssetRegistry::ScanDirectoryAsync(const std::filesystem::pat
     }
 
     return coordinator->ScanDirectoryAsync(directory, recursive);
-}
-
-std::future<bool> AssetRegistry::LoadAssetMetadataAsync(const std::filesystem::path& assetPath)
-{
-    // Metadata lives in the authoritative store + derived cache (no sidecar files),
-    // so a metadata "load" is just ensuring the asset is registered and present
-    // in the store.
-    std::promise<bool> promise;
-    promise.set_value(RegisterAsset(assetPath));
-    return promise.get_future();
-}
-
-std::future<bool> AssetRegistry::SaveAssetMetadataAsync(const AssetMetadata& metadata)
-{
-    // Saving metadata is now a store upsert; the on-disk flush happens later (or on shutdown).
-    std::promise<bool> promise;
-    promise.set_value(SaveAssetMetadata(metadata));
-    return promise.get_future();
 }
 
 bool AssetRegistry::SaveToFile(const std::filesystem::path& path)

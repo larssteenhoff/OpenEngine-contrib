@@ -1,3 +1,7 @@
+#if defined(GE_PLATFORM_MOBILE)
+#include <SDL3/SDL_main.h>
+#endif
+
 #include "PlayerApplication.h"
 #include "PlayerHdrOptions.h"
 #include "PlayerLog.h"
@@ -67,6 +71,7 @@ LONG WINAPI UnhandledSEHFilter(EXCEPTION_POINTERS* info)
 }
 #endif
 
+#if !defined(GE_PLATFORM_MOBILE)
 static std::sig_atomic_t gSignalCount = 0;
 
 void SignalHandler(int sig)
@@ -79,6 +84,7 @@ void SignalHandler(int sig)
     std::signal(sig, SIG_DFL);
     std::raise(sig);
 }
+#endif
 
 // The directory the build stages game.config and Assets/ in: the executable's directory, or
 // Contents/Resources inside a macOS app bundle.
@@ -326,9 +332,11 @@ static int PlayerMainImpl(int argc, char** argv)
 #ifdef _WIN32
     SetUnhandledExceptionFilter(UnhandledSEHFilter);
 #endif
+#if !defined(GE_PLATFORM_MOBILE)
     std::signal(SIGABRT, SignalHandler);
 #ifdef SIGSEGV
     std::signal(SIGSEGV, SignalHandler);
+#endif
 #endif
 
     // Initialize logger. The Player is a WIN32-subsystem app in every config, so

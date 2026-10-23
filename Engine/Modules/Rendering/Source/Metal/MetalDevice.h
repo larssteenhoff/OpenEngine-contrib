@@ -89,6 +89,11 @@ struct MetalSemaphore
 // MetalTransientDescriptorArena, valid until that slot is recycled.
 struct MetalDescriptorSet
 {
+    std::vector<MTL::Buffer*> directBuffers;
+    std::vector<size_t> directBufferOffsets;
+    std::vector<MTL::Texture*> directTextures;
+    std::vector<MTL::SamplerState*> directSamplers;
+    std::vector<uint32_t> directBufferSizes;
     MTL::Buffer* argumentBuffer = nullptr; // owned (+1) only when ownsArgumentBuffer
     size_t argumentOffset = 0;             // byte offset of the table in argumentBuffer
     bool ownsArgumentBuffer = false;
@@ -180,6 +185,7 @@ struct MetalPipeline
     // The argument-buffer layouts this pipeline was translated against, by
     // set index. Consumed by the GE_METAL_VALIDATE_BINDINGS bind-time check.
     std::vector<MetalArgumentBufferLayout> setLayouts;
+    std::vector<MetalArgumentBufferLayout> directSetLayouts;
 
     uint32_t pushConstantSize = 0;
     uint32_t pushConstantStagesMask = 0;

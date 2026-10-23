@@ -23,20 +23,26 @@ namespace GameEngine
 
 namespace
 {
-    struct Segment { std::string text; uint32_t color; }; // color 0 = use default (100% white)
-    const uint32_t kLabelColor = 0xB3FFFFFFu; // 70% opacity white for labels
+    constexpr const char* kStyleAssetPath = "UI/controls/CssInspector/CssInspector.css";
+
+    enum class SegmentRole : uint8_t
+    {
+        Label, // property names, punctuation, headings
+        Value, // selectors and property values
+    };
+    struct Segment { std::string Text; SegmentRole Role; };
 
 
-    static std::string formatLen(const StyleLength& L) {
+    static std::string FormatLength(const StyleLength& L) {
         if (L.IsAuto()) return "auto";
         if (L.IsPercent()) return std::to_string(static_cast<int>(L.Value)) + "%";
         return std::to_string(static_cast<int>(L.Value)) + "px";
     }
-    static std::string formatColor(uint32_t c) { char b[10]; std::snprintf(b, sizeof(b), "#%02X%02X%02X%02X", (c>>24)&0xFF, (c>>16)&0xFF, (c>>8)&0xFF, c&0xFF); return b; }
-    static std::string formatColor6(uint32_t c) { char b[8]; std::snprintf(b, sizeof(b), "%06X", c & 0xFFFFFFu); return std::string(b); }
+    static std::string FormatColorArgb(uint32_t c) { char b[10]; std::snprintf(b, sizeof(b), "#%02X%02X%02X%02X", (c>>24)&0xFF, (c>>16)&0xFF, (c>>8)&0xFF, c&0xFF); return b; }
+    static std::string FormatColorRgb(uint32_t c) { char b[8]; std::snprintf(b, sizeof(b), "%06X", c & 0xFFFFFFu); return std::string(b); }
 
     // Parse color code from tooltip text; returns 0xAARRGGBB for swatch background, or nullopt if not a color.
-    static std::optional<uint32_t> parseColorFromText(std::string_view s)
+    static std::optional<uint32_t> ParseColorFromText(std::string_view s)
     {
         auto hex = [](char c) -> int {
             if (c >= '0' && c <= '9') return c - '0';
@@ -68,9 +74,9 @@ namespace
         return std::nullopt;
     }
 
-    static void appendSegment(std::vector<Segment>& segs, const std::string& text, uint32_t color = 0)
+    static void AppendSegment(std::vector<Segment>& segs, const std::string& text, SegmentRole role)
     {
-        if (!text.empty()) segs.push_back(Segment{text, color});
+        if (!text.empty()) segs.push_back(Segment{text, role});
     }
 
     static const char* StylePropertyIdName(StylePropertyId id)
@@ -117,7 +123,7 @@ namespace
         }
     }
 
-    static void appendStyleOverridesLinesToSegments(std::vector<Segment>& segs, const StyleOverrides& ovr)
+    static void AppendStyleOverrideSegments(std::vector<Segment>& segs, const StyleOverrides& ovr)
     {
         ovr.ForEachProp([&](StylePropertyId id, const StyleOverrideEntry& entry)
         {
@@ -143,19 +149,19 @@ namespace
             else if (auto* b = std::get_if<bool>(&entry.value))
                 value = *b ? "true" : "false";
             else if (auto* len = std::get_if<StyleLength>(&entry.value))
-                value = formatLen(*len);
+                value = FormatLength(*len);
             else
                 value = "(...)";
 
-            appendSegment(segs, label, kLabelColor);
-            appendSegment(segs, value + ";\n", 0);
+            AppendSegment(segs, label, SegmentRole::Label);
+            AppendSegment(segs, value + ";\n", SegmentRole::Value);
         });
     }
 
-    static void formatCssSummarySegments(const UIManager* ui, const UIElement* el, std::vector<Segment>& segs)
+    static void FormatCssSummarySegments(const UIManager* ui, const UIElement* el, std::vector<Segment>& segs)
     {
         if (!ui || !el) return;
-        appendSegment(segs, ui->GetElementSelector(el), 0);
+        AppendSegment(segs, ui->GetElementSelector(el), SegmentRole::Value);
         const ResolvedStyle* rs = ui->TryGetResolvedStyleFor(el);
         if (rs)
         {
@@ -168,18 +174,18 @@ namespace
                 return std::to_string(static_cast<int>(L.Value)) + "px";
             };
             auto prop = [&segs](const char* label, const std::string& value) {
-                appendSegment(segs, std::string(label), kLabelColor);
-                appendSegment(segs, value + ";\n", 0);
+                AppendSegment(segs, std::string(label), SegmentRole::Label);
+                AppendSegment(segs, value + ";\n", SegmentRole::Value);
             };
-            appendSegment(segs, " {\n", kLabelColor);
+            AppendSegment(segs, " {\n", SegmentRole::Label);
             prop("  display: ", std::string(lo.DisplayMode == DisplayMode::Flex ? "flex" : lo.DisplayMode == DisplayMode::Block ? "block" : lo.DisplayMode == DisplayMode::Inline ? "inline" : "none"));
             prop("  position: ", std::string(lo.PositionType == PositionType::Absolute ? "absolute" : "relative"));
             if (!lo.Width.IsAuto()) prop("  width: ", len(lo.Width));
             if (!lo.Height.IsAuto()) prop("  height: ", len(lo.Height));
             if (lo.Padding.Top != 0.f || lo.Padding.Left != 0.f) prop("  padding: ", px(lo.Padding.Top) + " " + px(lo.Padding.Right) + " " + px(lo.Padding.Bottom) + " " + px(lo.Padding.Left));
             if (lo.Margin.Top != 0.f || lo.Margin.Left != 0.f) prop("  margin: ", px(lo.Margin.Top) + " " + px(lo.Margin.Right) + " " + px(lo.Margin.Bottom) + " " + px(lo.Margin.Left));
-            if (vs.HasColor) { appendSegment(segs, "  color: #", kLabelColor); appendSegment(segs, formatColor6(vs.Color) + ";\n", 0); }
-            if ((vs.BackgroundColor & 0xFF000000u) != 0) { appendSegment(segs, "  background: ", kLabelColor); appendSegment(segs, formatColor(vs.BackgroundColor) + ";\n", 0); }
+            if (vs.HasColor) { AppendSegment(segs, "  color: #", SegmentRole::Label); AppendSegment(segs, FormatColorRgb(vs.Color) + ";\n", SegmentRole::Value); }
+            if ((vs.BackgroundColor & 0xFF000000u) != 0) { AppendSegment(segs, "  background: ", SegmentRole::Label); AppendSegment(segs, FormatColorArgb(vs.BackgroundColor) + ";\n", SegmentRole::Value); }
             if (vs.HasFontSize) prop("  font-size: ", px(vs.FontSize) + "px");
             if (vs.HasFontFamily && vs.FontFamily && !vs.FontFamily->empty())
             {
@@ -200,30 +206,30 @@ namespace
                 prop("  font-style: ", std::string(vs.FontStyle == FontStyle::Italic ? "italic" : vs.FontStyle == FontStyle::Oblique ? "oblique" : "normal"));
             if (lo.FlexGrow != 0.f) prop("  flex-grow: ", std::to_string(lo.FlexGrow));
             if (lo.Gap != 0.f) prop("  gap: ", px(lo.Gap) + (lo.GapIsPercent ? "%" : "px"));
-            appendSegment(segs, "}", kLabelColor);
+            AppendSegment(segs, "}", SegmentRole::Label);
         }
         else
-            appendSegment(segs, " { (no resolved style) }", kLabelColor);
+            AppendSegment(segs, " { (no resolved style) }", SegmentRole::Label);
 
         const auto& inlineOvr = el->InlineOverrides();
         if (!inlineOvr.IsEmpty())
         {
-            appendSegment(segs, "\n/* inline style */\n", kLabelColor);
-            appendStyleOverridesLinesToSegments(segs, inlineOvr);
+            AppendSegment(segs, "\n/* inline style */\n", SegmentRole::Label);
+            AppendStyleOverrideSegments(segs, inlineOvr);
         }
     }
 
-    static std::string formatCssSummary(const UIManager* ui, const UIElement* el)
+    static std::string FormatCssSummary(const UIManager* ui, const UIElement* el)
     {
         std::vector<Segment> segs;
-        formatCssSummarySegments(ui, el, segs);
+        FormatCssSummarySegments(ui, el, segs);
         std::string out;
-        for (const auto& s : segs) out += s.text;
+        for (const auto& s : segs) out += s.Text;
         return out;
     }
 
     // Full selector path from root down to el (for display and copy).
-    static std::string buildPathString(const UIManager* ui, const UIElement* el)
+    static std::string BuildPathString(const UIManager* ui, const UIElement* el)
     {
         if (!ui || !el) return std::string();
         std::vector<UIElement*> stack;
@@ -255,13 +261,13 @@ UIElement* CssInspector::GetDisplayedElement(UIManager* ui) const
 
 std::string CssInspector::GetSummaryForElement(const UIManager* ui, const UIElement* el) const
 {
-    return formatCssSummary(ui, el);
+    return FormatCssSummary(ui, el);
 }
 
 std::string CssInspector::GetSummaryIncludingPathForElement(const UIManager* ui, const UIElement* el) const
 {
-    std::string path = buildPathString(ui, el);
-    std::string summary = formatCssSummary(ui, el);
+    std::string path = BuildPathString(ui, el);
+    std::string summary = FormatCssSummary(ui, el);
     if (path.empty()) return summary;
     return "path: " + path + "\n\n" + summary;
 }
@@ -370,23 +376,11 @@ void CssInspector::Update(UIManager* ui, int windowWidth, int windowHeight)
     {
         auto hl = std::make_unique<UIElement>();
         hl->SetId("css-inspector-highlight");
-        hl->Overrides()
-            .Set(Style::Position, PositionType::Absolute)
-            .Set(Style::PositionLeft, StyleLength::Px(0.f))
-            .Set(Style::PositionTop, StyleLength::Px(0.f))
-            .Set(Style::Width, StyleLength::Px(1.f))
-            .Set(Style::Height, StyleLength::Px(1.f))
-            .Set(Style::ZIndex, 9998)
-            .Set(Style::PointerEvents, false)
-            .Set(Style::BackgroundColor, (uint32_t)0x00000000)
-            .Set(Style::BorderTopWidth, 2.f)
-            .Set(Style::BorderRightWidth, 2.f)
-            .Set(Style::BorderBottomWidth, 2.f)
-            .Set(Style::BorderLeftWidth, 2.f)
-            .Set(Style::BorderTopColor, (uint32_t)0xFFFFFF00)
-            .Set(Style::BorderRightColor, (uint32_t)0xFFFFFF00)
-            .Set(Style::BorderBottomColor, (uint32_t)0xFFFFFF00)
-            .Set(Style::BorderLeftColor, (uint32_t)0xFFFFFF00);
+        hl->AddClass("css-inspector-highlight");
+        hl->RequestSubtreeStyleAssetPath(kStyleAssetPath);
+        // Never hit-testable, even before the sheet resolves: an outline that took
+        // the hover would inspect itself.
+        hl->Overrides().Set(Style::PointerEvents, false);
         highlight = hl.get();
         root->AddChild(std::move(hl));
     }
@@ -415,20 +409,9 @@ void CssInspector::Update(UIManager* ui, int windowWidth, int windowHeight)
     {
         auto container = std::make_unique<UIElement>();
         container->SetId("css-inspector-overlay");
-        container->Overrides()
-            .Set(Style::Position, PositionType::Absolute)
-            .Set(Style::PositionLeft, StyleLength::Px(0.f))
-            .Set(Style::PositionTop, StyleLength::Px(0.f))
-            .Set(Style::Width, StyleLength::Px(tooltipWidth))
-            .Set(Style::Height, StyleLength::Px(tooltipHeight))
-            .Set(Style::ZIndex, 9999)
-            .Set(Style::PointerEvents, false)
-            .Set(Style::BackgroundColor, (uint32_t)0xEE1a1a1a)
-            .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{6.f, 6.f, 6.f, 6.f})
-            .Set(Style::PaddingTop, StyleLength::Px(16.f))
-            .Set(Style::PaddingRight, StyleLength::Px(16.f))
-            .Set(Style::PaddingBottom, StyleLength::Px(16.f))
-            .Set(Style::PaddingLeft, StyleLength::Px(16.f));
+        container->AddClass("css-inspector-card");
+        container->RequestSubtreeStyleAssetPath(kStyleAssetPath);
+        container->Overrides().Set(Style::PointerEvents, false);
         overlay = container.get();
         root->AddChild(std::move(container));
     }
@@ -441,18 +424,16 @@ void CssInspector::Update(UIManager* ui, int windowWidth, int windowHeight)
         .Set(Style::Height, StyleLength::Px(tooltipHeight));
 
     // Build tooltip: layer line, then CSS block, then full path at bottom (wrapped: one selector per line)
-    // Labels (property names, "path:", etc.) 70% opacity; values 100%.
-    const uint32_t kWhite = 0xFFFFFFFFu;
     std::vector<Segment> segs;
-    appendSegment(segs, "layer ", kLabelColor);
-    appendSegment(segs, std::to_string(m_DisplayLayerIndex + 1) + " of " + std::to_string(numLayers), 0);
-    appendSegment(segs, " (scroll to change)\n", kLabelColor);
-    formatCssSummarySegments(ui, displayedEl, segs);
+    AppendSegment(segs, "layer ", SegmentRole::Label);
+    AppendSegment(segs, std::to_string(m_DisplayLayerIndex + 1) + " of " + std::to_string(numLayers), SegmentRole::Value);
+    AppendSegment(segs, " (scroll to change)\n", SegmentRole::Label);
+    FormatCssSummarySegments(ui, displayedEl, segs);
     // Full path at bottom, wrapped (each selector on its own line)
-    std::string pathStr = buildPathString(ui, displayedEl);
+    std::string pathStr = BuildPathString(ui, displayedEl);
     if (!pathStr.empty())
     {
-        appendSegment(segs, "\n\npath:\n", kLabelColor);
+        AppendSegment(segs, "\n\npath:\n", SegmentRole::Label);
         const char* sep = " > ";
         size_t pos = 0;
         bool first = true;
@@ -463,8 +444,8 @@ void CssInspector::Update(UIManager* ui, int windowWidth, int windowHeight)
             std::string part(pathStr.substr(pos, next - pos));
             if (!part.empty())
             {
-                appendSegment(segs, first ? "  " : "  > ", kLabelColor);
-                appendSegment(segs, part + "\n", 0);
+                AppendSegment(segs, first ? "  " : "  > ", SegmentRole::Label);
+                AppendSegment(segs, part + "\n", SegmentRole::Value);
                 first = false;
             }
             if (next >= pathStr.size()) break;
@@ -473,7 +454,7 @@ void CssInspector::Update(UIManager* ui, int windowWidth, int windowHeight)
     }
     overlay->RemoveAllChildren();
 
-    using RowContent = std::vector<std::pair<std::string, uint32_t>>;
+    using RowContent = std::vector<std::pair<std::string, SegmentRole>>;
     std::vector<RowContent> rows;
     RowContent currentRow;
     for (const Segment& s : segs)
@@ -481,15 +462,15 @@ void CssInspector::Update(UIManager* ui, int windowWidth, int windowHeight)
         size_t pos = 0;
         for (;;)
         {
-            size_t next = s.text.find('\n', pos);
+            size_t next = s.Text.find('\n', pos);
             if (next == std::string::npos)
             {
-                if (pos < s.text.size())
-                    currentRow.push_back({s.text.substr(pos), s.color});
+                if (pos < s.Text.size())
+                    currentRow.push_back({s.Text.substr(pos), s.Role});
                 break;
             }
             if (pos < next)
-                currentRow.push_back({s.text.substr(pos, next - pos), s.color});
+                currentRow.push_back({s.Text.substr(pos, next - pos), s.Role});
             if (!currentRow.empty())
             {
                 rows.push_back(std::move(currentRow));
@@ -502,42 +483,25 @@ void CssInspector::Update(UIManager* ui, int windowWidth, int windowHeight)
         rows.push_back(std::move(currentRow));
 
     auto column = std::make_unique<UIElement>();
-    column->Overrides()
-        .Set(Style::Display, DisplayMode::Flex)
-        .Set(Style::FlexDir, FlexDirection::Column);
+    column->AddClass("css-inspector-lines");
     for (const RowContent& rowContent : rows)
     {
         auto rowEl = std::make_unique<UIElement>();
-        rowEl->Overrides()
-            .Set(Style::Display, DisplayMode::Flex)
-            .Set(Style::FlexDir, FlexDirection::Row);
-        for (const auto& [text, color] : rowContent)
+        rowEl->AddClass("css-inspector-line");
+        for (const auto& [text, role] : rowContent)
         {
             if (text.empty()) continue;
-            std::optional<uint32_t> swatchColor = parseColorFromText(text);
+            std::optional<uint32_t> swatchColor = ParseColorFromText(text);
             if (swatchColor)
             {
                 auto swatch = std::make_unique<UIElement>();
-                swatch->Overrides()
-                    .Set(Style::Width, StyleLength::Px(14.f))
-                    .Set(Style::Height, StyleLength::Px(14.f))
-                    .Set(Style::MarginRight, StyleLength::Px(4.f))
-                    .Set(Style::BackgroundColor, (uint32_t)*swatchColor)
-                    .Set(Style::BorderTopWidth, 1.f)
-                    .Set(Style::BorderRightWidth, 1.f)
-                    .Set(Style::BorderBottomWidth, 1.f)
-                    .Set(Style::BorderLeftWidth, 1.f)
-                    .Set(Style::BorderTopColor, (uint32_t)0xFF444444u)
-                    .Set(Style::BorderRightColor, (uint32_t)0xFF444444u)
-                    .Set(Style::BorderBottomColor, (uint32_t)0xFF444444u)
-                    .Set(Style::BorderLeftColor, (uint32_t)0xFF444444u);
+                swatch->AddClass("css-inspector-swatch");
+                swatch->Overrides().Set(Style::BackgroundColor, *swatchColor);
                 rowEl->AddChild(std::move(swatch));
             }
             auto label = std::make_unique<Label>();
             label->SetText(text);
-            label->Overrides()
-                .Set(Style::FontSize, StyleLength::Px(14.f))
-                .Set(Style::Color, (uint32_t)(color != 0 ? color : kWhite));
+            label->AddClass(role == SegmentRole::Label ? "css-inspector-label" : "css-inspector-value");
             rowEl->AddChild(std::move(label));
         }
         if (rowEl->GetChildren().size() > 0)

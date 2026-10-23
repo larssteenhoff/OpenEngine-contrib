@@ -65,6 +65,23 @@ public:
     Transform GetBodyTransform(BodyHandle body) const;
     void SetBodyTransform(BodyHandle body, const Transform& transform, ActivationMode activation = ActivationMode::Activate);
 
+    // Drive a KINEMATIC body toward `target`, by setting the linear and angular
+    // velocity that arrives there in `deltaTime`. Wakes the body.
+    //
+    // This is the only correct way to move a kinematic platform. SetBodyTransform
+    // teleports: the body is relocated outside the solver, so the contact
+    // manifolds under whatever rests on it are discarded, the accumulated
+    // friction impulses that carry a rider are lost, and the rider is left
+    // behind (or tunnels). A velocity-driven body sweeps between poses, keeps
+    // its manifolds, and transfers motion through ordinary contact friction —
+    // which is what carries dynamic riders for free.
+    //
+    // `deltaTime` should be the interval over which the simulation will actually
+    // advance before the next call. Any residual gap is corrected on the next
+    // call, since the velocity is recomputed from the body's real pose each
+    // time; error does not accumulate.
+    void MoveKinematic(BodyHandle body, const Transform& target, float32 deltaTime);
+
     Vector3 GetLinearVelocity(BodyHandle body) const;
     void SetLinearVelocity(BodyHandle body, const Vector3& velocity);
 
@@ -73,6 +90,20 @@ public:
 
     // World-space center of mass (reference point for buoyancy torque).
     Vector3 GetCenterOfMassPosition(BodyHandle body) const;
+
+    // World-space velocity that `body` imparts to the world-space point
+    // `worldPoint`, including the angular contribution — so a point on a
+    // rotating platform reports the correct tangential speed, not the
+    // platform's linear velocity.
+    //
+    // This is the engine-side obligation for riders that are not dynamic bodies.
+    // A dynamic rider needs nothing: contact friction against a properly moved
+    // kinematic body carries it. A character that does its own sweeping instead
+    // of being simulated has no contact to draw from, so it queries the surface
+    // it is standing on and adds this to its own motion.
+    //
+    // Zero for a static or invalid body.
+    Vector3 GetPointVelocity(BodyHandle body, const Vector3& worldPoint) const;
 
     // Forces/torques accumulate and apply during the next Step(); impulses
     // change velocity immediately. The "AtPosition" variants apply at a
@@ -126,6 +157,29 @@ public:
     void RemoveTriggerListener(ListenerId id);
     void ClearContactListeners();
     void ClearTriggerListeners();
+
+    // Per-contact accept/reject and surface response. Unlike the listeners
+    // above — which are queued during the step and dispatched afterwards, on
+    // the caller's thread — this runs synchronously on physics worker threads
+    // while the step is in flight; see ContactModifyCallback
+    // for the contract it must honour. Only one may be registered; passing
+    // nullptr clears it and restores plain body-level friction/restitution.
+    // `context` must outlive the callback's registration.
+    //
+    // The callback is only consulted for bodies that are awake. If a decision
+    // changes because the context changed — a character starting to drop
+    // through a platform it rests on — the caller must wake the affected body
+    // (ActivateBodiesInAABB); nothing else can observe that change.
+    void SetContactModifyCallback(ContactModifyCallback callback, void* context);
+
+    // Replaces the contact flags snapshotted at body creation. It writes,
+    // unsynchronized, the table the callback reads from workers, so the caller
+    // must serialize it against the step and against body creation — from an
+    // ECS system, that means a schedule wave of its own ahead of PhysicsStep.
+    // A body already asleep does not re-evaluate its contacts, so a
+    // change that must take effect now (a character asking to drop through the
+    // platform it rests on) has to wake the affected bodies as well.
+    void SetBodyContactFlags(BodyHandle body, uint32 contactFlags);
 
     // Convenience (back-compat): replaces all listeners with a single callback.
     void SetContactCallback(ContactCallback callback);

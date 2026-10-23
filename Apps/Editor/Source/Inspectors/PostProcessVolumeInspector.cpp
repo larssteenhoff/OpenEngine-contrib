@@ -2,6 +2,7 @@
 
 #include "InspectorRegistry.h"
 
+#include "Components/Rendering/PostProcessEffects/ContrastAdaptiveSharpenEffect.h"
 #include "Components/Rendering/PostProcessEffects/HeightFogEffect.h"
 #include "Components/Rendering/PostProcessEffects/VignetteEffect.h"
 #include "Components/Rendering/PostProcessVolume.h"
@@ -56,6 +57,28 @@ static constexpr EnumEntry<PostProcessVolumeShape> kVolumeShapes[] = {
     {PostProcessVolumeShape::Capsule,  "Capsule"},
     {PostProcessVolumeShape::Cylinder, "Cylinder"},
 };
+
+template <typename TEffect>
+bool WriteEffectStackOrder(ECS::World& world, ECS::EntityHandle entity, int32 order)
+{
+    TEffect* effect = world.GetComponentForWrite<TEffect>(entity);
+    if (!effect)
+        return false;
+    effect->StackOrder = order;
+    return true;
+}
+
+// The reorderable LDR post effects (Contrast Adaptive Sharpen, Vignette) run in a
+// user-ordered chain; the others keep no order.
+bool SetLdrEffectStackOrder(ECS::World& world, ECS::EntityHandle entity, ECS::ComponentTypeId effectTypeId,
+                            int32_t order)
+{
+    if (effectTypeId == ECS::GetComponentTypeId<Components::ContrastAdaptiveSharpenEffect>())
+        return WriteEffectStackOrder<Components::ContrastAdaptiveSharpenEffect>(world, entity, order);
+    if (effectTypeId == ECS::GetComponentTypeId<Components::VignetteEffect>())
+        return WriteEffectStackOrder<Components::VignetteEffect>(world, entity, order);
+    return false;
+}
 
 constexpr float kPostProcessEffectPickerWidthPx = 360.0f;
 
@@ -190,6 +213,7 @@ class PostProcessEffectSearchProvider final : public ISearchProvider
                 m_Entries.push_back({std::string(descriptor.DisplayName),
                                      std::string(descriptor.Description),
                                      std::string(descriptor.IconPath),
+                                     std::string(descriptor.IconClass),
                                      descriptor.Type});
             });
         std::sort(m_Entries.begin(), m_Entries.end(),
@@ -211,7 +235,7 @@ class PostProcessEffectSearchProvider final : public ISearchProvider
             item.Id = static_cast<SearchItemId>(i + 1);
             item.Label = entry.Label;
             item.Detail = entry.Description;
-            item.Icon.CssClass = "search-result-icon-postfx";
+            item.Icon.CssClass = entry.IconClass.empty() ? "search-result-icon-postfx" : entry.IconClass;
             item.Icon.ImagePath = entry.IconPath;
             item.UserData = AddVolumeEffectChoice{entry.TypeId};
             results.push_back(std::move(item));
@@ -228,6 +252,7 @@ class PostProcessEffectSearchProvider final : public ISearchProvider
         std::string Label;
         std::string Description;
         std::string IconPath;
+        std::string IconClass;
         ECS::ComponentTypeId TypeId = 0;
     };
 
@@ -353,6 +378,26 @@ void AddPostProcessEffectButton(const InspectorContext& ctx)
 
 void RegisterPostProcessVolumeInspector()
 {
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Post Process Volume";
+        traits.Category = "Rendering";
+        traits.Tooltip = "Post-processing volume for spatial blending and core overrides";
+        traits.InspectorIconClass = "inspector-section-icon-post-process-volume";
+        traits.HostsInspectorSection = IsPostProcessEffect;
+        traits.HostedSectionBodyClass = "inspector-post-process-effect-body";
+        traits.HostedEnableToggleTooltip = "Switch this effect on or off. Off pins it off wherever this volume "
+                                           "applies, over any volume of lower priority.";
+        traits.MissingHostBadge = "No Volume";
+        traits.MissingHostWarning =
+            "This effect has no Post Process Volume on its entity, so it is inactive. "
+            "Add a Post Process Volume (the effect nests under it), or remove the effect.";
+        traits.RemovingRemovesStackEffects = true;
+        traits.SetStackEffectOrder = &SetLdrEffectStackOrder;
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::PostProcessVolume>(), std::move(traits));
+    }
+
     using namespace InspectorDrag;
     using PP = Components::PostProcessVolume;
 
@@ -458,17 +503,6 @@ void RegisterPostProcessVolumeInspector()
     };
 
     InspectorRegistry::Get().RegisterComponentInspector<PP>(std::move(fn));
-
-    Editor::EditorComponentTraits traits;
-    traits.HostsInspectorSection = IsPostProcessEffect;
-    traits.HostedSectionBodyClass = "inspector-post-process-effect-body";
-    traits.HostedEnableToggleTooltip = "Switch this effect on or off. Off pins it off wherever this volume "
-                                       "applies, over any volume of lower priority.";
-    traits.MissingHostBadge = "No Volume";
-    traits.MissingHostWarning =
-        "This effect has no Post Process Volume on its entity, so it is inactive. "
-        "Add a Post Process Volume (the effect nests under it), or remove the effect.";
-    Editor::EditorComponentTraitsRegistry::Get().Register(ECS::GetComponentTypeId<PP>(), std::move(traits));
 }
 
 } // namespace GameEngine

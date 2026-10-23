@@ -17,6 +17,7 @@
 #include "Engine/Rendering/RenderServices.h"
 #include "InspectorRegistry.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
+#include "Inspectors/InspectorComponentSection.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorUIHelpers.h"
 #include "Inspectors/ModelSettingsReload.h"
@@ -395,10 +396,12 @@ void BuildLodResultsPerSubmesh(UIElement* root, const ModelAsset* model, bool ha
         const Mesh& mesh = model->GetMesh(i);
         const SubmeshLodProvenance provenance = ClassifySubmeshLod(mesh);
 
-        auto foldoutOwned = std::make_unique<Foldout>();
-        Foldout* foldout = foldoutOwned.get();
+        // Many submeshes start collapsed and build their detail on first expand.
+        Foldout* foldout = InspectorUI::AddComponentSection(
+            root, "ModelLod/Submesh" + std::to_string(i),
+            mesh.Name.empty() ? ("Submesh " + std::to_string(i)) : std::string(mesh.Name),
+            meshCount <= 1u);
         foldout->AddClass("lod-submesh-foldout");
-        foldout->SetTitle(mesh.Name.empty() ? ("Submesh " + std::to_string(i)) : std::string(mesh.Name));
 
         UIElement* header = foldout->GetHeader();
         if (header)
@@ -418,26 +421,21 @@ void BuildLodResultsPerSubmesh(UIElement* root, const ModelAsset* model, bool ha
             AddProvenanceBadge(header, provenance, hasSlots);
         }
 
-        // Many submeshes: collapse and defer detail construction to first expand.
-        // Re-fetch by index inside the builder so a later vector reallocation can
-        // not dangle a captured Mesh reference; the model outlives the inspector.
-        // A single submesh stays open, but the foldout starts expanded and the lazy
-        // builder only fires on a collapse->expand transition, so that path would
-        // never build — construct its detail eagerly into the content container.
-        if (meshCount > 1u)
+        // The lazy builder fires only on a collapse->expand transition, so a
+        // section that opens expanded builds its detail eagerly. Re-fetch by index
+        // inside the builder so a later vector reallocation can not dangle a
+        // captured Mesh reference; the model outlives the inspector.
+        if (foldout->IsExpanded())
         {
-            foldout->Collapse();
+            BuildSubmeshLodDetail(foldout->GetContentContainer(), mesh);
+        }
+        else
+        {
             foldout->SetLazyContentBuilder(
                 [model, i](UIElement* contentContainer) {
                     BuildSubmeshLodDetail(contentContainer, model->GetMesh(i));
                 });
         }
-        else
-        {
-            BuildSubmeshLodDetail(foldout->GetContentContainer(), mesh);
-        }
-
-        root->AddChild(std::move(foldoutOwned));
     }
 }
 

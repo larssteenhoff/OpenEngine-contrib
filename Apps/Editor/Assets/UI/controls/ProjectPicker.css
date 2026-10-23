@@ -1315,7 +1315,7 @@
 	margin-top: 12px;
 }
 
-.project-picker-modal .project-import-git-hint {
+.project-picker-modal .project-import-git-requirement {
 	color: var(--pp_color_text_muted);
 	font-size: 12px;
 }

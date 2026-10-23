@@ -27,6 +27,7 @@
 #include "UI/UIEvents.h"
 #include "UI/UIManager.h"
 #include "UIRgTestHarness.h"
+#include "TestTempDir.h"
 
 #include "Memory/AllocationCountScope.h"
 
@@ -70,7 +71,8 @@ struct ClickFixture
         Ui = std::make_unique<UIManager>(Dev.get());
         Ui->SetRoot(std::move(root));
 
-        const auto css = std::filesystem::temp_directory_path() / "ui_mouse_dispatch_alloc.css";
+        const TestUtils::ScopedTempDir tempDir(TestUtils::MakeUniqueTempDirectory("ui_mouse_dispatch_alloc"));
+        const auto css = tempDir.Path() / "ui_mouse_dispatch_alloc.css";
         {
             std::ofstream f(css);
             f << R"(

@@ -165,6 +165,12 @@ void IBLGenNode::Declare(RenderPipelineInstance& /*instance*/, const PipelineDec
         bakeCtx.DeltaTimeSeconds = ctx.DeltaTimeSeconds;
         source->ScheduleBake(bakeCtx);
     }
+    EnvironmentBakeContext localCtx{};
+    localCtx.Frame = &ctx.Frame;
+    localCtx.Device = device;
+    localCtx.Feature = &feature;
+    localCtx.DeltaTimeSeconds = ctx.DeltaTimeSeconds;
+    feature.ScheduleLocalProbeBakes(localCtx);
 }
 
 } // namespace GameEngine::Engine::Renderer::Pipeline::Nodes

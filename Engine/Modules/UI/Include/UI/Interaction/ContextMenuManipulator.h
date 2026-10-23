@@ -41,6 +41,8 @@ class ContextMenuManipulator : public PointerManipulator
         bool Enabled = true;
         // "#RRGGBB" trailing swatch (color-picker rows). Empty keeps the item's baked color.
         std::string ColorHex;
+        // Row icon for this show. Empty keeps the item's baked icon.
+        std::string IconPath;
     };
 
     // One declared row. Paths use the existing menu vocabulary ("Marquee Thickness/1.25"
@@ -49,7 +51,8 @@ class ContextMenuManipulator : public PointerManipulator
     struct Item
     {
         std::string Path;
-        // Row icon. On a submenu descriptor (below) it becomes the submenu row's icon.
+        // Row icon. On a submenu descriptor (below) it becomes the submenu row's icon. A
+        // State hook's non-empty IconPath overrides it per show.
         std::string IconPath;
         // Baked trailing swatch; a State hook's non-empty ColorHex overrides it per show.
         std::string ColorHex;

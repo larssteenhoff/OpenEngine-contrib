@@ -55,8 +55,7 @@ class AssetUnloadTask : public JobSystem::Task
 class AssetBatchCoordinator
 {
   public:
-    AssetBatchCoordinator(AssetManager& assetManager, JobSystem::WorkStealingThreadPool& jobSystem,
-                          AssetIOService& ioService);
+    AssetBatchCoordinator(AssetManager& assetManager, AssetIOService& ioService);
 
     /**
      * @brief Kick off the read -> Background-decode pipeline for one asset.
@@ -85,16 +84,8 @@ class AssetBatchCoordinator
                    Function<void(const JobSystem::TaskHandle&)> onComplete,
                    Function<void(const String&)> onFailure);
 
-    /**
-     * @brief Unload single asset
-     * @param assetGuid Asset to unload
-     * @return TaskHandle for tracking unload completion
-     */
-    JobSystem::TaskHandle UnloadAsset(const GUID& assetGuid);
-
   private:
     AssetManager& m_AssetManager;
-    JobSystem::WorkStealingThreadPool& m_JobSystem;
     AssetIOService& m_IOService;
 };
 

@@ -15,6 +15,7 @@
 #include "PhysicsECS/Components/PhysicsBody.h"
 #include "PhysicsECS/Components/PhysicsCollider.h"
 #include "PhysicsECS/Components/HeightFieldColliderShape.h"
+#include "PhysicsECS/Systems/PhysicsWorldHooks.h"
 
 #include <algorithm>
 #include <array>
@@ -96,29 +97,14 @@ uint64 HashPlanetShape(const PlanetColliderParams& params)
 
 // Frees the entity's backend body now. Entity destruction and component removal
 // are deferred to the next frame's flush, so the entity stays live for the rest
-// of THIS frame with a freed Jolt body; clearing the runtime state keeps anything
-// from dereferencing the freed handle before the removal lands (PhysicsInit's
-// initialized/valid early-out is incidental, not a guarantee), and the
-// OnRemove<PhysicsBody> hook then finds the handles already cleared.
+// of THIS frame; ReleasePhysicsBody also clears the runtime handles, which keeps
+// anything from dereferencing the freed body before the removal lands
+// (PhysicsInit's initialized/valid early-out is incidental, not a guarantee), and
+// the OnRemove<PhysicsBody> hook then finds the handles already cleared.
 void ReleaseColliderBody(ECS::World& world, ECS::EntityHandle entity)
 {
-    auto* pw = PhysicsECS::PhysicsWorldService::TryGet();
-    auto* body = world.GetComponentForWrite<Components::PhysicsBody>(entity);
-    if (!pw || !body || !body->initialized)
-        return;
-    if (body->body.IsValid())
-        pw->DestroyBody(body->body);
-    if (body->shape.IsValid())
-        pw->DestroyShape(body->shape);
-    for (uint16 i = 0; i < body->childShapeCount; ++i)
-        if (body->childShapes[i].IsValid())
-            pw->DestroyShape(body->childShapes[i]);
-    body->body = {};
-    body->shape = {};
-    for (uint16 i = 0; i < body->childShapeCount; ++i)
-        body->childShapes[i] = {};
-    body->childShapeCount = 0;
-    body->initialized = false;
+    if (auto* body = world.GetComponentForWrite<Components::PhysicsBody>(entity); body && body->initialized)
+        PhysicsECS::ReleasePhysicsBody(*body);
 }
 
 // Points the collider at the terrain's current data and dimensions and clears its
@@ -498,28 +484,10 @@ void TerrainPhysicsSystem::UpdatePlanetColliders(ECS::World& world)
             }
         });
 
-    auto* pw = PhysicsECS::PhysicsWorldService::TryGet();
     for (size_t i = 0; i < orphanEntities.size(); ++i)
     {
         ECS::EntityHandle e = orphanEntities[i];
-        if (pw)
-        {
-            if (auto* body = world.GetComponentForWrite<Components::PhysicsBody>(e);
-                body && body->initialized)
-            {
-                // The OnRemove<PhysicsBody> hook frees the body, but DestroyEntity is
-                // deferred to the next frame's flush — free it here (same window
-                // PhysicsInit mutates bodies in, before the step) and clear the runtime
-                // handles so nothing dereferences the freed body meanwhile.
-                if (body->body.IsValid())
-                    pw->DestroyBody(body->body);
-                if (body->shape.IsValid())
-                    pw->DestroyShape(body->shape);
-                body->body = {};
-                body->shape = {};
-                body->initialized = false;
-            }
-        }
+        ReleaseColliderBody(world, e);
         world.DestroyEntity(e);
         terrainService->ReleasePlanetFacePhysicsHandle(orphanTags[i].PhysicsHandleIndex,
                                                        orphanTags[i].PhysicsHandleGeneration);
@@ -574,18 +542,7 @@ void TerrainPhysicsSystem::UpdatePlanetColliders(ECS::World& world)
     // planet never carries a stray planar body under its six face colliders.
     if (world.HasComponent<Components::HeightFieldColliderShape>(activePlanet))
     {
-        if (pw)
-            if (auto* body = world.GetComponentForWrite<Components::PhysicsBody>(activePlanet);
-                body && body->initialized)
-            {
-                if (body->body.IsValid())
-                    pw->DestroyBody(body->body);
-                if (body->shape.IsValid())
-                    pw->DestroyShape(body->shape);
-                body->body = {};
-                body->shape = {};
-                body->initialized = false;
-            }
+        ReleaseColliderBody(world, activePlanet);
         world.RemoveComponent<Components::HeightFieldColliderShape>(activePlanet);
         world.RemoveComponent<Components::PhysicsBody>(activePlanet);
         world.RemoveComponent<Components::PhysicsCollider>(activePlanet);

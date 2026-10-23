@@ -20,6 +20,7 @@ namespace GameEngine::Engine::Renderer::Pipeline::Names
 // Per-view builtins seeded by the pipeline spine and republishable by nodes.
 namespace View
 {
+inline constexpr const char* PlanarReflectionMask = "View.PlanarReflectionMask";
 inline constexpr const char* Color = "View.Color";
 inline constexpr const char* Depth = "View.Depth";
 inline constexpr const char* Resolve = "View.Resolve";
@@ -41,7 +42,7 @@ inline constexpr const char* MotionVectors = "View.MotionVectors";
 // HZBBuildNode only when SSSR is active for the view.
 inline constexpr const char* SSRHiZ = "View.SSRHiZ";
 // Forward-pass MRT slice: .rg = octahedral VIEW-space normal, .b = perceptual
-// roughness, .a = metallic. Written only under MaterialKeyword::SSSRNormalRoughness.
+// roughness, .a = planar reflection coverage. Written only under MaterialKeyword::SSSRNormalRoughness.
 // A consumer with its own per-view target for the slice (the DDGI glossy
 // resolve's shading-normal history) hands it to ReflectionsProvider instead
 // of resolving this name; the *Written publish below then names that texture.
@@ -74,6 +75,13 @@ inline constexpr const char* DepthResolvedPostOcean = "View.DepthResolvedPostOce
 // RenderScaleUpscale otherwise — writes both at the upscale point (OutputDepth
 // via the depth upsample for the editor's overlay depth test; OutputColor
 // becomes the republished View.Resolve). Absent when scale == 1.
+//
+// The pixel-perfect crossing reuses OutputColor for the same purpose, but the
+// pipeline OWNS that texture there (the caller's targets are the camera's
+// padded reference RT, so it has no display-extent colour to lend) and
+// publishes NO OutputDepth — nothing past that crossing depth-tests at the
+// display extent, and the absence is what keeps RenderScaleUpscale, which
+// requires both, off a pixel-perfect view.
 inline constexpr const char* OutputColor = "View.OutputColor";
 inline constexpr const char* OutputDepth = "View.OutputDepth";
 } // namespace View

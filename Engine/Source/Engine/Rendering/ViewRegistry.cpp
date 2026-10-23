@@ -359,6 +359,18 @@ void ViewRegistry::SetViewCamera(ViewId id, CameraId cameraId)
     }
 }
 
+void ViewRegistry::SetViewBackgroundOnly(ViewId id, bool enabled)
+{
+    for (auto& view : m_Views)
+    {
+        if (view.id == id)
+        {
+            view.backgroundOnly = enabled;
+            return;
+        }
+    }
+}
+
 void ViewRegistry::SetViewRenderLayerMask(ViewId id, RenderLayerMask layers)
 {
     for (auto& view : m_Views)

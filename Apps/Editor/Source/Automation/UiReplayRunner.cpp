@@ -16,10 +16,10 @@
 #include "UI/Controls/ListView.h"
 #include "UI/Controls/GridView.h"
 #include "UI/Controls/TreeView.h"
-#include "UI/Controls/Mount.h"
 #include "UI/Controls/Label.h"
 #include "UI/Interaction/DragDropManager.h"
 #include "UI/Registration/ElementRegistration.h"
+#include "Types/Fnv1a.h"
 
 #include <nlohmann/json.hpp>
 
@@ -30,18 +30,6 @@
 namespace GameEngine
 {
 using nlohmann::json;
-
-static std::uint64_t HashFnv1a64(const std::uint8_t* data, size_t size)
-{
-    // 64-bit FNV-1a
-    std::uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < size; ++i)
-    {
-        h ^= (std::uint64_t)data[i];
-        h *= 1099511628211ull;
-    }
-    return h;
-}
 
 static std::string ToHex64(std::uint64_t v)
 {
@@ -709,16 +697,7 @@ static T* FindFirstDescendantOfType(UIElement* root)
             continue;
         if (auto* t = dynamic_cast<T*>(el))
             return t;
-        for (const auto& ch : el->GetChildren())
-        {
-            if (ch)
-                stack.push_back(ch.get());
-        }
-        if (auto* m = dynamic_cast<Mount*>(el))
-        {
-            if (UIElement* tgt = m->GetTarget())
-                stack.push_back(tgt);
-        }
+        el->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
     }
     return nullptr;
 }
@@ -843,16 +822,7 @@ bool UiReplayRunner::ResolveTarget(UIManager& ui, const json& targetSpec, float&
                     best = cur;
                 }
             }
-            for (const auto& ch : cur->GetChildren())
-            {
-                if (ch)
-                    stack.push_back(ch.get());
-            }
-            if (auto* m = dynamic_cast<Mount*>(cur))
-            {
-                if (UIElement* tgt = m->GetTarget())
-                    stack.push_back(tgt);
-            }
+            cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
         }
 
         if (!best || !pointOn(best))
@@ -926,17 +896,7 @@ bool UiReplayRunner::ResolveTarget(UIManager& ui, const json& targetSpec, float&
                 }
             }
 
-            const auto& kids = cur->GetChildren();
-            for (const auto& ch : kids)
-            {
-                if (ch)
-                    stack.push_back(ch.get());
-            }
-            if (auto* m = dynamic_cast<Mount*>(cur))
-            {
-                if (UIElement* tgt = m->GetTarget())
-                    stack.push_back(tgt);
-            }
+            cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
         }
 
         if (!found || !pointOn(found))
@@ -1013,16 +973,7 @@ bool UiReplayRunner::ResolveTarget(UIManager& ui, const json& targetSpec, float&
             }
             if (cur)
             {
-                for (const auto& ch : cur->GetChildren())
-                {
-                    if (ch)
-                        stack.push_back(ch.get());
-                }
-                if (auto* m = dynamic_cast<Mount*>(cur))
-                {
-                    if (UIElement* tgt = m->GetTarget())
-                        stack.push_back(tgt);
-                }
+                cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
             }
         }
 
@@ -1254,16 +1205,7 @@ void UiReplayRunner::TickBeforeUiUpdate(UIManager& ui)
                     }
                     if (cur)
                     {
-                        for (const auto& ch : cur->GetChildren())
-                        {
-                            if (ch)
-                                stack.push_back(ch.get());
-                        }
-                        if (auto* m = dynamic_cast<Mount*>(cur))
-                        {
-                            if (UIElement* tgt = m->GetTarget())
-                                stack.push_back(tgt);
-                        }
+                        cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
                     }
                 }
                 return count;
@@ -1338,16 +1280,7 @@ void UiReplayRunner::TickBeforeUiUpdate(UIManager& ui)
                         if (requiredClass.empty() || cur->HasClass(requiredClass))
                             ++count;
                     }
-                    for (const auto& ch : cur->GetChildren())
-                    {
-                        if (ch)
-                            stack.push_back(ch.get());
-                    }
-                    if (auto* m = dynamic_cast<Mount*>(cur))
-                    {
-                        if (UIElement* tgt = m->GetTarget())
-                            stack.push_back(tgt);
-                    }
+                    cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
                 }
                 return count;
             };
@@ -1981,16 +1914,7 @@ void UiReplayRunner::TickAfterUiUpdate(UIManager& ui, double deltaSeconds)
                     {
                         ids.push_back(id);
                     }
-                    for (const auto& ch : el->GetChildren())
-                    {
-                        if (ch)
-                            stack.push_back(ch.get());
-                    }
-                    if (auto* m = dynamic_cast<Mount*>(el))
-                    {
-                        if (UIElement* tgt = m->GetTarget())
-                            stack.push_back(tgt);
-                    }
+                    el->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
                 }
             }
             j["probe"]["idsContaining"] = {{"needle", needle}, {"ids", ids}};
@@ -2262,16 +2186,7 @@ void UiReplayRunner::TickAfterUiUpdate(UIManager& ui, double deltaSeconds)
                         break;
                     }
 
-                    for (const auto& ch : el->GetChildren())
-                    {
-                        if (ch)
-                            stack.push_back(ch.get());
-                    }
-                    if (auto* m = dynamic_cast<Mount*>(el))
-                    {
-                        if (UIElement* tgt = m->GetTarget())
-                            stack.push_back(tgt);
-                    }
+                    el->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
                 }
             }
         }
@@ -2347,16 +2262,7 @@ void UiReplayRunner::TickAfterUiUpdate(UIManager& ui, double deltaSeconds)
                 }
                 if (cur)
                 {
-                    for (const auto& ch : cur->GetChildren())
-                    {
-                        if (ch)
-                            stack.push_back(ch.get());
-                    }
-                    if (auto* m = dynamic_cast<Mount*>(cur))
-                    {
-                        if (UIElement* tgt = m->GetTarget())
-                            stack.push_back(tgt);
-                    }
+                    cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
                 }
             }
             return count;
@@ -2422,16 +2328,7 @@ void UiReplayRunner::TickAfterUiUpdate(UIManager& ui, double deltaSeconds)
                 }
                 if (cur)
                 {
-                    for (const auto& ch : cur->GetChildren())
-                    {
-                        if (ch)
-                            stack.push_back(ch.get());
-                    }
-                    if (auto* m = dynamic_cast<Mount*>(cur))
-                    {
-                        if (UIElement* tgt = m->GetTarget())
-                            stack.push_back(tgt);
-                    }
+                    cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
                 }
             }
             return count;
@@ -2790,7 +2687,7 @@ void UiReplayRunner::ConsumePixelRgb(const std::uint8_t* data, std::uint32_t wid
     }
     const double meanByte = rgbScratch.empty() ? 0.0 : (double)sumBytes / (double)rgbScratch.size();
 
-    const std::uint64_t h = HashFnv1a64(rgbScratch.data(), rgbScratch.size());
+    const std::uint64_t h = Hashing::Fnv1a64(rgbScratch.data(), rgbScratch.size());
 
     bool failingPixelHash = false;
     std::string failReason;

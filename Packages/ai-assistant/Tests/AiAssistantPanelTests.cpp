@@ -14,6 +14,7 @@
 #include "AgentSessionState.h"
 #include "AiAssistantSettings.h"
 #include "AssistantAttachment.h"
+#include "PromptInputLayout.h"
 #include "AssistantMode.h"
 #include "Conversation.h"
 #include "AgentStatusMessages.h"
@@ -37,6 +38,9 @@
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Platform/Shell.h"
 #include "UI/Controls/Button.h"
+#include "Input/KeyCodes.h"
+#include "Input/InputSystem.h"
+#include "FixedScalePlatform.h"
 #include "UI/Controls/Dropdown.h"
 #include "UI/Controls/Label.h"
 #include "UI/Controls/Slider.h"
@@ -385,7 +389,7 @@ TEST(AiAssistantPanelTests, ACompletionBehind200DeltasIsDeliveredWithEveryDelta)
     controller.SetProvider("fake");
 
     // 200 deltas arrive while the UI does not drain; one drain shows all of them.
-    controller.Send("hello", {}, "", "");
+    controller.Send("hello", {}, {}, "", "");
     controller.Update();
     ASSERT_TRUE(WaitFor([&] { return provider->Holding.load(); }));
     EXPECT_TRUE(controller.Update());
@@ -426,8 +430,8 @@ TEST(AiAssistantPanelTests, AQueuedSecondTurnRunsAfterTheFirstAndReceivesItAsHis
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake");
 
-    controller.Send("first", {}, "", "");
-    controller.Send("second", {}, "", "");
+    controller.Send("first", {}, {}, "", "");
+    controller.Send("second", {}, {}, "", "");
     ASSERT_TRUE(PumpUntil(controller, [&] { return provider->Started.load(); }));
     EXPECT_EQ(ReplyStatus(controller, 0), MessageStatus::InProgress);
     EXPECT_EQ(ReplyStatus(controller, 1), MessageStatus::Queued);
@@ -454,8 +458,8 @@ TEST(AiAssistantPanelTests, AnEmptyCompletedReplyIsLeftOutOfTheHistoryWithItsQue
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake");
 
-    controller.Send("first", {}, "", "");
-    controller.Send("second", {}, "", "");
+    controller.Send("first", {}, {}, "", "");
+    controller.Send("second", {}, {}, "", "");
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     ASSERT_EQ(ReplyStatus(controller, 0), MessageStatus::Complete);
 
@@ -473,8 +477,8 @@ TEST(AiAssistantPanelTests, AProviderThatThrowsFailsItsTurnAndTheNextTurnRuns)
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake");
 
-    controller.Send("first", {}, "", "");
-    controller.Send("second", {}, "", "");
+    controller.Send("first", {}, {}, "", "");
+    controller.Send("second", {}, {}, "", "");
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
 
     const auto messages = controller.GetConversation().Messages();
@@ -496,7 +500,7 @@ TEST(AiAssistantPanelTests, DestroyingTheControllerWithATurnRunningDoesNotWaitFo
     auto controller = std::make_unique<AgentConversationController>(
         [provider](std::string_view) -> std::shared_ptr<IAgentProvider> { return provider; });
     controller->SetProvider("slow");
-    ASSERT_TRUE(controller->Send("hi", {}, "", ""));
+    ASSERT_TRUE(controller->Send("hi", {}, {}, "", ""));
     ASSERT_TRUE(PumpUntil(*controller, [&] { return provider->Holding.load(); }));
     std::thread release([&provider] {
         std::this_thread::sleep_for(500ms);
@@ -519,8 +523,8 @@ TEST(AiAssistantPanelTests, StopEndsTheRunningTurnAndClearsTheQueue)
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake");
 
-    controller.Send("first", {}, "", "");
-    controller.Send("second", {}, "", "");
+    controller.Send("first", {}, {}, "", "");
+    controller.Send("second", {}, {}, "", "");
     ASSERT_TRUE(PumpUntil(controller, [&] { return provider->Started.load(); }));
 
     controller.Stop();
@@ -537,8 +541,8 @@ TEST(AiAssistantPanelTests, TurnsRunOnTheControllersOwnThreadNeverOnAJobSystemWo
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake");
 
-    controller.Send("first", {}, "", "");
-    controller.Send("second", {}, "", "");
+    controller.Send("first", {}, {}, "", "");
+    controller.Send("second", {}, {}, "", "");
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
 
     const std::vector<ObservedTurn> turns = provider->Observed();
@@ -559,8 +563,8 @@ TEST(AiAssistantPanelTests, AProviderSwitchMidConversationStartsANewConversation
     AgentConversationController controller = MakeController({first, second});
     controller.SetProvider("fake");
 
-    controller.Send("question", {}, "", "");
-    controller.Send("queued", {}, "", "");
+    controller.Send("question", {}, {}, "", "");
+    controller.Send("queued", {}, {}, "", "");
     ASSERT_TRUE(PumpUntil(controller, [&] { return first->Started.load(); }));
 
     controller.SetProvider("other");
@@ -569,7 +573,7 @@ TEST(AiAssistantPanelTests, AProviderSwitchMidConversationStartsANewConversation
     EXPECT_TRUE(controller.GetConversation().Messages().empty()) << "the stopped reply lands nowhere";
     EXPECT_EQ(first->Observed().size(), 1u);
 
-    controller.Send("hello", {}, "", "");
+    controller.Send("hello", {}, {}, "", "");
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     ASSERT_EQ(controller.GetConversation().Messages().size(), 2u);
     EXPECT_EQ(controller.GetConversation().Messages()[1].ProviderId, "other");
@@ -580,7 +584,7 @@ TEST(AiAssistantPanelTests, TheRowModelShowsEachStageOfAReply)
 {
     Conversation conversation;
     const Conversation::TurnId turn =
-        conversation.AddTurn("hi", {}, std::string(ClaudeApiProvider::kId), "claude-opus-5-5", "", {});
+        conversation.AddTurn("hi", {}, {}, std::string(ClaudeApiProvider::kId), "claude-opus-5-5", "", {});
 
     const AgentConversationRowModel user = AgentConversationRowModel::From(*conversation.UserMessage(turn), {}, turn, {});
     EXPECT_EQ(user.Header, "You");
@@ -650,7 +654,7 @@ TEST(AiAssistantPanelTests, TheRowModelShowsEachStageOfAReply)
 
     // A queued turn that Stop cleared never ran: it says so in its own words, with
     // no body line, nothing to mark as cut and nothing to copy.
-    const Conversation::TurnId queued = conversation.AddTurn("next", {}, std::string(ClaudeApiProvider::kId), "", "", {});
+    const Conversation::TurnId queued = conversation.AddTurn("next", {}, {}, std::string(ClaudeApiProvider::kId), "", "", {});
     conversation.CancelQueued(queued);
     EXPECT_EQ(conversation.Reply(queued)->Status, MessageStatus::Cancelled);
     const AgentConversationRowModel cleared = AgentConversationRowModel::From(*conversation.Reply(queued), {}, queued, {});
@@ -1565,7 +1569,7 @@ TEST(AiAssistantPanelTests, TheReplyHeaderNamesTheModelThatAnsweredAndTheEffort)
 {
     Conversation conversation;
     const std::string session(ClaudeSessionProvider::kId);
-    const Conversation::TurnId turn = conversation.AddTurn("hi", {}, session, "opus", "xhigh", {});
+    const Conversation::TurnId turn = conversation.AddTurn("hi", {}, {}, session, "opus", "xhigh", {});
     auto header = [&](Conversation::TurnId id)
     { return AgentConversationRowModel::From(*conversation.Reply(id), {}, id, {}).Header; };
     EXPECT_EQ(header(turn), "Claude (local session) · Opus (latest) · Extra high");
@@ -1577,14 +1581,14 @@ TEST(AiAssistantPanelTests, TheReplyHeaderNamesTheModelThatAnsweredAndTheEffort)
     conversation.Finish(turn, result);
     EXPECT_EQ(header(turn), "Claude (local session) · Opus 5.5 · Extra high");
 
-    const Conversation::TurnId dated = conversation.AddTurn("hi", {}, session, "haiku", "low", {});
+    const Conversation::TurnId dated = conversation.AddTurn("hi", {}, {}, session, "haiku", "low", {});
     result.Model = "claude-haiku-4-5-20251001";
     conversation.Finish(dated, result);
     EXPECT_EQ(header(dated), "Claude (local session) · Haiku 4.5 · Low");
 
-    const Conversation::TurnId codexDefault = conversation.AddTurn("hi", {}, "codex-session", "", "", {});
+    const Conversation::TurnId codexDefault = conversation.AddTurn("hi", {}, {}, "codex-session", "", "", {});
     EXPECT_EQ(header(codexDefault), "Codex (local session) · default model");
-    const Conversation::TurnId codex = conversation.AddTurn("hi", {}, "codex-session", "gpt-5-codex", "high", {});
+    const Conversation::TurnId codex = conversation.AddTurn("hi", {}, {}, "codex-session", "gpt-5-codex", "high", {});
     EXPECT_EQ(header(codex), "Codex (local session) · gpt-5-codex") << "another vendor's id as it is, no effort";
 }
 
@@ -1598,14 +1602,14 @@ TEST(AiAssistantPanelTests, ASuccessfulTurnRecordsTheModelThatAnswered)
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake-answering");
 
-    ASSERT_TRUE(controller.Send("hi", {}, "fake-family", "high"));
+    ASSERT_TRUE(controller.Send("hi", {}, {}, "fake-family", "high"));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     EXPECT_EQ(AiAssistantSettings::AnsweredModel("fake-answering", "fake-family"), "claude-fake-2-1");
     EXPECT_EQ(AiAssistantSettings::ModelLabel("fake-answering", "fake-family"), "Fake 2.1");
 
     provider->AnsweredModel = "claude-fake-3-0";
     provider->FinalOutcome = TurnOutcome::Failed;
-    ASSERT_TRUE(controller.Send("hi", {}, "failing-family", "high"));
+    ASSERT_TRUE(controller.Send("hi", {}, {}, "failing-family", "high"));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     EXPECT_EQ(AiAssistantSettings::AnsweredModel("fake-answering", "failing-family"), "")
         << "a failed turn names no version";
@@ -1776,13 +1780,13 @@ TEST(AiAssistantPanelTests, RetryQueuesTheFailedPromptOnceAsANewTurn)
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake");
 
-    ASSERT_TRUE(controller.Send("first", {}, "model-a", "high"));
+    ASSERT_TRUE(controller.Send("first", {}, {}, "model-a", "high"));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     ASSERT_EQ(ReplyStatus(controller, 0), MessageStatus::Failed);
     EXPECT_FALSE(AgentConversationRowModel::From(controller.GetConversation().Messages()[1], {}, 0, {}).Retried);
 
     provider->Hold = true;
-    ASSERT_TRUE(controller.Send("second", {}, "", ""));
+    ASSERT_TRUE(controller.Send("second", {}, {}, "", ""));
     ASSERT_TRUE(PumpUntil(controller, [&] { return provider->Holding.load(); }));
     controller.Retry(0); // a user message: nothing to retry
     controller.Retry(1);
@@ -1825,7 +1829,7 @@ TEST(AiAssistantPanelTests, ATurnSendsItsMarkupBlocksAndARetrySendsThemAgain)
     controller.SetProvider("fake");
 
     ASSERT_TRUE(controller.Send("Widen @markup:road", SentMarkups{"<markup tags=\"&quot;road&quot;\"></markup>", {}},
-                                "", ""));
+                                {}, "", ""));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     ASSERT_EQ(ReplyStatus(controller, 0), MessageStatus::Failed);
     controller.Retry(1);
@@ -1845,7 +1849,7 @@ TEST(AiAssistantPanelTests, APromptOverTheMessageCapIsRefusedWholeAndNotQueued)
     AgentConversationController controller = MakeController({provider});
     controller.SetProvider("fake");
 
-    EXPECT_FALSE(controller.Send(std::string(Conversation::kMaxMessageBytes + 1, 'a'), {}, "", ""));
+    EXPECT_FALSE(controller.Send(std::string(Conversation::kMaxMessageBytes + 1, 'a'), {}, {}, "", ""));
     EXPECT_TRUE(controller.GetConversation().Messages().empty());
     EXPECT_FALSE(controller.IsBusy());
 
@@ -1853,7 +1857,7 @@ TEST(AiAssistantPanelTests, APromptOverTheMessageCapIsRefusedWholeAndNotQueued)
               "The prompt is 65 KB, over the 64 KB a message can hold: shorten it and send again.")
         << "the size rounds up";
 
-    EXPECT_TRUE(controller.Send(std::string(Conversation::kMaxMessageBytes, 'a'), {}, "", ""));
+    EXPECT_TRUE(controller.Send(std::string(Conversation::kMaxMessageBytes, 'a'), {}, {}, "", ""));
     EXPECT_EQ(controller.GetConversation().Messages()[0].Text.size(), Conversation::kMaxMessageBytes);
 }
 
@@ -1863,7 +1867,7 @@ TEST(AiAssistantPanelTests, AReplyOverTheMessageCapIsStoredTruncatedAndResentAsS
 {
     constexpr size_t kCap = Conversation::kMaxMessageBytes;
     Conversation conversation;
-    const Conversation::TurnId turn = conversation.AddTurn("hi", {}, "fake", "", "", {});
+    const Conversation::TurnId turn = conversation.AddTurn("hi", {}, {}, "fake", "", "", {});
     conversation.Start(turn);
 
     // A two-byte character straddles the cap, so the cut falls before it.
@@ -1889,7 +1893,7 @@ TEST(AiAssistantPanelTests, AReplyOverTheMessageCapIsStoredTruncatedAndResentAsS
     EXPECT_TRUE(row.ShowsReplyActions);
     EXPECT_EQ(CopyReplyFeedback(reply), "Reply copied: its first 64 KB, where it was truncated");
 
-    const Conversation::TurnId next = conversation.AddTurn("more", {}, "fake", "", "", {});
+    const Conversation::TurnId next = conversation.AddTurn("more", {}, {}, "fake", "", "", {});
     const std::vector<ConversationMessage> history = conversation.HistoryBefore(next);
     ASSERT_EQ(history.size(), 2u);
     EXPECT_EQ(history[1].Text, std::string(kCap, 'z')) << "the stored text, with no row marker";
@@ -1915,7 +1919,7 @@ TEST(AiAssistantPanelTests, AContinuedSessionResumesItsIdOnTheFirstTurnAndANewSe
     CliSessionSummary stored;
     stored.Id = local.StoredSession();
     controller.ContinueSession(stored);
-    ASSERT_TRUE(controller.Send("hello", {}, "", ""));
+    ASSERT_TRUE(controller.Send("hello", {}, {}, "", ""));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     const std::string resumed = controller.GetConversation().Messages()[1].Text;
     EXPECT_NE(resumed.find("--resume stored-session "), std::string::npos) << resumed;
@@ -1923,7 +1927,7 @@ TEST(AiAssistantPanelTests, AContinuedSessionResumesItsIdOnTheFirstTurnAndANewSe
 
     controller.NewConversation();
     AgentSessionState::Get().ForgetSessions();
-    ASSERT_TRUE(controller.Send("hello", {}, "", ""));
+    ASSERT_TRUE(controller.Send("hello", {}, {}, "", ""));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     const std::string fresh = controller.GetConversation().Messages()[1].Text;
     EXPECT_NE(fresh.find("args="), std::string::npos) << fresh;
@@ -1942,7 +1946,7 @@ TEST(AiAssistantPanelTests, ANewConversationStartsInTheLastModeChosenAndAResumed
     EXPECT_EQ(controller.Mode(), AssistantMode::Auto);
 
     controller.SetMode(AssistantMode::ReadOnly);
-    ASSERT_TRUE(controller.Send("hello", {}, "", ""));
+    ASSERT_TRUE(controller.Send("hello", {}, {}, "", ""));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     ASSERT_EQ(local.StoredSession(), kFakeCliSession);
 
@@ -1973,7 +1977,7 @@ TEST(AiAssistantPanelTests, AModeChosenBeforeTheSessionIdArrivesIsTheSessionsMod
     AgentConversationController controller = local.MakeController();
     controller.SetProvider(std::string(ClaudeSessionProvider::kId));
     controller.SetMode(AssistantMode::Auto);
-    ASSERT_TRUE(controller.Send("hello", {}, "", ""));
+    ASSERT_TRUE(controller.Send("hello", {}, {}, "", ""));
     ASSERT_TRUE(PumpUntil(controller, [&] { return controller.GetConversation().Messages()[1].Status ==
                                                    MessageStatus::InProgress; }));
     controller.SetMode(AssistantMode::EditFreely);
@@ -2047,7 +2051,7 @@ TEST(AiAssistantPanelTests, ASessionTheCliNoLongerKnowsIsForgottenAndRetryStarts
     EXPECT_EQ(local.StoredSession(), dead.Id) << "a chosen session is stored";
     {
         ScopedEnvironmentVariable mode("FAKE_AGENT_CLI_MODE", "replay");
-        ASSERT_TRUE(controller.Send("hello", {}, "", ""));
+        ASSERT_TRUE(controller.Send("hello", {}, {}, "", ""));
         ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
     }
 
@@ -2079,7 +2083,7 @@ TEST(AiAssistantPanelTests, ALoginRefusalKeepsTheChosenSession)
     CliSessionSummary chosen;
     chosen.Id = "00000000-0000-4000-8000-0000000000aa";
     controller.ContinueSession(chosen);
-    ASSERT_TRUE(controller.Send("hello", {}, "", ""));
+    ASSERT_TRUE(controller.Send("hello", {}, {}, "", ""));
     ASSERT_TRUE(PumpUntil(controller, [&] { return !controller.IsBusy(); }));
 
     const ConversationMessage& failed = controller.GetConversation().Messages()[1];
@@ -2231,4 +2235,120 @@ TEST(AiAssistantPanelTests, SessionFooterCountsSessionsWithoutTheNewAndResumeAct
         EXPECT_EQ(footer->GetText(), "0 sessions");
     }
 }
+} // namespace GameEngine
+
+namespace GameEngine
+{
+TEST(AiAssistantPanelTests, NarrowPromptKeepsTextAboveTheLeftAttachmentAndControls)
+{
+    for (float width : {300.0f, 360.0f, 600.0f, 840.0f, 1200.0f})
+    {
+        const bool stacked = width < 1000.0f;
+        ConversationLayout layout;
+        if (!layout.Device)
+            GTEST_SKIP() << "No device";
+        ASSERT_TRUE(BuildConversation(layout, width, TurnWithALongReason("short")).empty());
+        auto row = std::make_unique<UIElement>();
+        auto* rowRaw = row.get();
+        row->AddClass("prompt-panel-input-row");
+        row->Overrides().Set(Style::Height, StyleLength::Px(140.0f));
+        row->Overrides().Set(Style::FlexGrow, 0.0f);
+        row->Overrides().Set(Style::FlexShrink, 0.0f);
+        auto attach = std::make_unique<Button>();
+        auto* attachRaw = attach.get();
+        attach->SetId("PromptAttachButton");
+        attach->AddClass("prompt-panel-attach-button");
+        attach->Overrides().Set(Style::Width, StyleLength::Px(24.0f));
+        attach->Overrides().Set(Style::Height, StyleLength::Px(24.0f));
+        row->AddChild(std::move(attach));
+        auto field = std::make_unique<UIElement>();
+        auto* fieldRaw = field.get();
+        field->AddClass("prompt-panel-input-field");
+        auto input = std::make_unique<TextArea>();
+        input->AddClass("prompt-panel-input");
+        input->SetValue("A prompt above its controls");
+        field->AddChild(std::move(input));
+        row->AddChild(std::move(field));
+        auto controls = std::make_unique<UIElement>();
+        auto* controlsRaw = controls.get();
+        controls->AddClass("prompt-panel-input-controls");
+        auto action = std::make_unique<Button>();
+        action->Overrides().Set(Style::Width, StyleLength::Px(200.0f));
+        action->Overrides().Set(Style::Height, StyleLength::Px(28.0f));
+        auto* actionRaw = action.get();
+        controls->AddChild(std::move(action));
+        row->AddChild(std::move(controls));
+        layout.List->AddChild(std::move(row));
+        UIElement::SetInEventDispatch(true);
+        ArrangePromptInput(*rowRaw, *controlsRaw, *attachRaw, stacked);
+        UIElement::SetInEventDispatch(false);
+        layout.Ui->Update(0.016f, false);
+        if (stacked)
+        {
+            EXPECT_LE(fieldRaw->GetLayoutY() + fieldRaw->GetLayoutHeight(), controlsRaw->GetLayoutY() + 0.5f) << width;
+            EXPECT_NEAR(attachRaw->GetLayoutY() + 12.0f,
+                        controlsRaw->GetLayoutY() + controlsRaw->GetLayoutHeight() * 0.5f, 1.0f) << width;
+            EXPECT_LE(attachRaw->GetLayoutX() + 24.0f, actionRaw->GetLayoutX()) << width;
+            EXPECT_EQ(attachRaw->GetParent(), controlsRaw);
+        }
+        else
+        {
+            EXPECT_NEAR(attachRaw->GetLayoutY() + 12.0f,
+                        fieldRaw->GetLayoutY() + fieldRaw->GetLayoutHeight() * 0.5f, 1.0f);
+            EXPECT_LE(attachRaw->GetLayoutX() + 24.0f, fieldRaw->GetLayoutX());
+            EXPECT_EQ(attachRaw->GetParent(), rowRaw);
+        }
+        ArrangePromptInput(*rowRaw, *controlsRaw, *attachRaw, !stacked);
+        layout.Ui->Update(0.016f, false);
+        EXPECT_EQ(attachRaw->GetParent(), stacked ? rowRaw : controlsRaw);
+    }
+}
+
+TEST(AiAssistantPanelTests, InputAndReplyFollowTheConversationTextSizeAtHiDpi)
+{
+    for (float scale : {1.0f, 1.25f, 2.0f})
+    {
+        UITesting::FixedScalePlatform platform(scale);
+        ConversationLayout layout;
+        if (!layout.Device)
+            GTEST_SKIP() << "No device";
+        ASSERT_TRUE(BuildConversation(layout, 1200.0f, TurnWithALongReason("short")).empty());
+        layout.Ui->SetPlatform(&platform);
+        auto input = std::make_unique<TextArea>();
+        auto* field = input.get();
+        input->AddClass("prompt-panel-input");
+        input->SetValue("A legible prompt");
+        layout.List->AddChild(std::move(input));
+        layout.List->Overrides().SetCustomNumber("--prompt_text_scale"_sid, 24.0f / 14.0f);
+        layout.List->MarkDirtySubtree(UIElement::StyleDirty | UIElement::LayoutDirty | UIElement::VisualDirty);
+        layout.Ui->Update(0.016f, false);
+        EXPECT_NEAR(field->GetResolvedStyle().Visual.FontSize, 16.0f * 24.0f / 14.0f, 0.01f) << scale;
+        const auto* reply = FindByClass(*layout.Row, "agent-row-reply");
+        ASSERT_NE(reply, nullptr);
+        EXPECT_NEAR(reply->GetResolvedStyle().Visual.FontSize, 24.0f, 0.01f) << scale;
+    }
+}
+
+TEST(AiAssistantPanelTests, ErrorOutputIsReadOnlyButCanBeSelectedAndCopied)
+{
+    UITesting::FixedScalePlatform platform(1.0f);
+    ConversationLayout layout;
+    if (!layout.Device)
+        GTEST_SKIP() << "No device";
+    auto model = TurnWithALongReason("short");
+    model.Failed = true;
+    model.Status = "Claude Code needs an update: run `claude update`.";
+    ASSERT_TRUE(BuildConversation(layout, 600.0f, model).empty());
+    layout.Ui->SetPlatform(&platform);
+    auto* status = dynamic_cast<TextArea*>(layout.Row->FindById(HashStringId("AgentRowStatusText:1")));
+    ASSERT_NE(status, nullptr);
+    EXPECT_TRUE(status->IsReadOnly());
+    EXPECT_TRUE(status->OnKey(Input::kKeyCode_A, Input::kModControl, &platform));
+    EXPECT_TRUE(status->OnKey(Input::kKeyCode_C, Input::kModControl, &platform));
+    EXPECT_EQ(platform.GetClipboardText(), model.Status);
+    status->OnChar('x');
+    status->OnKey(Input::kKeyCode_Backspace, 0, &platform);
+    EXPECT_EQ(status->GetValue(), model.Status);
+}
+
 } // namespace GameEngine

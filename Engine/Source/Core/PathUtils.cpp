@@ -20,6 +20,10 @@
 #endif
 #endif
 
+#if defined(GE_PLATFORM_MOBILE)
+#include <SDL3/SDL.h>
+#endif
+
 namespace GameEngine
 {
 
@@ -33,7 +37,13 @@ std::filesystem::path PathUtils::GetExecutableDirectory()
         return cachedPath;
     }
 
-#ifdef _WIN32
+#if defined(GE_PLATFORM_MOBILE)
+#if defined(__ANDROID__)
+    cachedPath = std::filesystem::path(SDL_GetAndroidInternalStoragePath()) / "game";
+#else
+    cachedPath = SDL_GetBasePath();
+#endif
+#elif defined(_WIN32)
     // Windows implementation
     wchar_t exePath[MAX_PATH];
     DWORD result = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -280,7 +290,12 @@ std::filesystem::path PathUtils::GetUserCacheDirectory()
     namespace fs = std::filesystem;
     std::error_code ec;
 
-#if defined(__EMSCRIPTEN__)
+#if defined(GE_PLATFORM_MOBILE)
+    char* path = SDL_GetPrefPath("OpenEngine", "Player");
+    fs::path result = path ? path : "";
+    SDL_free(path);
+    return result;
+#elif defined(__EMSCRIPTEN__)
     return WebPersistentDir(Platform::Web::kUserCacheDir);
 #elif defined(_WIN32)
     // Prefer LocalAppData for caches (non-roaming). Fall back to AppData if needed.
@@ -307,7 +322,12 @@ std::filesystem::path PathUtils::GetUserDataDirectory()
     namespace fs = std::filesystem;
     std::error_code ec;
 
-#if defined(__EMSCRIPTEN__)
+#if defined(GE_PLATFORM_MOBILE)
+    char* path = SDL_GetPrefPath("OpenEngine", "Player");
+    fs::path result = path ? path : "";
+    SDL_free(path);
+    return result;
+#elif defined(__EMSCRIPTEN__)
     return WebPersistentDir(Platform::Web::kUserDataDir);
 #elif defined(_WIN32)
     // Prefer roaming AppData for user data/settings. Fall back to LocalAppData.

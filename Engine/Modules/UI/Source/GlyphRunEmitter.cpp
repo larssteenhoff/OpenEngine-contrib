@@ -29,6 +29,12 @@ constexpr float kTextShadowReachBlurs = 1.5f;
 // The one-pixel coverage ramp an outline edge and a shadow edge add past their shape.
 constexpr float kTextEffectEdgeRampPx = 1.0f;
 
+// Glyph pen positions per device pixel along x. Chrome on macOS places each
+// glyph at its pen position rounded to the nearest quarter device pixel
+// (measured: a stem swept in 1/16 px steps changes at 2/16, 6/16, 10/16 and
+// 14/16), so the rasteriser sees four outline phases per pixel.
+constexpr float kGlyphPenPhasesPerPx = 4.0f;
+
 float ScaleEffectLength(float logicalPx, float scale)
 {
     const float devicePx = logicalPx * scale;
@@ -86,6 +92,19 @@ float SnapRunOriginY(float originY, float baselineY)
 
 namespace
 {
+// The quad x of a Slug glyph whose pen position, the quad x less its
+// undilated left em bound, is rounded to the nearest kGlyphPenPhasesPerPx
+// step. The move is rigid, so the glyph's outline is untouched; colour glyphs
+// keep their position, their quad carrying atlas UVs rather than em bounds.
+float QuantizeGlyphPenX(const FontAtlas::GlyphPlacement& gp, float quadX)
+{
+    if (gp.isColor || !(gp.u1 > gp.u0))
+        return quadX;
+    const float pixelsPerEm = gp.width / (gp.u1 - gp.u0);
+    const float penX = quadX - gp.u0 * pixelsPerEm;
+    return quadX + (std::floor(penX * kGlyphPenPhasesPerPx + 0.5f) / kGlyphPenPhasesPerPx - penX);
+}
+
 // The fill primitive of one placed glyph, carrying the run's clip and opacity.
 // False for a color glyph whose atlas page fails to register.
 bool MakeRunGlyph(const FontAtlas::GlyphPlacement& gp, float x, float y,
@@ -165,7 +184,7 @@ void EmitGlyphRun(std::span<const FontAtlas::GlyphPlacement> glyphs,
             if (gp.isColor && !effects.HasVisibleShadow())
                 continue;
             UIPrimitive prim{};
-            if (MakeRunGlyph(gp, originX + gp.x, snappedY + gp.y, target, slugPages, prim))
+            if (MakeRunGlyph(gp, QuantizeGlyphPenX(gp, originX + gp.x), snappedY + gp.y, target, slugPages, prim))
                 target.Primitives->push_back(MakeShadowAndGlowInstance(prim, effects));
         }
     }
@@ -174,7 +193,7 @@ void EmitGlyphRun(std::span<const FontAtlas::GlyphPlacement> glyphs,
         for (const auto& gp : glyphs)
         {
             UIPrimitive prim{};
-            if (!gp.isColor && MakeRunGlyph(gp, originX + gp.x, snappedY + gp.y, target, slugPages, prim))
+            if (!gp.isColor && MakeRunGlyph(gp, QuantizeGlyphPenX(gp, originX + gp.x), snappedY + gp.y, target, slugPages, prim))
                 target.Primitives->push_back(MakeOutlineInstance(prim, effects));
         }
     }
@@ -182,7 +201,7 @@ void EmitGlyphRun(std::span<const FontAtlas::GlyphPlacement> glyphs,
     for (const auto& gp : glyphs)
     {
         UIPrimitive prim{};
-        if (MakeRunGlyph(gp, originX + gp.x, snappedY + gp.y, target, slugPages, prim))
+        if (MakeRunGlyph(gp, QuantizeGlyphPenX(gp, originX + gp.x), snappedY + gp.y, target, slugPages, prim))
             target.Primitives->push_back(prim);
     }
 }

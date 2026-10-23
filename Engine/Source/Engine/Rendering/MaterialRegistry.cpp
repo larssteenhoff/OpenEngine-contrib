@@ -102,10 +102,10 @@ void MaterialRegistry::SeedTextureSlotDefaults(uint32_t whiteIdx, uint32_t flatN
 
 void MaterialRegistry::Shutdown()
 {
-    for (auto& [guid, mat] : m_Materials)
+    for (auto& [guid, registration] : m_Materials)
     {
-        if (mat && m_PreUnregisterCallback)
-            m_PreUnregisterCallback(mat.get());
+        if (registration.Object && m_PreUnregisterCallback)
+            m_PreUnregisterCallback(registration.Object.get());
     }
     m_Materials.clear();
     m_Device = nullptr;
@@ -466,7 +466,7 @@ Material* MaterialRegistry::Register(const GUID& guid,
     // shader-source changes are handled by RenderingHotReloadBridge.
     if (auto it = m_Materials.find(guid); it != m_Materials.end())
     {
-        Material* existing = it->second.get();
+        Material* existing = it->second.Object.get();
         if (existing)
         {
             // ApplyDocumentToMaterial's property setters bump the global content
@@ -502,20 +502,26 @@ Material* MaterialRegistry::Register(const GUID& guid,
     ApplyDocumentToMaterial(*mat, doc);
 
     Material* result = mat.get();
-    m_Materials[guid] = std::move(mat);
+    m_Materials[guid] = Registration{std::move(mat), ++m_LastRegistrationGeneration};
     return result;
 }
 
 Material* MaterialRegistry::Find(const GUID& guid)
 {
     auto it = m_Materials.find(guid);
-    return (it != m_Materials.end()) ? it->second.get() : nullptr;
+    return (it != m_Materials.end()) ? it->second.Object.get() : nullptr;
 }
 
 const Material* MaterialRegistry::Find(const GUID& guid) const
 {
     auto it = m_Materials.find(guid);
-    return (it != m_Materials.end()) ? it->second.get() : nullptr;
+    return (it != m_Materials.end()) ? it->second.Object.get() : nullptr;
+}
+
+uint64_t MaterialRegistry::GetRegistrationGeneration(const GUID& guid) const
+{
+    auto it = m_Materials.find(guid);
+    return (it != m_Materials.end()) ? it->second.Generation : 0;
 }
 
 void MaterialRegistry::Unregister(const GUID& guid)
@@ -524,8 +530,8 @@ void MaterialRegistry::Unregister(const GUID& guid)
     if (it == m_Materials.end())
         return;
 
-    if (it->second && m_PreUnregisterCallback)
-        m_PreUnregisterCallback(it->second.get());
+    if (it->second.Object && m_PreUnregisterCallback)
+        m_PreUnregisterCallback(it->second.Object.get());
 
     m_Materials.erase(it);
 }

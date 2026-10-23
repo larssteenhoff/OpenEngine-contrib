@@ -237,7 +237,7 @@ void DepthResolveNode::LoadShaders(IDevice* device)
     if (!m_Sampler.IsValid())
     {
         m_Sampler = device->CreateSampler(
-            SamplerDesc::MaterialLinearClamp("DepthResolve.Sampler"));
+            SamplerDesc::PointClamp("DepthResolve.Sampler"));
     }
 }
 

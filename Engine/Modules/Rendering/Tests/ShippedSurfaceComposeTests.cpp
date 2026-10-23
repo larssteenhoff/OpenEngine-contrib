@@ -13,8 +13,8 @@
 #include "Rendering/ShaderCache/ShaderPackageIO.h"
 #include "StagedTestPaths.h"
 #include "TestUtils.h"
+#include "TestTempDir.h"
 
-#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -30,13 +30,11 @@ namespace
 {
 namespace fs = std::filesystem;
 
-fs::path MakeTempCacheRoot()
+// A scratch directory of this process, removed when the returned object goes out of scope, on the
+// early returns and failed assertions as well.
+TestUtils::ScopedTempDir MakeTempCacheRoot()
 {
-    static std::atomic<uint32_t> counter{0};
-    return fs::temp_directory_path() /
-           ("ge_shipped_surface_" +
-            std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + "_" +
-            std::to_string(counter.fetch_add(1)));
+    return TestUtils::ScopedTempDir{TestUtils::MakeUniqueTempDirectory("ge_shipped_surface")};
 }
 
 std::string ReadWholeFile(const fs::path& path)
@@ -87,13 +85,11 @@ TEST(ShippedSurfaceCompose, UnlitSolidComposesThroughRealPipeline)
 
     MaterialBuildContext ctx{};
     ctx.AdapterShaderDir = GameEngine::Rendering::Tests::GetAdapterShaderDir();
-    ctx.CacheRoot = MakeTempCacheRoot();
+    const TestUtils::ScopedTempDir cacheRoot = MakeTempCacheRoot();
+    ctx.CacheRoot = cacheRoot.Path();
 
     const auto result = BuildMaterialToShaderPackage(doc, materialsDir / "UnlitWhite.material",
                                                      "UnlitWhite", ctx, ShaderSourceKind::SpirV, MaterialKeyword::Instanced);
-
-    std::error_code ec;
-    fs::remove_all(ctx.CacheRoot, ec);
 
     for (const auto& e : result.errors)
     {
@@ -139,10 +135,10 @@ CbtComposeOutcome ComposeCbtTerrainSurface(int forcedBlendMaterials)
         return out;
     }
 
-    const fs::path shaderRoot = MakeTempCacheRoot() / "Shaders";
+    const TestUtils::ScopedTempDir stagingRoot = MakeTempCacheRoot();
+    const fs::path shaderRoot = stagingRoot.Path() / "Shaders";
     if (!StageShaderRoot(cbtShaders, "CBT", shaderRoot, out.errors))
         return out;
-    std::error_code ec;
 
     if (forcedBlendMaterials > 0)
     {
@@ -175,14 +171,12 @@ CbtComposeOutcome ComposeCbtTerrainSurface(int forcedBlendMaterials)
     MaterialBuildContext ctx{};
     ctx.AdapterShaderDir = GameEngine::Rendering::Tests::GetAdapterShaderDir();
     ctx.PackageShaderDirs = {shaderRoot};
-    ctx.CacheRoot = MakeTempCacheRoot();
+    const TestUtils::ScopedTempDir cacheRoot = MakeTempCacheRoot();
+    ctx.CacheRoot = cacheRoot.Path();
 
     const auto result = BuildMaterialToShaderPackage(
         doc, shaderRoot / "CBTTerrain.material", "CBTTerrain", ctx, ShaderSourceKind::SpirV,
         MaterialKeyword::ForwardPlus | MaterialKeyword::Shadows | MaterialKeyword::IBL);
-
-    fs::remove_all(ctx.CacheRoot, ec);
-    fs::remove_all(shaderRoot.parent_path(), ec);
 
     for (const auto& e : result.errors)
     {
@@ -344,7 +338,8 @@ GrassComposeOutcome ComposeTerrainGrassSurface(bool withVertexModifier, const ch
 
     // The surface names itself "TerrainGrass/terrain_grass_surface.glsl", so the module's shader
     // directory mounts under that name — the same shape Apps/Editor stages it at.
-    const fs::path shaderRoot = MakeTempCacheRoot() / "Shaders";
+    const TestUtils::ScopedTempDir stagingRoot = MakeTempCacheRoot();
+    const fs::path shaderRoot = stagingRoot.Path() / "Shaders";
     if (!StageShaderRoot(grassShaders, "TerrainGrass", shaderRoot, out.errors))
         return out;
 
@@ -378,7 +373,8 @@ GrassComposeOutcome ComposeTerrainGrassSurface(bool withVertexModifier, const ch
     MaterialBuildContext ctx{};
     ctx.AdapterShaderDir = GameEngine::Rendering::Tests::GetAdapterShaderDir();
     ctx.PackageShaderDirs = {shaderRoot};
-    ctx.CacheRoot = MakeTempCacheRoot();
+    const TestUtils::ScopedTempDir cacheRoot = MakeTempCacheRoot();
+    ctx.CacheRoot = cacheRoot.Path();
 
     MaterialKeyword keywords = MaterialKeyword::ForwardPlus | MaterialKeyword::Shadows |
                                MaterialKeyword::Instanced | MaterialKeyword::IBL;
@@ -387,10 +383,6 @@ GrassComposeOutcome ComposeTerrainGrassSurface(bool withVertexModifier, const ch
 
     const auto result = BuildMaterialToShaderPackage(
         doc, shaderRoot / "TerrainGrass.material", "TerrainGrass", ctx, ShaderSourceKind::SpirV, keywords);
-
-    std::error_code ec;
-    fs::remove_all(ctx.CacheRoot, ec);
-    fs::remove_all(shaderRoot.parent_path(), ec);
 
     for (const auto& e : result.errors)
     {
@@ -557,14 +549,16 @@ TEST(ShippedSurfaceCompose, TerrainGrassPlacementComputeCompilesThroughRealPipel
         << "placement compute not found under " << grassShaders.string();
 
     std::vector<std::string> errors;
-    const fs::path shaderRoot = MakeTempCacheRoot() / "Shaders";
+    const TestUtils::ScopedTempDir stagingRoot = MakeTempCacheRoot();
+    const fs::path shaderRoot = stagingRoot.Path() / "Shaders";
     ASSERT_TRUE(StageShaderRoot(grassShaders, "TerrainGrass", shaderRoot, errors))
         << (errors.empty() ? std::string("staging failed") : errors.front());
 
     ShaderProgramCompileRequest req{};
     req.debugName = "terrain_grass_place";
     req.baseDirectory = shaderRoot / "TerrainGrass";
-    req.cacheRoot = MakeTempCacheRoot();
+    const TestUtils::ScopedTempDir cacheRoot = MakeTempCacheRoot();
+    req.cacheRoot = cacheRoot.Path();
     req.includeDirs = {shaderRoot, fs::path(CBT_SHADER_SOURCE_DIR), shaderRoot / "TerrainGrass"};
     ShaderStageCompileSpec stage{};
     stage.stage = "cs";
@@ -576,14 +570,77 @@ TEST(ShippedSurfaceCompose, TerrainGrassPlacementComputeCompilesThroughRealPipel
     std::string compileError;
     const bool ok = ShaderCompileService::CompileProgramToCache(req, ShaderSourceKind::SpirV, result, &compileError);
 
-    std::error_code ec;
-    fs::remove_all(req.cacheRoot, ec);
-    fs::remove_all(shaderRoot.parent_path(), ec);
-
     if (!ok && compileError.find("shaderc is not available") != std::string::npos)
         GTEST_SKIP() << "shaderc not built into this target";
     ASSERT_TRUE(ok) << "placement compute failed to compile: " << compileError;
     const auto it = result.stageBytes.find("cs");
     ASSERT_NE(it, result.stageBytes.end()) << "no compute stage in the compiled program";
     EXPECT_FALSE(it->second.empty()) << "the placement compute produced no SPIR-V";
+}
+
+TEST(ShippedSurfaceCompose, LitSpriteComposesWithoutVertexTangents)
+{
+    MaterialDocument doc{};
+    doc.materialName = "Lit Sprite";
+    doc.lightingModel = "StandardPBR";
+    doc.alphaMode = MaterialAlphaMode::Mask;
+    doc.surfaceShader = "Surfaces/lit_sprite.glsl";
+    doc.properties["baseColor"] = std::vector<float>{1, 1, 1, 1};
+    for (const auto keywords : {MaterialKeyword::None, MaterialKeyword::Instanced,
+                               MaterialKeyword::Instanced | MaterialKeyword::ForwardPlus})
+    {
+        MaterialBuildContext ctx{};
+        ctx.AdapterShaderDir = GameEngine::Rendering::Tests::GetAdapterShaderDir();
+        const TestUtils::ScopedTempDir cacheRoot = MakeTempCacheRoot();
+        ctx.CacheRoot = cacheRoot.Path();
+        const auto result = BuildMaterialToShaderPackage(doc,
+            TestPaths::StagedEngineAssetsDir() / "Materials" / "LitSprite.material",
+            "LitSprite", ctx, ShaderSourceKind::SpirV, keywords);
+        for (const auto& error : result.errors) ADD_FAILURE() << error;
+        ASSERT_TRUE(result.success);
+        ASSERT_NE(result.package, nullptr);
+        EXPECT_FALSE(result.package->stageBytes.at("fs").empty());
+    }
+}
+
+// Exercise the shipped GLSL expression itself with the shared scalar/vector shim.
+#include "GlslShim.h"
+namespace SpriteNormalHost
+{
+using namespace GameEngine::GlslShim;
+using std::abs;
+#include "../Shaders/Includes/sprite_lighting.glsl"
+}
+
+TEST(SpriteLighting, AtlasAndTransformMirrorsPreservePaintedNormalDirection)
+{
+    using namespace SpriteNormalHost;
+    const vec3 front{0, 0, 1}, dx{2, 0, 0}, dy{0, 3, 0};
+    const vec3 painted{.6f, 0, .8f};
+    const auto plain = GE_SpriteNormalFromDerivatives(front, dx, dy, {1, 0}, {0, 1}, painted);
+    EXPECT_NEAR(plain.x, .6f, 1e-6f);
+    EXPECT_NEAR(plain.z, .8f, 1e-6f);
+    const auto atlasFlip = GE_SpriteNormalFromDerivatives(front, dx, dy, {-1, 0}, {0, 1}, painted);
+    EXPECT_NEAR(atlasFlip.x, -.6f, 1e-6f);
+    const auto objectFlip = GE_SpriteNormalFromDerivatives(front, {-2, 0, 0}, dy, {1, 0}, {0, 1}, painted);
+    EXPECT_NEAR(objectFlip.x, -.6f, 1e-6f);
+    const auto both = GE_SpriteNormalFromDerivatives(front, {-2, 0, 0}, dy, {-1, 0}, {0, 1}, painted);
+    EXPECT_NEAR(both.x, .6f, 1e-6f);
+    const auto rotated = GE_SpriteNormalFromDerivatives(front, {0, 2, 0}, {-3, 0, 0}, {1, 0}, {0, 1}, painted);
+    EXPECT_NEAR(rotated.y, .6f, 1e-6f);
+    const auto greenFlip = GE_SpriteNormalFromDerivatives(front, dx, dy, {1, 0}, {0, -1}, {0, .6f, .8f});
+    EXPECT_NEAR(greenFlip.y, -.6f, 1e-6f);
+}
+
+TEST(SpriteLighting, FlatAndDegenerateFramesRemainFinite)
+{
+    using namespace SpriteNormalHost;
+    for (const vec3 normal : {vec3{0, 0, 1}, vec3{0, 0, -1}})
+    {
+        const auto flat = GE_SpriteNormalFromDerivatives(normal, {2, 0, 0}, {0, 1, 0}, {.25f, 0}, {0, .5f}, {0, 0, 1});
+        EXPECT_FLOAT_EQ(flat.z, normal.z);
+        const auto degenerate = GE_SpriteNormalFromDerivatives(normal, {0, 0, 0}, {0, 0, 0}, {0, 0}, {0, 0}, {.6f, 0, .8f});
+        EXPECT_FLOAT_EQ(degenerate.z, normal.z);
+        EXPECT_TRUE(std::isfinite(degenerate.x));
+    }
 }

@@ -77,19 +77,15 @@ flat layout(location = 7) in vec4 vCustom0;
 #endif
 
 // Per-instance flags (bit0=castShadows, bit1=receiveShadows). Matches the vertex
-// adapter's location 14 (above the conditional vUV2..vUV7 at 8..13).
-#ifdef GE_LOD_CROSSFADE
-flat layout(location = 14, component = 0) in uint vInstanceFlags;
-// Packed LOD-crossfade code, sharing location 14 with the flags — see the
-// vertex adapter for why it takes a component rather than a slot of its own.
-flat layout(location = 14, component = 1) in uint vLodFadeCode;
+// adapter's location 14 (above the conditional vUV2..vUV7 at 8..13); under
+// GE_LOD_CROSSFADE its high byte is the packed fade code (see the vertex adapter).
+flat layout(location = 14) in uint vInstanceFlags;
 
+#ifdef GE_LOD_CROSSFADE
 // GE_LodCrossfadeKeep lives here: the depth prepass and the colour pass compile
 // the SAME definition against the same record's code, which is what makes
 // early-Z admit exactly the fragments the colour pass keeps.
 #include "../Includes/lod_crossfade.glsl"
-#else
-flat layout(location = 14) in uint vInstanceFlags;
 #endif
 
 // Render-origin-relative world position (Earth-scale precision). The shadow
@@ -284,13 +280,15 @@ layout(set = 0, binding = 6) uniform LightUBO {
     vec4 uLightDirWorld;    // xyz=direction, w=intensity (primary)
     vec4 uLightColorWorld;  // xyz=color, w=castsShadows (1.0 if true) (primary)
     vec4 uAmbient;          // xyz=color, w=intensity
-    vec4 uTimeParams;       // x=elapsed time (seconds), yzw reserved
+    vec4 uTimeParams;       // xy=shader/scroll time, zw=deformation endpoint times
     vec4 uSecondaryCount;   // x=valid secondary directional count (as float)
     vec4 uSecondaryDirs[3];   // xyz=light->surface direction
     vec4 uSecondaryColors[3]; // rgb=color*intensity (premultiplied)
+#include "../Includes/weather_wind_fields.glsl"
 } Light;
 
 #include "../Includes/view_params.glsl"
+#include "../Includes/depth_pixelation_coverage.glsl"
 
 // Every shape that shades colour reads the view's exposure state: its output is scene colour,
 // stored at the frame's pre-exposure P (GE_PreExposure). Shapes that shade no colour (depth only,
@@ -597,6 +595,14 @@ void main()
     vec3 parallaxPositionFootprintX = dFdx(parallaxPositionAtCentre);
     vec3 parallaxPositionFootprintY = dFdy(parallaxPositionAtCentre);
 #endif
+    // Depth-pixelation band coverage. A discard here would put a kill in every colour variant, costing
+    // opaque draws their early-Z and leaving later derivatives undefined, so it compiles only under its
+    // own keyword, which no pipeline sets until the band views select a variant of their own.
+#if defined(GE_DEPTH_PIXELATION_BAND) && !defined(GE_DEPTH_ONLY_FRAGMENT) && !defined(GE_GLASS_SHADOW_COLOR)
+    if (!GE_DepthPixelationKeep((ge_view * vec4(vPosWS, 1.0)).xyz, ge_pixelationBand))
+        discard;
+#endif
+
 #if defined(GE_DEPTH_ONLY_FRAGMENT) && defined(GE_LOD_CROSSFADE) && !defined(ALPHA_TEST)     && !defined(GE_PARALLAX_WRITES_DEPTH) \
     && !defined(GE_SURFACE_ALPHA_TO_COVERAGE)
     // Crossfade-only depth fragment (the prepass draw of a fading tail on an
@@ -607,7 +613,7 @@ void main()
     // it is paid only by tail records. A tail that writes the relief's depth
     // takes the full path: its depth comes from the surface, and the shared
     // coverage block below runs the same dither.
-    if (!GE_LodCrossfadeKeep(vLodFadeCode, gl_FragCoord.xy))
+    if (!GE_LodCrossfadeKeep(vInstanceFlags, gl_FragCoord.xy))
         discard;
     return;
 #endif
@@ -616,7 +622,7 @@ void main()
     // below this point can change it: no material fetch, no surface evaluation,
     // no varying use beyond the fade code and the previous endpoint.
   #ifdef GE_LOD_CROSSFADE
-    if (!GE_LodCrossfadeKeep(vLodFadeCode, gl_FragCoord.xy))
+    if (!GE_LodCrossfadeKeep(vInstanceFlags, gl_FragCoord.xy))
         discard;
   #endif
     oMotion = ge_DeformationMotionPayload();
@@ -627,7 +633,7 @@ void main()
     // Safe value for every adapter early-out below (glass transmittance, alpha
     // discard, debug); regular opaque shading overwrites it once EvaluateSurface
     // has finalized the normal. .rg = oct(+Z view normal) = (0.5,0.5);
-    // .b = roughness 1 (SSR classify skips it); .a = metallic 0.
+    // .b = roughness 1 (SSR classify skips it); .a = planar coverage 0.
     oNormalRoughness = vec4(0.5, 0.5, 1.0, 0.0);
     oSpecularWeight = vec4(0.0);
     oSpecularRadiance = vec4(0.0);
@@ -827,7 +833,7 @@ void main()
     // half and neither ever writes where the other does. Reached only on the
     // masked path — an opaque crossfade tail took the early-out at the top of
     // main() and never evaluated the surface.
-    if (!GE_LodCrossfadeKeep(vLodFadeCode, gl_FragCoord.xy))
+    if (!GE_LodCrossfadeKeep(vInstanceFlags, gl_FragCoord.xy))
         discard;
   #endif
   #ifdef GE_MOTION_VECTORS
@@ -880,10 +886,10 @@ void main()
     // exists to suppress. Normals are stored in VIEW space so the stochastic
     // intersection and denoise taps avoid a matrix multiply per sample.
     vec3 sssrNormalVS = normalize(mat3(ge_view) * so.normalWS);
-    // .rg = octahedral view normal, .b = roughness, .a = metallic. SSR reads the
-    // normal and the roughness; the DDGI glossy resolve reads the normal.
+    // .rg = octahedral view normal, .b = roughness, .a = planar coverage.
+    // SSR gets the full material response from its separate specular outputs.
     oNormalRoughness = vec4(GE_OctEncode(sssrNormalVS), clamp(so.roughness, 0.0, 1.0),
-                            clamp(so.metallic, 0.0, 1.0));
+                            clamp(so.planarReflectionMask, 0.0, 1.0));
 #endif
 
     // Per-instance receiveShadows (instance flags bit 1): when clear, the global
@@ -894,6 +900,10 @@ void main()
     // without the header has no shadow sampler to read the mask either.
 #ifdef GE_RECEIVE_SHADOWS_DECLARED
     ge_ReceiveShadows = ((vInstanceFlags & 2u) != 0u) ? 1.0 : 0.0;
+#endif
+
+#ifdef GE_USER_CUSTOM_LIGHTING
+    ge_SurfaceReceivesShadows = (vInstanceFlags & 2u) != 0u;
 #endif
 
     // --- Evaluate lighting ---
@@ -931,6 +941,8 @@ void main()
     // The surface's own relief shadows the primary light as its cascade shadow does.
     shadowFactor *= so.primaryLightOcclusion;
     #endif
+    shadowFactor = GE_SurfaceDirectionalVisibility(shadowFactor,
+        (Cam.uV * vec4(vPosWS, 1.0)).z, L);
     // Subsurface transmission added outside shadowFactor/shadowTint so back-lit thin objects glow through.
     finalColor = GE_EvaluateSurfaceLight(so, V, L)
                  * Light.uLightColorWorld.rgb * Light.uLightDirWorld.w * shadowFactor * shadowTint
@@ -1036,7 +1048,12 @@ void main()
     oSpecularRadiance = vec4(ge_sssrIncidentRadiance * GE_PreExposure(), reflectionOct.y);
     #endif
   #else
+    #ifdef GE_USER_CUSTOM_LIGHTING
+    finalColor += so.baseColor * so.ao * ambientMultiplier *
+        GE_SurfaceDiffuseIrradiance(vec3(0.0), Light.uAmbient.xyz * Light.uAmbient.w);
+    #else
     finalColor += so.baseColor * so.ao * Light.uAmbient.xyz * Light.uAmbient.w * ambientMultiplier;
+    #endif
   #endif
 #endif
 
@@ -1070,7 +1087,7 @@ void main()
     // the order does not matter. The depth-only form of this shader runs the
     // identical test, so this discard never removes a fragment whose depth the
     // prepass wrote.
-    if (!GE_LodCrossfadeKeep(vLodFadeCode, gl_FragCoord.xy))
+    if (!GE_LodCrossfadeKeep(vInstanceFlags, gl_FragCoord.xy))
         discard;
 #endif
 

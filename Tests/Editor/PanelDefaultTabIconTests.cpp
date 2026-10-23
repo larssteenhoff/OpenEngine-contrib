@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -118,12 +119,14 @@ struct PanelTypeRows
     std::vector<std::string> unknownFactories;         // rows naming an unlisted factory
 };
 
-// Rows are `{"TypeKey", &MakePanel<Class>}` or `{"TypeKey", &NamedFactory}`.
+// Rows are `{.Key = "TypeKey", .Factory = &MakePanel<Class>, ...}` or
+// `{.Key = "TypeKey", .Factory = &NamedFactory, ...}`.
 PanelTypeRows ParsePanelTypeRows()
 {
     PanelTypeRows out;
     const std::string body = PanelTypeTableBody();
-    const std::string rowStart = "{\"";
+    const std::string rowStart = "{.Key = \"";
+    const std::string factoryStart = ".Factory = &";
     size_t pos = 0;
     while ((pos = body.find(rowStart, pos)) != std::string::npos)
     {
@@ -133,11 +136,13 @@ PanelTypeRows ParsePanelTypeRows()
             break;
         const std::string key = body.substr(pos, keyEnd - pos);
 
-        const size_t amp = body.find('&', keyEnd);
+        const size_t factoryPos = body.find(factoryStart, keyEnd);
         const size_t rowEnd = body.find('}', keyEnd);
-        if (amp == std::string::npos || rowEnd == std::string::npos || amp > rowEnd)
+        if (factoryPos == std::string::npos || rowEnd == std::string::npos || factoryPos > rowEnd)
             break;
-        const std::string factory = body.substr(amp + 1, rowEnd - amp - 1);
+        const size_t amp = factoryPos + factoryStart.size() - 1;
+        const size_t factoryEnd = std::min(body.find(',', amp), rowEnd);
+        const std::string factory = body.substr(amp + 1, factoryEnd - amp - 1);
 
         const std::string templatePrefix = "MakePanel<";
         if (factory.compare(0, templatePrefix.size(), templatePrefix) == 0)

@@ -36,6 +36,7 @@
 #include "Core/Application.h" // PathUtils::GetInstallAssetsRoot
 #include "Core/CpuProfiler.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Types/Types.h" // HashStringId
 
 #include <algorithm> // std::min/max (sculpt region accumulation, water margin)
@@ -68,11 +69,7 @@ constexpr bool kNearBiasDefaultEnabled = true;
 
 bool NearBiasEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_NEAR_BIAS"))
-            return std::atoi(v) != 0;
-        return kNearBiasDefaultEnabled;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_NEAR_BIAS", kNearBiasDefaultEnabled);
     return enabled;
 }
 
@@ -84,11 +81,7 @@ constexpr bool kDemandTuningDefaultEnabled = true;
 
 bool DemandTuningEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_DEMAND_TUNING"))
-            return std::atoi(v) != 0;
-        return kDemandTuningDefaultEnabled;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_DEMAND_TUNING", kDemandTuningDefaultEnabled);
     return enabled;
 }
 
@@ -103,11 +96,7 @@ constexpr bool kPriorityDefaultEnabled = true;
 
 bool PriorityEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_PRIORITY"))
-            return std::atoi(v) != 0;
-        return kPriorityDefaultEnabled;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_PRIORITY", kPriorityDefaultEnabled);
     return enabled;
 }
 
@@ -149,11 +138,7 @@ constexpr float kOpaqueWaterMarginM = 2.0f;
 
 bool WaterPlaneEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_WATER_PLANE"))
-            return std::atoi(v) != 0;
-        return kWaterPlaneDefaultEnabled;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_WATER_PLANE", kWaterPlaneDefaultEnabled);
     return enabled;
 }
 
@@ -259,7 +244,7 @@ bool CBTRenderFeature::EnsureInitialized(IDevice& device, RenderServices& rs)
     // draw consumes and is the one per-frame pool-linear cost the S3 indirect conversion cannot
     // fold into the live compact stream (its zombie check must scan the free slots). Tests keep it.
     // GE_CBT_VALIDATE=1 re-arms it; CBTRenderNode reads the Validation counters back per frame.
-    m_Instance.SetValidateEachUpdate(std::getenv("GE_CBT_VALIDATE") != nullptr);
+    m_Instance.SetValidateEachUpdate(Platform::EnvironmentSwitchEnabled("GE_CBT_VALIDATE", false));
     if (!m_Instance.InitializeRoots(m_DomainConfig.DomainMode))
     {
         Logger::Log::Error("CBTRenderFeature: CBTInstance root init failed");
@@ -738,7 +723,7 @@ bool CBTRenderFeature::BuildDrawCommand(RenderServices& rs, ViewId /*viewId*/,
     // path — the 4dec2485c C3 concern), or whether all handles stay valid (=> the fault
     // is downstream in the descriptor-buffer write / the offset indirect read). The
     // record CONTENTS are proven well-formed offline by VisibleRecordDrawInputWellFormed.
-    static const bool kCbtDescDebug = std::getenv("GE_CBT_DESC_DEBUG") != nullptr;
+    static const bool kCbtDescDebug = Platform::EnvironmentSwitchEnabled("GE_CBT_DESC_DEBUG", false);
     if (kCbtDescDebug)
     {
         Logger::Log::Info("CBT.DrawBindings basePipe=0x{:x} set2[gIdxVis]=0x{:x} set2[gVertex]=0x{:x} "

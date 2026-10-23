@@ -62,6 +62,8 @@ void WorldRenderNode::DeclareForView(ViewDeclare& d)
     if (!d.ViewColor.IsValid() && !d.ViewDepth.IsValid())
         return;
 
+    d.Services.EmitFrameForwardCommandsForView(d.Frame, d.View.id);
+
     // Build the sorted transparent (Blend) draw set first so the opaque pass's
     // peel sees the active flag and drops those batches (T2). Empty-set early-out
     // costs nothing for views with no transparents.

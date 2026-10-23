@@ -39,14 +39,6 @@ class ScreenSpaceReflectionsNode final : public IRenderPipelineNode
     void Declare(RenderPipelineInstance& instance, const PipelineDeclareContext& ctx) override;
     void DeclareForView(ViewDeclare& d) override;
 
-    // The camera's viewport inside the render target, in target UV. A
-    // letterboxed view rasterizes the world into a sub-rectangle of a
-    // full-size target, and the SSR kernels convert between target UV and the
-    // camera's NDC on every ray, so they are handed this rather than assuming
-    // the viewport fills the target. Degenerate inputs fall back to the whole
-    // target, which is what an inactive letterbox means.
-    static Mathematics::Rect ComputeViewportRect(const ViewLetterbox& letterbox,
-                                                 uint32_t targetWidth, uint32_t targetHeight);
 
   private:
     enum Program : size_t
@@ -87,7 +79,8 @@ class ScreenSpaceReflectionsNode final : public IRenderPipelineNode
                                             const PostProcessSettings& settings,
                                             uint32_t frameIndex,
                                             bool historyValid,
-                                            const Mathematics::Rect& viewportRect) const;
+                                            const Mathematics::Rect& viewportRect,
+                                            bool hasPlanarMask = false) const;
 
     // Non-owning; retained from LoadShaders so the destructor can release the
     // device objects created there.

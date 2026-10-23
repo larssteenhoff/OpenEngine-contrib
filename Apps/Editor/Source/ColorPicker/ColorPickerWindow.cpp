@@ -4,13 +4,11 @@
 #include "ColorPicker/ColorPickerWindowInput.h"
 #include "Panels/ColorPicker.h"
 #include "Editor/Settings/EditorHiDpiPlatformSettings.h"
-#include "Editor/Settings/SettingsStore.h"
 #include "UI/Controls/Button.h"
 #include "UI/UIElement.h"
 #include "UI/UIManager.h"
 #include "UI/Parsers/CSSParser.h"
 #include "UI/Assets/UIStyleAsset.h"
-#include "UI/UIAccentStyleHelper.h"
 #include "UI/UICursorHelper.h"
 #include "Core/WindowInputRouter.h"
 #include "Core/WindowPlatformApi.h"
@@ -289,20 +287,6 @@ std::unique_ptr<EditorApplication::EditorWindowContext> ColorPickerWindow::Creat
         {
             ctx->ui->AddStylesheet(windowSheet);
         }
-    }
-
-    // Apply accent color from preferences using the shared helper
-    {
-        auto prefs = Editor::OpenEditorPreferences();
-        std::string err;
-        prefs.Load(&err);
-        uint32_t accentColor = UI::AccentStyleHelper::kDefaultAccentColor;
-        int64_t stored = static_cast<int64_t>(accentColor);
-        if (prefs.TryGetInt64(UI::AccentStyleHelper::kPrefKeyAccentColor, stored))
-            accentColor = static_cast<uint32_t>(stored);
-
-        if (auto accentSheet = UI::AccentStyleHelper::BuildAccentColorStylesheet(accentColor))
-            ctx->ui->AddStylesheet(accentSheet);
     }
 
     if (auto* cpCtx = ColorPickerEditorIntegration::GetOrCreateContext(ctxRaw))

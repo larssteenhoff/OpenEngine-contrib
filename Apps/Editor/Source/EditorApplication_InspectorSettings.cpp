@@ -6,6 +6,14 @@
 #include "Editor/Entities/DDGIVolumeComponentTraits.h"
 #include "Editor/Settings/InterfaceSettingsPage.h"
 #include "Editor/Settings/AssetPreviewSettings.h"
+#include "Editor/Settings/AnimationSettingsPage.h"
+#include "Editor/Settings/AssetImportSettingsPage.h"
+#include "Editor/Settings/AudioSettingsPage.h"
+#include "Editor/Settings/InputSettingsPage.h"
+#include "Editor/Settings/PerformanceSettingsPage.h"
+#include "Editor/Settings/PhysicsSettingsPage.h"
+#include "Editor/Settings/ScriptSettingsPage.h"
+#include "Editor/Settings/SceneSettingsPage.h"
 #include "Editor/Settings/InfoCardAppearanceSettings.h"
 #include "Editor/Settings/GameUIScaleSettingsPage.h"
 #include "Editor/Settings/SceneViewExposureSettingsPage.h"
@@ -26,36 +34,6 @@
 
 namespace GameEngine
 {
-static void MigrateLegacySharedTreePrefs(Editor::SettingsStore& prefs, std::string* errOut)
-{
-    auto migrate = [&](const char* legacyKey, const char* hKey, const char* aKey, double defaultVal)
-    {
-        double legacyVal = defaultVal;
-        const bool hasLegacy = prefs.TryGetDouble(legacyKey, legacyVal);
-        double hProbe = defaultVal;
-        double aProbe = defaultVal;
-        const bool hasH = prefs.TryGetDouble(hKey, hProbe);
-        const bool hasA = prefs.TryGetDouble(aKey, aProbe);
-        if (!hasH)
-            prefs.SetDouble(hKey, hasLegacy ? legacyVal : defaultVal);
-        if (!hasA)
-            prefs.SetDouble(aKey, hasLegacy ? legacyVal : defaultVal);
-    };
-    migrate("ui.treeIconSize", "ui.hierarchyTreeIconSize", "ui.assetsTreeIconSize", 20.0);
-    migrate("ui.treeRowHeight", "ui.hierarchyTreeRowHeight", "ui.assetsTreeRowHeight", 20.0);
-    migrate("ui.treeChildIndent", "ui.hierarchyTreeChildIndent", "ui.assetsTreeChildIndent", 16.0);
-    if (errOut)
-        prefs.Save(errOut);
-}
-
-void EditorApplication::MigrateLegacySharedTreePreferences()
-{
-    auto prefs = Editor::OpenEditorPreferences();
-    std::string err;
-    prefs.Load(&err);
-    MigrateLegacySharedTreePrefs(prefs, &err);
-}
-
 void EditorApplication::InitializeTreeAndListSettings(SettingsPanel* settingsPanel,
                                                       AssetsPanel* assetsPanel,
                                                       HierarchyPanel* hierarchyPanel)
@@ -137,7 +115,6 @@ void EditorApplication::InitializeTreeAndListSettings(SettingsPanel* settingsPan
         auto prefs = Editor::OpenEditorPreferences();
         std::string err;
         prefs.Load(&err);
-        MigrateLegacySharedTreePrefs(prefs, &err);
 
         double hIndent = 16.0;
         prefs.TryGetDouble("ui.hierarchyTreeChildIndent", hIndent);
@@ -487,6 +464,12 @@ void EditorApplication::InitializeAssetsGridAndSmartFolderSettings(SettingsPanel
     Editor::RegisterAssetPreviewSettingsCategory();
     Editor::ApplyAssetPreviewSettingsFromPreferences();
     Editor::RegisterGraphSettingsCategory();
+    Editor::RegisterAudioSettingsCategory();
+    Editor::RegisterSceneSettingsCategory();
+    Editor::RegisterInputSettingsCategory();
+    Editor::RegisterPhysicsSettingsCategory();
+    Editor::RegisterAssetImportSettingsCategory();
+    Editor::RegisterAnimationSettingsCategory();
 
     // Apply initial value from preferences
     {
@@ -495,40 +478,31 @@ void EditorApplication::InitializeAssetsGridAndSmartFolderSettings(SettingsPanel
         prefs.Load(&err);
         bool atTop = true;
         if (prefs.TryGetBool("ui.smartFoldersAtTop", atTop))
-        {
             assetsPanel->SetSmartFoldersAtTop(atTop);
-            settingsPanel->SetSmartFoldersAtTopValue(atTop);
-        }
 
         bool smartFoldersExpandedOnStartup = false;
         prefs.TryGetBool("ui.assets.smartFoldersExpandedOnStartup", smartFoldersExpandedOnStartup);
         assetsPanel->SetSmartFoldersExpandedOnStartup(smartFoldersExpandedOnStartup);
-        settingsPanel->SetSmartFoldersExpandedOnStartupValue(smartFoldersExpandedOnStartup);
 
         bool foldersFirst = true;
         prefs.TryGetBool("ui.assets.foldersFirst", foldersFirst);
         assetsPanel->SetFoldersFirst(foldersFirst);
-        settingsPanel->SetAssetsFoldersFirstValue(foldersFirst);
 
         bool expandFoldersOnLoad = false;
         prefs.TryGetBool("ui.assets.expandFoldersOnLoad", expandFoldersOnLoad);
         assetsPanel->SetExpandFoldersOnLoad(expandFoldersOnLoad);
-        settingsPanel->SetAssetsExpandFoldersOnLoadValue(expandFoldersOnLoad);
 
         bool extraBottomToolbar = true;
         prefs.TryGetBool("ui.assetsExtraBottomViewToolbar", extraBottomToolbar);
         assetsPanel->SetExtraBottomViewToolbarEnabled(extraBottomToolbar);
-        settingsPanel->SetAssetsExtraBottomViewToolbarValue(extraBottomToolbar);
 
         bool singleToggleIcon = true;
         prefs.TryGetBool("ui.assetsSingleViewToggleIcon", singleToggleIcon);
         assetsPanel->SetSingleViewToggleIconEnabled(singleToggleIcon);
-        settingsPanel->SetAssetsSingleViewToggleIconValue(singleToggleIcon);
 
         bool showAssetsZoomSlider = true;
         prefs.TryGetBool("ui.assets.bottomToolbarShowZoomSlider", showAssetsZoomSlider);
         assetsPanel->SetBottomToolbarZoomSliderVisible(showAssetsZoomSlider);
-        settingsPanel->SetAssetsBottomToolbarZoomSliderVisibleValue(showAssetsZoomSlider);
     }
 }
 
@@ -565,7 +539,6 @@ void EditorApplication::InitializeInspectorSettings(SettingsPanel* settingsPanel
         prefs.Load(&err);
         prefs.TryGetBool("ui.inspectorShowCollapseArrow", showArrow);
         applyCollapseArrowVisibility(showArrow);
-        settingsPanel->SetInspectorCollapseArrowVisibleValue(showArrow);
     }
 
     // Toggle component icon visibility in inspector section headers.
@@ -592,7 +565,6 @@ void EditorApplication::InitializeInspectorSettings(SettingsPanel* settingsPanel
         prefs.Load(&err);
         prefs.TryGetBool("ui.inspectorShowComponentIcons", showComponentIcons);
         applyComponentIconsVisibility(showComponentIcons);
-        settingsPanel->SetInspectorComponentIconsVisibleValue(showComponentIcons);
     }
 
     auto applyFilledSections = [this](bool enabled)
@@ -618,7 +590,6 @@ void EditorApplication::InitializeInspectorSettings(SettingsPanel* settingsPanel
         prefs.Load(&err);
         prefs.TryGetBool("ui.inspectorFilledSections", filledSections);
         applyFilledSections(filledSections);
-        settingsPanel->SetInspectorFilledSectionsValue(filledSections);
     }
 
     auto refreshInspectorInfoCards = [this](bool)
@@ -630,15 +601,6 @@ void EditorApplication::InitializeInspectorSettings(SettingsPanel* settingsPanel
         }
     };
     settingsPanel->SetOnInspectorInfoCardsChanged(refreshInspectorInfoCards);
-
-    bool showInfoCards = true;
-    {
-        auto prefs = Editor::OpenEditorPreferences();
-        std::string err;
-        prefs.Load(&err);
-        prefs.TryGetBool("ui.inspectorShowInfoCards", showInfoCards);
-        settingsPanel->SetInspectorInfoCardsVisibleValue(showInfoCards);
-    }
 
     // Wire SettingsPanel to control inspector "solo section" behaviour (only one section expanded).
     auto applyInspectorSoloSections = [this](bool enabled)
@@ -660,7 +622,6 @@ void EditorApplication::InitializeInspectorSettings(SettingsPanel* settingsPanel
         prefs.Load(&err);
         prefs.TryGetBool("ui.inspectorSoloSections", soloEnabled);
         applyInspectorSoloSections(soloEnabled);
-        settingsPanel->SetInspectorSoloSectionsValue(soloEnabled);
     }
 
     // Wire SettingsPanel option to keep Transform section always expanded in solo mode.
@@ -683,7 +644,6 @@ void EditorApplication::InitializeInspectorSettings(SettingsPanel* settingsPanel
         prefs.Load(&err);
         prefs.TryGetBool("ui.inspectorSoloKeepTransform", soloKeepTransform);
         applyInspectorSoloKeepTransform(soloKeepTransform);
-        settingsPanel->SetInspectorSoloKeepTransformValue(soloKeepTransform);
     }
 
     // Inspector toggle alignment (left/right/hidden)
@@ -693,8 +653,10 @@ void EditorApplication::InitializeInspectorSettings(SettingsPanel* settingsPanel
             ApplyInspectorToggleAlign(v);
         });
 
-    // VSync toggle: applies to the main window device only (editor preference, not per-project)
-    settingsPanel->SetOnVsyncChanged([this](bool enabled)
+    Editor::RegisterScriptSettingsCategory();
+
+    // VSync applies to the main window device only (editor preference, not per-project).
+    Editor::RegisterPerformanceSettingsCategory([this](bool enabled)
     {
         if (!m_Windows.empty() && m_Windows[0]->renderCtx)
         {

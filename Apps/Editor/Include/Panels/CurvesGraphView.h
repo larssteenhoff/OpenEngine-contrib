@@ -81,7 +81,6 @@ public:
     void SetSelectedCurve(int channel, uint32 component);
     void SetChannelColors(const std::unordered_map<uint32, uint32>& colors);
     void SetShowGrid(bool show);
-    void SetGridColor(uint32 argb);
     void SetGridHLineColor(uint32 argb);
     void SetGridVLineColor(uint32 argb);
     void SetGridLineThickness(float px);
@@ -213,6 +212,38 @@ private:
     /// active. Skipped mid-drag so a captured gesture isn't invalidated.
     bool RebuildLatticeFromSelection();
 
+    /// Pointer coordinates, view extents and modifiers captured once per OnEvent call
+    /// (defined in the .cpp). Local coordinates are logical pixels relative to the view.
+    struct PointerEventState;
+    PointerEventState CapturePointerEventState(const UIEvent& e) const;
+    // OnEvent handlers, in dispatch order. A bool handler returns true when OnEvent
+    // must stop dispatching the event.
+    bool HandleGestureMouseUp(UIEvent& e);
+    bool HandleTangentHandleDrag(UIEvent& e, const PointerEventState& pointer);
+    bool HandleBoxSelectDrag(UIEvent& e, const PointerEventState& pointer);
+    bool HandleKeyDrag(UIEvent& e, const PointerEventState& pointer);
+    bool HandleSelectionScaleDrag(UIEvent& e, const PointerEventState& pointer);
+    bool HandlePanAndSeek(UIEvent& e, const PointerEventState& pointer);
+    bool HandleLatticeControlPointDrag(UIEvent& e, const PointerEventState& pointer);
+    bool HandleRetimeTool(UIEvent& e, const PointerEventState& pointer);
+    float RetimePixelToTime(float px, float width) const;
+    float RetimeTimeToPixel(float t, float width) const;
+    void BeginRetimeGesture(UIEvent& e, const PointerEventState& pointer);
+    void UpdateRetimeHover(const PointerEventState& pointer);
+    void UpdateRetimeDrag(UIEvent& e, const PointerEventState& pointer);
+    void EndRetimeGesture(UIEvent& e, const PointerEventState& pointer);
+    bool CancelRetimeGesture(UIEvent& e);
+    bool HandleDrawCurveTool(UIEvent& e, const PointerEventState& pointer);
+    bool HandleLatticeTool(UIEvent& e, const PointerEventState& pointer);
+    int PickLatticeControlPoint(const PointerEventState& pointer) const;
+    void BuildDragKeysFromSelection();
+    bool BeginSelectionScaleFromHandle(UIEvent& e, const PointerEventState& pointer);
+    bool HandleLeftMouseDownOnCurves(UIEvent& e, const PointerEventState& pointer);
+    bool HandleLeftMouseDownOnBackground(UIEvent& e, const PointerEventState& pointer);
+    bool HandleRightMouseButton(UIEvent& e, const PointerEventState& pointer);
+    void UpdateHover(const UIEvent& e, const PointerEventState& pointer);
+    void ClearHoverOnMouseLeave(const UIEvent& e);
+
     std::unordered_map<uint32, uint32> m_ChannelColors;
     const Animation::AnimationClip* m_Clip = nullptr;
     float m_RangeStart = 0.0f;
@@ -282,17 +313,18 @@ private:
     uint32 m_DrawCurveComponent = 0;
     std::vector<DrawCurveSample> m_DrawCurveSamples;
     std::function<void()> m_OnSelectionChanged;
-    bool m_ShowGrid = true;
-    uint32 m_GridColor = 0xFF595959u;
-    uint32 m_GridHLineColor = 0xFF808080u;
-    uint32 m_GridVLineColor = 0xFFA4A4A4u;
-    float m_GridLineThickness = 1.0f;
-    uint32 m_BaselineColor  = 0xFF787878u;
-    float m_BaselineThickness = 2.0f;
-    float m_CurveLineWidth = 2.0f;
+    // Style state: the constructor starts it at AnimationWindowSettings::Defaults(),
+    // and the Animation window applies the user's settings over it.
+    bool m_ShowGrid;
+    uint32 m_GridHLineColor;
+    uint32 m_GridVLineColor;
+    float m_GridLineThickness;
+    uint32 m_BaselineColor;
+    float m_BaselineThickness;
+    float m_CurveLineWidth;
     float m_Fps = 60.0f;
-    uint32 m_KeyframeColor         = 0xFF33CC80u;
-    uint32 m_KeyframeSelectedColor = 0xFFFF9933u;
+    uint32 m_KeyframeColor;
+    uint32 m_KeyframeSelectedColor;
     float m_ContentX = 0.0f;
     float m_ContentY = 0.0f;
     float m_ContentW = 0.0f;

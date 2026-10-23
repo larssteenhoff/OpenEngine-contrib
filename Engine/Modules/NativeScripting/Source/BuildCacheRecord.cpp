@@ -2,6 +2,7 @@
 
 #include "NativeScripting/EngineBuildIdentity.h"
 #include "NativeScripting/NativeBuildConfig.h"
+#include "Types/Fnv1a.h"
 
 #include <cstdio>
 #include <fstream>
@@ -23,7 +24,7 @@ std::optional<std::uint64_t> HashBinaryLinkStamp(const std::filesystem::path& bi
     const std::string stamp = ReadBinaryLinkStamp(binary);
     if (stamp.empty())
         return std::nullopt;
-    return Fnv1aHash(stamp, seed);
+    return Hashing::Fnv1a64(stamp, seed);
 }
 
 } // namespace
@@ -80,16 +81,6 @@ bool WriteEngineAbiMarker(const std::filesystem::path& dir, const std::string& a
     return static_cast<bool>(out);
 }
 
-std::uint64_t Fnv1aHash(std::string_view data, std::uint64_t seed)
-{
-    for (unsigned char c : data)
-    {
-        seed ^= c;
-        seed *= 0x00000100000001b3ULL;
-    }
-    return seed;
-}
-
 std::string ToHexDigest(std::uint64_t hash)
 {
     char hex[17];
@@ -99,11 +90,11 @@ std::string ToHexDigest(std::uint64_t hash)
 
 std::optional<std::uint64_t> HashEngineAbiInputs(const NativeBuildConfig& config)
 {
-    std::optional<std::uint64_t> hash = HashBinaryLinkStamp(config.EngineBinary, Fnv1aHash(config.Config));
+    std::optional<std::uint64_t> hash = HashBinaryLinkStamp(config.EngineBinary, Hashing::Fnv1a64(config.Config));
     if (!hash)
         return std::nullopt;
     for (const std::string& def : config.CompileDefinitions)
-        hash = Fnv1aHash(def, *hash);
+        hash = Hashing::Fnv1a64(def, *hash);
     // Editor-kind modules (EditorImportLib set) additionally fold the EditorSDK binary;
     // a Runtime module hashes no editor input at all.
     if (!config.EditorImportLib.empty())

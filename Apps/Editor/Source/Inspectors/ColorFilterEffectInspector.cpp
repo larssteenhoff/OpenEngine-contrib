@@ -6,9 +6,11 @@
 #include "Components/Rendering/PostProcessEffects/ColorFilterEffect.h"
 #include "Editor/Entities/EditorECSHelpers.h"
 
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorUIHelpers.h"
+#include "Types/ColorUtils.h"
 #include "UndoRedo/UndoRedoService.h"
 #include "UI/StyleProperties.h"
 
@@ -26,53 +28,12 @@ namespace
 {
 using Components::ColorFilterBlendMode;
 
-constexpr float kSwatchSize = 20.0f;
-constexpr float kSwatchBorderRadius = 3.0f;
-constexpr uint32_t kSwatchBorderColor = 0xFF555555u;
-
 static constexpr EnumEntry<ColorFilterBlendMode> kBlendModes[] = {
     {ColorFilterBlendMode::Multiply, "Multiply"},
     {ColorFilterBlendMode::Add,      "Add"},
     {ColorFilterBlendMode::Screen,   "Screen"},
     {ColorFilterBlendMode::SoftLight,"Soft Light"},
 };
-
-static uint32_t ColorToArgb(const float (&c)[3])
-{
-    auto clamp01 = [](float v) { return std::max(0.0f, std::min(1.0f, v)); };
-    uint8_t r = static_cast<uint8_t>(clamp01(c[0]) * 255.0f + 0.5f);
-    uint8_t g = static_cast<uint8_t>(clamp01(c[1]) * 255.0f + 0.5f);
-    uint8_t b = static_cast<uint8_t>(clamp01(c[2]) * 255.0f + 0.5f);
-    return (0xFFu << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
-}
-
-static void ArgbToColor(uint32_t argb, float (&out)[3])
-{
-    out[0] = ((argb >> 16) & 0xFF) / 255.0f;
-    out[1] = ((argb >> 8) & 0xFF) / 255.0f;
-    out[2] = (argb & 0xFF) / 255.0f;
-}
-
-static std::string FormatRgb(const float (&c)[3])
-{
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "(%.2f, %.2f, %.2f)", c[0], c[1], c[2]);
-    return buf;
-}
-
-static void StyleSwatch(UIElement* swatch, uint32_t argb)
-{
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(kSwatchSize))
-        .Set(Style::Height, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinWidth, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinHeight, StyleLength::Px(kSwatchSize))
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{kSwatchBorderRadius, kSwatchBorderRadius, kSwatchBorderRadius, kSwatchBorderRadius})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor})
-        .Set(Style::BackgroundColor, argb)
-        .Set(Style::Cursor, CursorStyle::Pointer);
-}
 
 } // namespace
 
@@ -108,29 +69,13 @@ void RegisterColorFilterEffectInspector()
 
         // Color swatch + RGB label, click opens color picker.
         {
-            UIElement* row = InspectorUI::AddRow(ctx.Parent);
-            Label* colorLabel = InspectorUI::AddLabel(row, "Color", "Tint color (click to open color picker; double-click to reset to white)");
-            if (colorLabel) colorLabel->AddClass("inspector-label-no-drag");
-            UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-            fieldContainer->Overrides()
-                .Set(Style::FlexDir, FlexDirection::Row)
-                .Set(Style::AlignItems, AlignItems::Center)
-                .Set(Style::Gap, StyleLength::Px(6.0f));
-
-            const uint32_t argb = ColorToArgb(effect->Color);
-
-            auto swatch = std::make_unique<UIElement>();
-            UIElement* swatchRaw = swatch.get();
-            StyleSwatch(swatchRaw, argb);
-            fieldContainer->AddChild(std::move(swatch));
-
-            auto rgbLabel = std::make_unique<Label>();
-            rgbLabel->AddClass("inspector-text");
-            rgbLabel->SetText(FormatRgb(effect->Color));
-            rgbLabel->Overrides()
-                .Set(Style::Cursor, CursorStyle::Pointer);
-            Label* rgbLabelRaw = rgbLabel.get();
-            fieldContainer->AddChild(std::move(rgbLabel));
+            const InspectorUI::ColorSwatchRow colorRow = InspectorUI::AddColorSwatchRow(
+                ctx.Parent, "Color", "Tint color (click to open color picker; double-click to reset to white)",
+                ColorUtils::RgbFloatsToArgb(effect->Color),
+                InspectorUI::FormatColorRgb(effect->Color[0], effect->Color[1], effect->Color[2]));
+            Label* colorLabel = colorRow.Title;
+            UIElement* swatchRaw = colorRow.Swatch;
+            Label* rgbLabelRaw = colorRow.Value;
 
             // The picker's callbacks outlive an inspector rebuild: resolve the row through
             // weak refs instead of holding the freed widgets.
@@ -148,7 +93,7 @@ void RegisterColorFilterEffectInspector()
                 if (!comp)
                     return;
 
-                uint32_t currentArgb = ColorToArgb(comp->Color);
+                uint32_t currentArgb = ColorUtils::RgbFloatsToArgb(comp->Color);
 
                 using Edit = Editor::UndoRedoService::InteractiveEdit;
                 auto edit = std::make_shared<Edit>();
@@ -164,8 +109,8 @@ void RegisterColorFilterEffectInspector()
                     UIElement* swatch = swatchRef.Get();
                     Label* rgbLabel = rgbLabelRef.Get();
                     if (!c || !swatch || !rgbLabel) return;
-                    StyleSwatch(swatch, ColorToArgb(c->Color));
-                    rgbLabel->SetText(FormatRgb(c->Color));
+                    InspectorUI::SetColorSwatchColor(swatch, ColorUtils::RgbFloatsToArgb(c->Color));
+                    rgbLabel->SetText(InspectorUI::FormatColorRgb(c->Color[0], c->Color[1], c->Color[2]));
                 };
 
                 ColorPickerCallbacks cbs;
@@ -174,7 +119,7 @@ void RegisterColorFilterEffectInspector()
                     {
                         edit->Preview([&] {
                             auto* c = w->GetComponentForWrite<CF>(e);
-                            if (c) ArgbToColor(newArgb, c->Color);
+                            if (c) ColorUtils::ArgbToRgbFloats(newArgb, c->Color);
                         });
                         edit->Commit();
                     }
@@ -183,7 +128,7 @@ void RegisterColorFilterEffectInspector()
                         auto* c = w->GetComponent<CF>(e);
                         if (!c) return;
                         CF updated = *c;
-                        ArgbToColor(newArgb, updated.Color);
+                        ColorUtils::ArgbToRgbFloats(newArgb, updated.Color);
                         Editor::CommitComponentUpdate(w, e, n, updated);
                     }
                     updateUI();
@@ -197,7 +142,7 @@ void RegisterColorFilterEffectInspector()
                     {
                         edit->Preview([&] {
                             auto* c = w->GetComponentForWrite<CF>(e);
-                            if (c) ArgbToColor(newArgb, c->Color);
+                            if (c) ColorUtils::ArgbToRgbFloats(newArgb, c->Color);
                         });
                     }
                     else
@@ -205,7 +150,7 @@ void RegisterColorFilterEffectInspector()
                         auto* c = w->GetComponent<CF>(e);
                         if (!c) return;
                         CF updated = *c;
-                        ArgbToColor(newArgb, updated.Color);
+                        ColorUtils::ArgbToRgbFloats(newArgb, updated.Color);
                         Editor::PreviewComponentUpdate(w, e, n, updated);
                     }
                     updateUI();

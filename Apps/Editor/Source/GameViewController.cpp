@@ -12,6 +12,7 @@
 #include "Engine/Rendering/CameraExposureHelpers.h"
 #include "Engine/Rendering/ExposureReadbackFeature.h"
 #include "Engine/Rendering/RenderServices.h"
+#include "Engine/Rendering/Pipeline/RenderPipeline.h"
 #include "Engine/Rendering/ViewFinalize.h"
 #include "Logger/Logger.h"
 
@@ -203,6 +204,7 @@ std::optional<Engine::Renderer::Camera> GameViewController::PrepareView(
     // draws its camera's Visible Layers for the frame. With no camera it is not armed and sleeps,
     // and a hidden view lapses within two frames of its last arm.
     Engine::Renderer::DeclareGameCameraView(rs->Views(), m_ViewId, activeCam ? &*activeCam : nullptr);
+    m_IncludeGameUiInPostProcessing = activeCam && activeCam->params.IncludeUIInPostProcessing;
     if (!activeCam)
     {
         m_DeclaredCamera.reset();
@@ -332,8 +334,9 @@ bool GameViewController::DeclareTargetsRG(Rendering::RenderGraph::RGFrame& frame
     // Publishes CameraData + aspect/letterbox state onto the view registry.
     Engine::Renderer::ApplyActiveCameraAspect(*rs, m_ViewId, m_CameraId, *activeCam, w, h);
     // ApplyActiveCameraAspect publishes the full pixel-perfect state
-    // (including the snapped sub-pixel remainder); re-read it so the 8e-5
-    // upscale declare gets FracX/FracY, not the frac=0 estimate.
+    // (including the snapped sub-pixel remainder and the panel extent the
+    // pipeline crosses to); re-read it so the target sizing below uses the
+    // published padded extent.
     m_PixelPerfectStateRG = rs->Views().GetViewPixelPerfect(m_ViewId);
     m_PanelWRG = w;
     m_PanelHRG = h;
@@ -358,8 +361,11 @@ bool GameViewController::DeclareTargetsRG(Rendering::RenderGraph::RGFrame& frame
     rs->WriteViewLightBuffer(m_ViewId);
 
     // Pool imports — window-namespaced (global pool keyspace). A smooth
-    // pixel-perfect camera renders at the padded reference size; the 8e-5
-    // upscale pass writes the full-panel output the UI samples.
+    // pixel-perfect camera rasters at the padded reference size; the pipeline's
+    // PixelPerfectUpscale node crosses from there to the panel extent, so the
+    // display effects after the crossing run at full resolution and the image
+    // the UI samples is the pipeline's own panel-sized output. Custom pipelines
+    // without the crossing retain the terminal upscale below.
     const uint32_t renderW =
         m_PixelPerfectStateRG.Active ? std::max(1u, m_PixelPerfectStateRG.PaddedWidth) : w;
     const uint32_t renderH =
@@ -508,6 +514,38 @@ void GameViewController::DeclarePostPipelinePassesRG(Rendering::RenderGraph::RGF
         return;
     }
 
+    // Install a view-local hook on the live pipeline instance. It runs before
+    // the first fullscreen effect on the next frame, so UIDocuments are in the
+    // camera image before CRT, color grading and other fullscreen filters.
+    if (auto* pipeline = m_RenderServices->Spine().PipelineInstanceForFrame(frame);
+        pipeline && pipeline != m_GameUiPostProcessPipeline)
+    {
+        const std::weak_ptr<uint8_t> lifetime = m_GameUiPostProcessLifetime;
+        auto* const pipelineIdentity = pipeline;
+        pipeline->SetBeforePostProcessCallback(this, [this, lifetime, pipelineIdentity](
+                                                               Engine::Renderer::Pipeline::ViewDeclare& d) {
+            if (lifetime.expired() || m_GameUiPostProcessPipeline != pipelineIdentity ||
+                d.View.id != m_ViewId || !d.ViewColor.IsValid() ||
+                !m_IncludeGameUiInPostProcessing ||
+                m_GameUiCompositedFrameIndex == d.Frame.FrameIndex())
+                return;
+            // By the first post effect the world has already resolved out of a
+            // multisampled view color, so a composite drawn into it never reaches
+            // the screen. Leave the frame unstamped: the HUD then draws over the
+            // finished view.
+            if (d.Frame.Graph().ResourceDesc(d.ViewColor.Id).SampleCount > 1)
+                return;
+            auto* device = m_RenderServices ? m_RenderServices->GetDevice() : nullptr;
+            if (!device)
+                return;
+            const auto targetSpace = UI::UITargetSpace::ForPipelineOutput(
+                m_RenderServices->GetPipelineOutputSpaceRG(), device->GetActiveHdrOutputMode());
+            if (DeclareGameUICompositeRG(d.Frame, d.ViewColor, targetSpace))
+                m_GameUiCompositedFrameIndex = d.Frame.FrameIndex();
+        });
+        m_GameUiPostProcessPipeline = pipeline;
+    }
+
     // The view finalizes itself BEFORE the HUD composites, so the HUD blends on
     // sRGB code values and the finalize's filters see world pixels and nothing
     // else — the Player's order (#767 slice iii). The dither therefore lands
@@ -559,7 +597,8 @@ void GameViewController::DeclarePostPipelinePassesRG(Rendering::RenderGraph::RGF
     // The HUD composites onto the finished view: its declared space is that image's
     // PRODUCER stamp (#784), not the editor display's — EncodedSrgb once the finalize
     // has run, the pipeline's own space when it declined.
-    if (!DeclareGameUICompositeRG(frame, view.Image,
+    if (m_GameUiCompositedFrameIndex != frame.FrameIndex() &&
+        !DeclareGameUICompositeRG(frame, view.Image,
                                   UI::UITargetSpace::ForPipelineOutput(
                                       view.Space, frame.Device()->GetActiveHdrOutputMode())))
         return;
@@ -583,7 +622,10 @@ void GameViewController::DeclarePostPipelinePassesRG(Rendering::RenderGraph::RGF
     // resamples, which low-pass the noise and then re-round the recovered
     // detail undithered — one of those after the finalize stays forbidden, on
     // this arm and every other.
-    if (m_PixelPerfectStateRG.Active)
+    // Custom pipelines retain the terminal nearest expansion, including the
+    // padded-border crop when source and panel extents happen to match. The
+    // frame's producer flag prevents repeating a crossing already in the graph.
+    if (out.NeedsPixelPerfectFallback(m_PixelPerfectStateRG.Active))
     {
         const std::string ppName =
             "Editor.W" + std::to_string(windowId) + ".GameView.PixelPerfectOutput";
@@ -648,7 +690,8 @@ void GameViewController::DeclarePostPipelinePassesRG(Rendering::RenderGraph::RGF
         // the encoded one the view's finalize already did. `debandLsb` and
         // `presentedFormat` are the frame's single resolutions, shared with the
         // finalize above so a recording keeps matching the screen.
-        m_MovieCapture.DeclareCaptureRG(frame, movieSrc, m_PanelWRG, m_PanelHRG, viewInputSpace,
+        const auto& movieDesc = frame.Graph().ResourceDesc(movieSrc.Id);
+        m_MovieCapture.DeclareCaptureRG(frame, movieSrc, movieDesc.Width, movieDesc.Height, viewInputSpace,
                                         debandLsb, presentedFormat);
     }
 }

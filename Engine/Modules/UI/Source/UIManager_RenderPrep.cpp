@@ -255,7 +255,7 @@ void UIManager::EnsureSdfPipelineDesc()
     // Descriptor set 0:
     //   binding 0 — UIPrimitive SSBO (slot-indexed, persistent + full upload)
     //   binding 1 — UIClipRect SSBO
-    //   binding 2 — DrawOrder SSBO (Stage 2 part 3): vertex shader looks up
+    //   binding 2 — DrawOrder SSBO: vertex shader looks up
     //               its primitive slot via drawOrder[gl_InstanceIndex],
     //               so the persistent primitive buffer can hold elements
     //               in slot order (with holes) while still rendering in DFS.
@@ -387,7 +387,7 @@ UIManager::SdfFrameData UIManager::PrepareSdfFrameData()
 
     fd.Ready = true;
 
-    // Stage 2 part 3: instance count is the size of m_DrawOrder, not the
+    // Instance count is the size of m_DrawOrder, not the
     // primitive buffer (which holds slot-indexed data, including holes).
     fd.DrawCount = m_DrawOrder.size();
     if (fd.DrawCount == 0)
@@ -486,7 +486,7 @@ UIManager::SdfFrameData UIManager::PrepareSdfFrameData()
         return fd;
     }
 
-    // Stage 3: clips live in m_PersistentClipRects, slot-indexed via
+    // Clips live in m_PersistentClipRects, slot-indexed via
     // m_ClipAllocator. Upload covers the allocator's high-water mark; the
     // shader looks up clips by index from a primitive's modeAndFlags so
     // any unused slots between live clips are simply never read.

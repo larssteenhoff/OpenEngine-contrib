@@ -19,8 +19,9 @@
 // The only per-image state here is the consumer-lane env switch below
 // (process-constant, identical in every image).
 
+#include "Platform/Environment.h"
+
 #include <cstdint>
-#include <cstdlib>
 
 namespace GameEngine::ECS
 {
@@ -55,11 +56,7 @@ namespace ChangeFilter
 // column (design R12: noise next to the callback).
 inline bool Enabled()
 {
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_ECS_CHANGE_FILTER");
-        return !(v && v[0] == '0');
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_ECS_CHANGE_FILTER", true);
     return enabled;
 }
 

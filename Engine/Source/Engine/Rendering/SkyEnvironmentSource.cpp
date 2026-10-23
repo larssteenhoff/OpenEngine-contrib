@@ -14,6 +14,7 @@
 #include "Rendering/Core/RenderGraph/RGFrame.h"
 #include "Rendering/Core/SpecializationConstants.h"
 #include "Rendering/Sky/SkySettings.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -253,15 +254,8 @@ uint64_t SkyEnvironmentSource::InputDigest() const
 
     if (s.environmentTexture.IsValid())
     {
-        uint64_t h = 14695981039346656037ull;
-        auto mix = [&h](const void* data, size_t bytes) {
-            const uint8_t* p = static_cast<const uint8_t*>(data);
-            for (size_t i = 0; i < bytes; ++i)
-            {
-                h ^= p[i];
-                h *= 1099511628211ull;
-            }
-        };
+        uint64_t h = Hashing::kFnv1a64OffsetBasis;
+        auto mix = [&h](const void* data, size_t bytes) { h = Hashing::Fnv1a64(data, bytes, h); };
 
         const uint64_t textureId = static_cast<uint64_t>(s.environmentTexture);
         mix(&textureId, sizeof(textureId));
@@ -284,15 +278,8 @@ uint64_t SkyEnvironmentSource::InputDigest() const
     // user sees) changes — sun motion, atmosphere edits, ground/night/horizon
     // tweaks — and never on a frame where the sky is steady. nightSkyBlend +
     // exposure are added because the capture's ground/night composite reads them.
-    uint64_t h = 14695981039346656037ull;
-    auto mix = [&h](const void* data, size_t bytes) {
-        const uint8_t* p = static_cast<const uint8_t*>(data);
-        for (size_t i = 0; i < bytes; ++i)
-        {
-            h ^= p[i];
-            h *= 1099511628211ull;
-        }
-    };
+    uint64_t h = Hashing::kFnv1a64OffsetBasis;
+    auto mix = [&h](const void* data, size_t bytes) { h = Hashing::Fnv1a64(data, bytes, h); };
     // Gradient sky: the capture bakes ONLY the 3 gradient colors + exposure (its branch reads
     // nothing else), so hash exactly those and stop. Deliberately excludes the sun / atmosphere /
     // LUT below: an animated sun or time-of-day must NOT churn the digest and re-bake a

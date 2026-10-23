@@ -16,15 +16,14 @@
 #include <cstdio>
 #include "Logger/Backtrace.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include "UI/Controls/DockspaceElement.h"
 #include "UI/Controls/IVirtualizedControl.h"
-#include "UI/Controls/WeightedPane.h"
 #include "UI/UIElement.h"
 #include "UIAttributeAccess.h"
 
 #include "Types/ColorUtils.h"
-#include "UI/Controls/Mount.h"
 
 #include "Input/KeyCodes.h"
 #include "UI/Layout/YogaLayout.h"
@@ -39,7 +38,6 @@
 
 #include "Rendering/Text/FontAtlas.h"
 #include "Rendering/Text/TextLayout.h"
-#include <GLFW/glfw3.h>
 #include <cstdio>
 #include <cstring>
 
@@ -98,7 +96,6 @@ void UIManager::ShiftDrawOrderIndicesAfter(uint32_t threshold, int32_t delta)
 {
     if (delta == 0 || !m_Root)
         return;
-    constexpr uint32_t kInvalid = 0xFFFFFFFFu;
     // Iterative DFS — std::function would heap-allocate per call.
     // Reused thread-local scratch keeps the walk allocation-free.
     thread_local std::vector<UIElement*> stack;
@@ -110,12 +107,9 @@ void UIManager::ShiftDrawOrderIndicesAfter(uint32_t threshold, int32_t delta)
         stack.pop_back();
         if (!el)
             continue;
-        if (el->m_DrawOrderIdx != kInvalid && el->m_DrawOrderIdx >= threshold)
+        if (el->m_DrawOrderIdx != UIElement::kNoDrawOrderSlice && el->m_DrawOrderIdx >= threshold)
             el->m_DrawOrderIdx = static_cast<uint32_t>(static_cast<int32_t>(el->m_DrawOrderIdx) + delta);
-        for (auto& ch : el->GetChildren())
-            stack.push_back(ch.get());
-        if (UIElement* tgt = el->GetMountTarget())
-            stack.push_back(tgt);
+        el->ForEachLogicalChild([](UIElement* child) { stack.push_back(child); });
     }
 }
 
@@ -136,11 +130,11 @@ void UIManager::NotifyDirty_UpdateRegenFlag(UIElement* el, unsigned flags)
     // unstamped by the last full DFS, which escalates the drain.
     if (!el || !EmitWalkEntersSubtree(*el))
         return;
-    // Block E1: only layout-affecting mutations require a full regen.
+    // Only layout-affecting mutations require a full regen.
     // Pure VisualDirty is handled by DrainPrimitiveDataDirty (the element
     // is already on m_PrimitiveDataDirty via the queue push in
-    // NotifyElementDirty) — drain rewrites just that element's primitive
-    // bytes, no DFS, no DrawOrder shift.
+    // NotifyElementDirty) — drain rewrites just that element's primitives
+    // without a DFS.
     constexpr unsigned kLayoutAffecting =
         UIElement::StyleDirty | UIElement::LayoutDirty | UIElement::ChildrenDirty;
     if (flags & kLayoutAffecting)
@@ -374,22 +368,27 @@ void UIManager::FreeRenderSlots(UIElement* el)
     if (el->m_PrimitiveRangeCap > 0)
     {
         m_PrimitiveAllocator.Free(el->m_PrimitiveRangeStart, el->m_PrimitiveRangeCap);
-        el->m_PrimitiveRangeStart = 0xFFFFFFFFu;
+        el->m_PrimitiveRangeStart = UI::SlotAllocator::kInvalidSlot;
         el->m_PrimitiveRangeCount = 0;
         el->m_PrimitiveRangeCap   = 0;
     }
-    if (el->m_ClipSlotIdx != 0xFFFFu)
+    if (el->m_ClipSlotIdx != UI::kNoClip)
     {
         m_ClipAllocator.Free(el->m_ClipSlotIdx);
-        el->m_ClipSlotIdx = 0xFFFFu;
+        el->m_ClipSlotIdx = UI::kNoClip;
     }
     if (el->m_TransformSlotIdx != UI::kNoTransform)
     {
         m_TransformAllocator.Free(el->m_TransformSlotIdx);
         el->m_TransformSlotIdx = UI::kNoTransform;
     }
+    if (el->m_BackgroundClipSlotIdx != UI::kNoClip)
+    {
+        m_ClipAllocator.Free(el->m_BackgroundClipSlotIdx);
+        el->m_BackgroundClipSlotIdx = UI::kNoClip;
+    }
     // Draw-order is a compact array (no allocator); nothing to free.
-    el->m_DrawOrderIdx = 0xFFFFFFFFu;
+    el->m_DrawOrderIdx = UIElement::kNoDrawOrderSlice;
 }
 
 void UIManager::PushPrimitiveDataDirty(UIElement* el)
@@ -469,11 +468,9 @@ void UIManager::RebuildFocusWithinChain()
     // to :focus-within; its ancestors flip :focus-within only. Consulting the
     // union of all three through MarkPseudoStateScope means an element entering
     // or leaving the chain (a) raises LayoutDirty when any of those pseudos is
-    // layout-affecting — not the StyleDirty-only mark this used to make, which
-    // leaned on the needCascade→signature fallback to reach a solve — and
-    // (b) fans the mark out to off-chain descendants for `.x:focus-within .y`
-    // rules and to siblings for combinator rules, which the old chain-only mark
-    // never reached. SetFocusById marks just the newly focused element, so this
+    // layout-affecting and (b) fans the mark out to off-chain descendants for
+    // `.x:focus-within .y` rules and to siblings for combinator rules.
+    // SetFocusById marks just the newly focused element, so this
     // symmetric-difference pass is the sole path that strips :focus / :focus-
     // within styling from the element losing focus on a programmatic change.
     const auto chainInfo = CombinePseudoInfo(
@@ -496,10 +493,9 @@ void UIManager::RebuildFocusWithinChain()
             MarkPseudoStateScope(e, chainInfo, kFocusBits); // left the chain: lose :focus-within
     }
 
-    // Stage 5 Block A part 3e: clear the InFocusChain bit on departing
-    // elements + set it on the new chain entries so ~UIElement can gate
-    // RemoveFromDirtyQueues on m_InQueueFlags != 0 (which now includes
-    // chain membership). The focus-leaf bits (:focus / :focus-visible) are a
+    // Clear the InFocusChain bit on departing elements + set it on the new
+    // chain entries so ~UIElement can gate RemoveFromDirtyQueues on
+    // m_InQueueFlags != 0 (which includes chain membership). The focus-leaf bits (:focus / :focus-visible) are a
     // strict subset of the chain, so they are cleared together here and re-set
     // on the new leaf below.
     constexpr std::uint8_t kFocusChainClearBits = UIElement::InFocusChain |
@@ -971,21 +967,9 @@ namespace
 		    // Collect logical children to export. For Mount elements, also include
 		    // the mounted target subtree so that portals appear in the exported DOM.
 		    std::vector<const GameEngine::UIElement*> exportChildren;
-		    const auto& children = element->GetChildren();
-		    exportChildren.reserve(children.size() + 1);
-		    for (const auto& child : children)
-		    {
-		        if (child)
-		            exportChildren.push_back(child.get());
-		    }
-		
-		    if (const auto* mount = dynamic_cast<const GameEngine::Mount*>(element))
-		    {
-		        if (auto* target = mount->GetTarget())
-		        {
-		            exportChildren.push_back(target);
-		        }
-		    }
+		    exportChildren.reserve(element->GetChildren().size() + 1);
+		    element->ForEachLogicalChild(
+		        [&](const GameEngine::UIElement* child) { exportChildren.push_back(child); });
 		
 		    const bool hasChildren = !exportChildren.empty();
 		    const std::string textContent = element->GetTextContent();
@@ -1175,6 +1159,7 @@ UIManager::UIManager(IDevice* device)
 UIManager::UIManager(IDevice* device, AssetManager* assetManager)
     : m_Device(device),
       m_AssetManager(assetManager),
+      m_BackgroundSvg(assetManager),
       m_BackgroundImages(device, assetManager, m_Dispatcher,
                          UI::BackgroundImageCache::Hooks{[this]() { RepaintForBackgroundImages(); },
                                                          [this](Rendering::TextureHandle handle)
@@ -1184,44 +1169,17 @@ UIManager::UIManager(IDevice* device, AssetManager* assetManager)
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
     // Respect GE_UI_SUBTREE_SKIP env override. "0" / "false" / "off" (any case)
     // disable the subtree-skip fast path at runtime without touching settings.
-    if (const char* e = std::getenv("GE_UI_SUBTREE_SKIP"))
-    {
-        std::string v(e);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return (char)std::tolower(c); });
-        if (v == "0" || v == "false" || v == "off")
-            m_SubtreeSkipEnabled = false;
-    }
+    m_SubtreeSkipEnabled = Platform::EnvironmentSwitchEnabled("GE_UI_SUBTREE_SKIP", m_SubtreeSkipEnabled);
     // IndicesAndClips-rebuild skip A/B knob. Default on; "0" disables.
-    if (const char* e = std::getenv("GE_UI_INDICES_CLIPS_SKIP"))
-    {
-        std::string v(e);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return (char)std::tolower(c); });
-        if (v == "0" || v == "false" || v == "off")
-            m_IndicesAndClipsSkipEnabled = false;
-    }
-    // Dirty-source tracing. "1"/"true"/"on" enables per-frame
-    // MarkDirty-source attribution into UpdateProfileFrame::dirtySources.
-    // Small per-MarkDirty hash insert cost when on; off by default.
-    if (const char* e = std::getenv("GE_UI_DIRTY_TRACE"))
-    {
-        std::string v(e);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return (char)std::tolower(c); });
-        if (v == "1" || v == "true" || v == "on")
-            m_DirtyTraceEnabled = true;
-    }
+    m_IndicesAndClipsSkipEnabled =
+        Platform::EnvironmentSwitchEnabled("GE_UI_INDICES_CLIPS_SKIP", m_IndicesAndClipsSkipEnabled);
+    // Dirty-source tracing: per-frame MarkDirty-source attribution into
+    // UpdateProfileFrame::dirtySources. Small per-MarkDirty hash insert cost
+    // when on; off by default.
+    m_DirtyTraceEnabled = Platform::EnvironmentSwitchEnabled("GE_UI_DIRTY_TRACE", m_DirtyTraceEnabled);
     // Opt-in per-frame update profiling. Needed for fast-path counter
     // visibility via get_render_stats. Low cost.
-    if (const char* e = std::getenv("GE_UI_UPDATE_PROFILE"))
-    {
-        std::string v(e);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return (char)std::tolower(c); });
-        if (v == "1" || v == "true" || v == "on")
-            m_UpdateProfilingEnabled = true;
-    }
+    m_UpdateProfilingEnabled = Platform::EnvironmentSwitchEnabled("GE_UI_UPDATE_PROFILE", m_UpdateProfilingEnabled);
 #endif
     m_DragDrop = std::make_unique<UI::Interaction::DragDropManager>();
 
@@ -1249,21 +1207,11 @@ UIManager::UIManager(IDevice* device, AssetManager* assetManager)
         "full shaping is desired.");
 #endif
 
-    m_CorrectnessModeEnabled = false;
-    if (const char* e = std::getenv("GE_UI_CORRECTNESS_MODE"))
-        m_CorrectnessModeEnabled = (e[0] == '1');
-    if (const char* e = std::getenv("GE_UI_CORRECTNESS_ASSERTS"))
-        m_CorrectnessModeAssertsEnabled = (e[0] == '1');
-
-    {
-        const char* e = std::getenv("GE_UI_DISABLE_NOOP_FAST_PATH");
-        m_DisableFastPathNoOp = (e && e[0] == '1');
-    }
-
-    {
-        const char* e = std::getenv("GE_UI_DEBUG_KEYS");
-        m_DebugKeysEnabled = (e && e[0] == '1');
-    }
+    m_CorrectnessModeEnabled = Platform::EnvironmentSwitchEnabled("GE_UI_CORRECTNESS_MODE", false);
+    m_CorrectnessModeAssertsEnabled =
+        Platform::EnvironmentSwitchEnabled("GE_UI_CORRECTNESS_ASSERTS", m_CorrectnessModeAssertsEnabled);
+    m_DisableFastPathNoOp = Platform::EnvironmentSwitchEnabled("GE_UI_DISABLE_NOOP_FAST_PATH", false);
+    m_DebugKeysEnabled = Platform::EnvironmentSwitchEnabled("GE_UI_DEBUG_KEYS", false);
 
     m_DeviceRebuildGeneration = m_Device ? m_Device->GetDeviceRebuildGeneration() : 0;
     CreateDeviceSamplersAndFallbackTexture();
@@ -1380,7 +1328,7 @@ UIManager::~UIManager()
     // below) must never call back into a partially destroyed UIManager.
     m_Lifetime.reset();
 
-    // Stage 5 Block A part 3e: clear InFocusChain bit on every chain
+    // Clear the InFocusChain bit on every chain
     // entry. Mount targets / portal-style elements may outlive this
     // UIManager (e.g. stack-allocated Button used by tests + ui owns
     // root but not target), and the bits describe membership in vectors
@@ -1402,8 +1350,14 @@ UIManager::~UIManager()
     // this manager owns, so a survivor can be announced again by its next manager.
     ForgetAttachStateOnTeardown();
 
-    // Tear down the element tree while all UIManager state is still alive.
-    // Child destructors may call back (e.g. RemoveExternalTexture).
+    // Tear down the element tree. Every member is still constructed, but
+    // IsAlive(this) is already false, so the IsAlive-guarded forwarders that
+    // ~UIElement and the controls use skip this manager and leave their
+    // registries unpruned. Teardown code that calls through a raw UIManager*
+    // is not guarded and reaches the intact members: a Mount's destructor
+    // hides its target (AssetViewPanel -> RemoveExternalTexture), and
+    // ~FloatingPanel clears its Mount (NotifyTreeStructureChanged). Inside
+    // reset() m_Root is already null, so GetRootElement() returns nullptr.
     m_Root.reset();
     DetachSurvivingElements();
 

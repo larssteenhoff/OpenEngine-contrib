@@ -172,7 +172,7 @@ CaseResult IterateOneComponent(const BenchConfig& cfg, std::size_t n)
     auto handles = CreateWorld(world, n, true, false);
     auto q = world.Query<GE::Write<Position>>();
     SampleIteratePasses(r, cfg, n, [&] {
-        q.Each([](Position& p) { p.x += 1.0f; });
+        q.Each([](GE::Writable<Position> p) { p.Mutable().x += 1.0f; });
     });
     KeepAlive(world.GetComponent<Position>(handles[0])->x);
     r.Finalize();
@@ -187,7 +187,8 @@ CaseResult IterateTwoComponents(const BenchConfig& cfg, std::size_t n)
     auto handles = CreateWorld(world, n, true, false);
     auto q = world.Query<GE::Write<Position>, GE::Read<Velocity>>();
     SampleIteratePasses(r, cfg, n, [&] {
-        q.Each([](Position& p, const Velocity& v) {
+        q.Each([](GE::Writable<Position> row, const Velocity& v) {
+            Position& p = row.Mutable();
             p.x += v.x * kDeltaTime;
             p.y += v.y * kDeltaTime;
         });
@@ -205,7 +206,9 @@ CaseResult IterateThreeComponents(const BenchConfig& cfg, std::size_t n)
     auto handles = CreateWorld(world, n, true, false);
     auto q = world.Query<GE::Write<Position>, GE::Read<Velocity>, GE::Write<DataComp>>();
     SampleIteratePasses(r, cfg, n, [&] {
-        q.Each([](Position& p, const Velocity& v, DataComp& d) {
+        q.Each([](GE::Writable<Position> positionRow, const Velocity& v, GE::Writable<DataComp> dataRow) {
+            Position& p = positionRow.Mutable();
+            DataComp& d = dataRow.Mutable();
             p.x += v.x * kDeltaTime;
             p.y += v.y * kDeltaTime;
             d.thingy++;
@@ -232,12 +235,14 @@ CaseResult ComplexSystemsUpdate(const BenchConfig& cfg, std::size_t n)
     {
         const auto t0 = Clock::now();
         // MovementSystem
-        qMove.Each([](Position& p, const Velocity& v) {
+        qMove.Each([](GE::Writable<Position> row, const Velocity& v) {
+            Position& p = row.Mutable();
             p.x += v.x * kDeltaTime;
             p.y += v.y * kDeltaTime;
         });
         // DataSystem
-        qData.Each([](DataComp& d) {
+        qData.Each([](GE::Writable<DataComp> row) {
+            DataComp& d = row.Mutable();
             d.thingy++;
             d.dingy += 0.0001f;
         });
@@ -251,7 +256,8 @@ CaseResult ComplexSystemsUpdate(const BenchConfig& cfg, std::size_t n)
                 world.AddComponentImmediate(h, Damage{10});
         }
         // HealthSystem
-        qHealth.Each([](Health& h, const Damage& d) {
+        qHealth.Each([](GE::Writable<Health> row, const Damage& d) {
+            Health& h = row.Mutable();
             h.hp -= d.amount;
             if (h.hp <= 0)
                 h.hp = 100;
@@ -286,7 +292,7 @@ void ChangedGated(const BenchConfig& cfg, std::size_t n, std::vector<CaseResult>
     CaseResult base{"ours-extra", "Changed1pct_BaselineFullScan", n};
     base.Note = "same consumer, no Changed<> gate (full scan)";
     SampleIteratePasses(base, cfg, n, [&] {
-        q.Each([](const Position& p, Velocity& v) { v.x += p.x * 0.0001f; });
+        q.Each([](const Position& p, GE::Writable<Velocity> v) { v.Mutable().x += p.x * 0.0001f; });
     });
     base.Finalize();
     out.push_back(base);
@@ -313,7 +319,7 @@ void ChangedGated(const BenchConfig& cfg, std::size_t n, std::vector<CaseResult>
         const auto t0 = Clock::now();
         const auto versionBefore = world.GetGlobalSystemVersion();
         q.Changed<Position>(gate);
-        q.Each([](const Position& p, Velocity& v) { v.x += p.x * 0.0001f; });
+        q.Each([](const Position& p, GE::Writable<Velocity> v) { v.Mutable().x += p.x * 0.0001f; });
         gate.LastRunVersion = versionBefore;
         const auto t1 = Clock::now();
         if (run >= 0)

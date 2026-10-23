@@ -30,9 +30,12 @@ constexpr float32 kReservationLookaheadSeconds = 1.5f;
 // Hierarchy rebuilds WorldTransform from local Transform on topology
 // changes. A world-only write is discarded and the agent snaps home.
 void WriteAgentTranslation(ECS::World& world, ECS::EntityHandle e,
-                           Components::Transform& xf, Components::WorldTransform& wt,
+                           ECS::Writable<Components::Transform> xfRow,
+                           ECS::Writable<Components::WorldTransform> wtRow,
                            float32 x, float32 y, float32 z)
 {
+    Components::Transform& xf = xfRow.Mutable();
+    Components::WorldTransform& wt = wtRow.Mutable();
     xf.matrix[12] = x;
     xf.matrix[13] = y;
     xf.matrix[14] = z;
@@ -220,13 +223,10 @@ bool SegmentClearOfWalls(const Pathfinding::GridMap& grid, float32 startX, float
 // hit this query. Write local Transform and WorldTransform together —
 // TransformHierarchySystem rebuilds world from local on topology changes.
 //
-// The agent query declares Write<WorldTransform>, and columns are stamped
-// at visit rather than on assignment (Query.h), so every visited agent chunk has
-// its WorldTransform column stamped every frame even when no agent moves. That
-// defeats Changed<WorldTransform> gates on those chunks, and HLODSelectSystem
-// probes that column with an unscoped one-component query — an authored agent in
-// a scene with baked HLOD clusters would re-run its per-member staleness scan
-// every frame. Narrow the visit once a skip path exists that still writes both.
+// Only WriteAgentTranslation grants Transform and WorldTransform, so an agent
+// that does not move leaves Changed<WorldTransform> gates quiet — among them
+// HLODSelectSystem's probe, which would otherwise re-run its per-member
+// staleness scan every frame in a scene with baked HLOD clusters.
 void NavigationMovementSystem::Update(ECS::World& world, float32 deltaTime)
 {
     auto* navWorld = NavigationService::TryGet();
@@ -254,17 +254,18 @@ void NavigationMovementSystem::Update(ECS::World& world, float32 deltaTime)
     // Manage crowd agent lifecycle for navmesh-based agents
     if (crowd.IsInitialized())
     {
-        world.Query<ECS::Write<Components::NavigationAgent>,
+        world.Query<ECS::Read<Components::NavigationAgent>,
                     ECS::Write<Components::NavigationAgentState>,
                     ECS::Read<Components::WorldTransform>>().Each(
-            [&](ECS::EntityHandle /*e*/, Components::NavigationAgent& agent,
-                Components::NavigationAgentState& state,
+            [&](ECS::EntityHandle /*e*/, const Components::NavigationAgent& agent,
+                ECS::Writable<Components::NavigationAgentState> stateRow,
                 const Components::WorldTransform& wt)
             {
                 Pathfinding::NavMapHandle mapHandle{agent.NavMapIndex, agent.NavMapGeneration};
                 bool isNavMeshAgent = (navWorld->GetDetourNavMap(mapHandle) != nullptr);
                 if (!isNavMeshAgent)
                     return;
+                Components::NavigationAgentState& state = stateRow.Mutable();
 
                 // The crowd steers toward the destination. PathDirty stays set:
                 // it is the request NavigationPathfindingSystem serves, and one
@@ -310,21 +311,24 @@ void NavigationMovementSystem::Update(ECS::World& world, float32 deltaTime)
     }
 
     // Move agents along their paths
-    world.Query<ECS::Write<Components::NavigationAgent>,
+    world.Query<ECS::Read<Components::NavigationAgent>,
                 ECS::Write<Components::NavigationAgentState>,
                 ECS::Write<Components::Transform>,
                 ECS::Write<Components::WorldTransform>>().Each(
-        [&](ECS::EntityHandle e, Components::NavigationAgent& agent,
-            Components::NavigationAgentState& state,
-            Components::Transform& xf,
-            Components::WorldTransform& wt)
+        [&](ECS::EntityHandle e, const Components::NavigationAgent& agent,
+            ECS::Writable<Components::NavigationAgentState> stateRow,
+            ECS::Writable<Components::Transform> xf,
+            ECS::Writable<Components::WorldTransform> wt)
         {
+            // Most visits update the agent state; the transforms are written
+            // only through WriteAgentTranslation.
+            Components::NavigationAgentState& state = stateRow.Mutable();
             // Halt / arrival: drop the lookahead corridor but keep a body
             // stamp on the cell the agent is standing in so others cannot
             // walk through idle units.
             if (!state.HasDestination)
             {
-                ReserveStandingCell(agent, state, *navWorld, wt.matrix[12], wt.matrix[14],
+                ReserveStandingCell(agent, state, *navWorld, wt->matrix[12], wt->matrix[14],
                                     m_AccumulatedTime);
                 return;
             }
@@ -356,7 +360,7 @@ void NavigationMovementSystem::Update(ECS::World& world, float32 deltaTime)
                 state.VelocityY = 0.0f;
                 state.VelocityZ = 0.0f;
                 if (status == Pathfinding::PathStatus::Failed)
-                    ReserveStandingCell(agent, state, *navWorld, wt.matrix[12], wt.matrix[14],
+                    ReserveStandingCell(agent, state, *navWorld, wt->matrix[12], wt->matrix[14],
                                         m_AccumulatedTime);
                 return;
             }
@@ -382,7 +386,7 @@ void NavigationMovementSystem::Update(ECS::World& world, float32 deltaTime)
             if (proxyGridMap)
             {
                 startFootprint.Valid = proxyGridMap->WorldToCell(
-                    wt.matrix[12], wt.matrix[14], startFootprint.X, startFootprint.Z);
+                    wt->matrix[12], wt->matrix[14], startFootprint.X, startFootprint.Z);
                 startFootprint.Radius = proxyGridMap->FootprintRadiusInCells(agent.Radius);
             }
             if (proxyGridMap && !state.PathDirty)
@@ -413,8 +417,8 @@ void NavigationMovementSystem::Update(ECS::World& world, float32 deltaTime)
                 const float32 sweepRadius =
                     proxyGridMap->GetSettings().Type == Pathfinding::GridType::Square ? agent.Radius : 0.0f;
 
-                float32 rayStartX = wt.matrix[12];
-                float32 rayStartZ = wt.matrix[14];
+                float32 rayStartX = wt->matrix[12];
+                float32 rayStartZ = wt->matrix[14];
                 for (uint32 pi = state.CurrentPathPointIndex; pi < checkEnd && !state.PathDirty; ++pi)
                 {
                     Pathfinding::PathPoint pt = pathBuffer.GetPoint(proxyPath, pi);
@@ -471,9 +475,9 @@ void NavigationMovementSystem::Update(ECS::World& world, float32 deltaTime)
                 }
             }
 
-            float32 posX = wt.matrix[12];
-            float32 posY = wt.matrix[13];
-            float32 posZ = wt.matrix[14];
+            float32 posX = wt->matrix[12];
+            float32 posY = wt->matrix[13];
+            float32 posZ = wt->matrix[14];
 
             float32 dirX = state.CurrentWaypointX - posX;
             float32 dirY = state.CurrentWaypointY - posY;

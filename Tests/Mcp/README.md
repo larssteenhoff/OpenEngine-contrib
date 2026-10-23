@@ -15,10 +15,11 @@ could not run.
 | `ipc-method-drift.mjs` | `EditorIpcMethodDrift` | A `RegisterHandler()` in `Apps/Editor/Source/DebugServer` that is neither exposed as a tool in `mcp/src/tools` nor listed in `mcp/ipc-method-coverage.json` with a reason for staying raw-only. Also catches stale and redundant entries in that list. |
 | `mcp-editor-endpoint-check.mjs` | `McpEditorEndpointReport` | An answer that does not name which editor produced it. Several editors run at once, so a call that lands on the wrong one returns plausible data; every answer, including a refusal, must report the endpoint taken from the live socket. |
 | `rgp-capture-check.mjs` | `McpRgpCaptureGate` | The Radeon GPU Profiler flow attempting a capture on non-AMD hardware, refusing without naming what it found, or reporting a stale `.rgp` file as a fresh capture. |
+| `tool-gate-check.mjs` | `McpToolGate` | `build_engine`, `run_tests`, `launch_editor` or `editor_full_cycle` starting when the command named by `GE_MCP_TOOL_GATE` exits non-zero, refusing without naming the gate and echoing its output, or refusing when the gate exits 0 or is unset. |
 
 `ipc-method-drift.mjs` also runs in CI before anything is built, and takes
 `--list` to print every debug-server method with how it is reached.
 
-The two harness gates spawn the CLI through `mcp/ge.mjs`, which rebuilds
+The harness gates spawn the CLI through `mcp/ge.mjs`, which rebuilds
 `mcp/dist` when it is stale — that first build is why their ctest timeout is
 generous.

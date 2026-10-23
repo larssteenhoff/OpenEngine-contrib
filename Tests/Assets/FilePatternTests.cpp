@@ -353,8 +353,7 @@ TEST(FileWatchingService, RecursiveParentConsolidatesExistingDescendantWatchers)
 // Destroying the handle is what lets a subscriber free what its callback uses,
 // so unsubscribing must not return while that callback runs on the watcher
 // thread, and nothing may call it afterwards. The second subscription shares
-// the watcher and keeps it alive: removing the last one joins the watcher
-// thread, which would wait for the callback by accident rather than by contract.
+// the watcher, so its events show the watcher still delivers afterwards.
 TEST(FileWatchingService, UnsubscribeWaitsForTheRunningCallback)
 {
     namespace fs = std::filesystem;
@@ -362,7 +361,7 @@ TEST(FileWatchingService, UnsubscribeWaitsForTheRunningCallback)
     FileWatchingService& service = FileWatchingService::GetInstance();
     service.StopWatching();
 
-    const fs::path root = fs::temp_directory_path() / "ge_filewatcher_unsubscribe_waits";
+    const fs::path root = TestUtils::MakeUniqueTempDirectory("ge_filewatcher_unsubscribe_waits");
     std::error_code ec;
     fs::create_directories(root, ec);
 
@@ -440,7 +439,7 @@ TEST(FileWatchingService, CallbackCanUnsubscribeItself)
     FileWatchingService& service = FileWatchingService::GetInstance();
     service.StopWatching();
 
-    const fs::path root = fs::temp_directory_path() / "ge_filewatcher_self_unsubscribe";
+    const fs::path root = TestUtils::MakeUniqueTempDirectory("ge_filewatcher_self_unsubscribe");
     std::error_code ec;
     fs::create_directories(root, ec);
 
@@ -488,7 +487,7 @@ TEST(FileWatchingService, CallbackCanRemoveTheLastSubscriptionOnItsWatcher)
 
     const auto before = service.GetStats();
 
-    const fs::path root = fs::temp_directory_path() / "ge_filewatcher_self_remove_last";
+    const fs::path root = TestUtils::MakeUniqueTempDirectory("ge_filewatcher_self_remove_last");
     std::error_code ec;
     fs::create_directories(root, ec);
 
@@ -524,3 +523,76 @@ TEST(FileWatchingService, CallbackCanRemoveTheLastSubscriptionOnItsWatcher)
     fs::remove_all(root, ec);
 }
 
+// Unsubscribe waits only for its own subscription's calls. The other
+// subscription on the watcher drops its own handle inside its callback and
+// keeps running, so unsubscribing the remaining one empties the watcher.
+// Joining the watcher thread there would wait for the other subscription's
+// callback; the emptied watcher is parked instead and StopWatching joins it.
+TEST(FileWatchingService, UnsubscribeDoesNotWaitForAnotherSubscriptionsCallback)
+{
+    namespace fs = std::filesystem;
+
+    FileWatchingService& service = FileWatchingService::GetInstance();
+    service.StopWatching();
+
+    const auto before = service.GetStats();
+
+    const fs::path root = TestUtils::MakeUniqueTempDirectory("ge_filewatcher_unsubscribe_other_running");
+    std::error_code ec;
+    fs::create_directories(root, ec);
+
+    std::promise<void> entered;
+    std::future<void> enteredFuture = entered.get_future();
+    std::promise<void> gate;
+    const std::shared_future<void> gateOpen = gate.get_future().share();
+    std::atomic<int> runningCalls{0};
+
+    std::optional<FileWatchSubscription> remaining;
+    remaining.emplace(service.Subscribe(FilePattern(root, ".*", {".txt"}, true), [](const FileChangeEvent&) {}));
+    std::optional<FileWatchSubscription> running;
+    running.emplace(service.Subscribe(
+        FilePattern(root, ".*", {".txt"}, true),
+        [&](const FileChangeEvent&) {
+            if (runningCalls.fetch_add(1) != 0)
+                return;
+            running.reset();
+            entered.set_value();
+            gateOpen.wait();
+        }));
+    ASSERT_EQ(service.GetStats().TotalDirectories, before.TotalDirectories + 1)
+        << "both subscriptions must share one watcher";
+
+    ASSERT_TRUE(service.StartWatching());
+    if (!RewriteUntil(root / "probe.txt", [&enteredFuture] {
+            return enteredFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+        }))
+    {
+        gate.set_value();
+        service.StopWatching();
+        FAIL() << "no event reached the subscription, so no callback was running";
+    }
+
+    std::promise<void> unsubscribed;
+    std::future<void> unsubscribedFuture = unsubscribed.get_future();
+    std::thread unsubscriber([&] {
+        remaining.reset();
+        unsubscribed.set_value();
+    });
+
+    const bool returnedWhileOtherRuns =
+        unsubscribedFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    gate.set_value();
+    if (unsubscribedFuture.wait_for(kEventDeadline) != std::future_status::ready)
+        AbortOnDeadlock("Unsubscribe did not return after the other subscription's callback returned");
+    unsubscriber.join();
+
+    EXPECT_TRUE(returnedWhileOtherRuns) << "Unsubscribe waited for another subscription's running callback";
+    EXPECT_EQ(service.GetStats().TotalDirectories, before.TotalDirectories)
+        << "the emptied watcher is still registered";
+
+    // Joins the parked watcher.
+    service.StopWatching();
+    EXPECT_EQ(runningCalls.load(), 1);
+
+    fs::remove_all(root, ec);
+}

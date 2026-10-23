@@ -3,11 +3,13 @@
 // EditorComponentTraits — data-level editor behavior for a component type,
 // registered by the component's owning editor code or package module. Each
 // field is a per-component hook the editor consults without naming the
-// component: the inspector display name, icon, category and tooltip, whether it has
-// a section of its own, the hierarchy row class, pick-root and gizmo-pivot
-// behavior, whether the section leads the inspector, which sections it hosts,
-// what switching the component off means, and the undo record for what a
-// generic edit makes the component's system overwrite on other entities.
+// component: the inspector section's title, icon, tooltip, order and removal,
+// the default inspector's field labels, the Add Component category, whether it
+// has a section of its own, the hierarchy row class, pick-root and gizmo-pivot
+// behavior, whether the section leads the inspector, which sections it hosts
+// and the effect stack a volume owns, what switching the component off means,
+// and the undo record for what a generic edit makes the component's system
+// overwrite on other entities.
 //
 // Lives in EditorSDK.dll so Editor.exe and editor-kind package modules share
 // one registry instance. Registration is replace-by-typeId (module hot-reload
@@ -16,9 +18,12 @@
 
 #include "ECS/ECS.h"
 #include "ECS/ModuleRegistration.h"
+#include "Editor/Entities/DefaultInspectorPresentation.h"
 
+#include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -37,13 +42,23 @@ class UndoRedoService;
 // EditorComponentTraits::BeforeGenericEdit). `label` names that step.
 using GenericEditUndoRecorder = std::function<void(UndoRedoService& undo, const std::string& label)>;
 
+// Inspector section order for a component that registers no SortKey: after
+// every component that does.
+inline constexpr int kDefaultInspectorSortKey = 1000;
+// Inspector section order that leads the entity's sections, above Transform:
+// for a component that is the one thing an author edits on an entity whose
+// other sections are generated (a fence's span piece).
+inline constexpr int kLeadingInspectorSortKey = -1;
+
 struct EditorComponentTraits
 {
-    // Inspector section title (empty = fall back to the built-in name table /
-    // reflected type name).
+    // Inspector section title (empty = the reflected type name).
     std::string DisplayName;
     // CSS class for the inspector section icon (empty = built-in chain).
     std::string InspectorIconClass;
+    // Per-entity icon class for a component whose icon follows its state (a
+    // light's type); empty result = InspectorIconClass.
+    std::function<std::string(const ECS::World&, ECS::EntityHandle)> InspectorIconClassForEntity;
     // Add Component menu category the component is listed under (empty = the
     // built-in category table).
     std::string InspectorCategory;
@@ -52,6 +67,30 @@ struct EditorComponentTraits
     // The component gets no inspector section of its own: another component's
     // inspector shows what an author needs of it.
     bool HideInInspector = false;
+    // Add Component picker category (empty = "Component").
+    std::string Category;
+    // Inspector section order: lower sorts first. Built-in bands: entity core
+    // below 30, renderers and animation 30-39, physics 40-49, the terrain
+    // modifier stack 50-119, camera, lights and probes from 120.
+    int SortKey = kDefaultInspectorSortKey;
+    // Optional section order override; unset preserves the built-in ordering.
+    std::optional<int> InspectorSortOrder;
+    // Inspector section header tooltip (empty = none).
+    std::string Tooltip;
+    // The component renders no inspector section and is not offered in the Add
+    // Component picker: bookkeeping state the author never edits directly.
+    bool HiddenInInspector = false;
+    // The section header offers Remove. False for a component every entity
+    // keeps, and for a section that stands for no component of its own.
+    bool Removable = true;
+    // The section starts collapsed until the author expands it.
+    bool CollapsedByDefault = false;
+    // What the component's copied values mean, appended in parentheses to the
+    // header's Copy and Paste items (empty = nothing to add).
+    std::string ClipboardValuesNote;
+    // Field labels and presets for the default inspector (empty = the
+    // reflected field names and plain rows).
+    DefaultInspectorPresentation FieldPresentation;
     // CSS class added to the entity's hierarchy row when the component is
     // present (empty = no contribution).
     std::string HierarchyRowClass;
@@ -69,10 +108,13 @@ struct EditorComponentTraits
     // owns its effects: true for each component type that is an entry of that
     // stack. On an entity with this component, an entry's inspector section
     // renders inside this component's section and drag-reorders among the other
-    // entries there. Register refuses traits that claim a component type,
-    // registered before them, that another host already claims; a type
-    // registered after two hosts that claim it is not refused (#2216). Unset =
-    // the section hosts no other sections.
+    // entries there; an entry is added only through the host's own picker,
+    // never the Add Component picker. Register refuses traits that claim a
+    // component type, registered before them, that another host already
+    // claims; a type registered after two hosts that claim it is not refused
+    // (#2216). The claim runs outside the traits map's lock, but inside Register's
+    // lock, so a claim must not register traits. Unset = the section hosts no
+    // other sections.
     std::function<bool(ECS::ComponentTypeId)> HostsInspectorSection;
     // CSS class added to the body of each section this one hosts (empty = none).
     std::string HostedSectionBodyClass;
@@ -85,6 +127,25 @@ struct EditorComponentTraits
     // badge's and the header's tooltip.
     std::string MissingHostBadge;
     std::string MissingHostWarning;
+    // The effect components this volume component owns as a stack (a Post
+    // Process Volume's post-process effects, a Terrain Modifier Volume's terrain
+    // effects). An owned effect's section nests inside the volume's section and
+    // reorders among its siblings there; the effect is added only through the
+    // volume's own picker, never the Add Component picker. Unset = the
+    // component owns no stack. Evaluated outside the registry's lock.
+    std::function<bool(ECS::ComponentTypeId effectTypeId)> OwnsStackEffect;
+    // Header warning on an owned effect whose entity has no such volume.
+    std::string OrphanStackEffectWarning;
+    // Removing this component removes the entries of its stack (the components
+    // HostsInspectorSection or OwnsStackEffect claims) with it, once the author
+    // confirms.
+    bool RemovingRemovesStackEffects = false;
+    // Writes an entry's position in this component's stack (0 = first) into the
+    // entry when the author reorders its section. False when the entity does
+    // not carry `effectTypeId` or the entry keeps no order; such a section
+    // takes no stack position.
+    std::function<bool(ECS::World&, ECS::EntityHandle, ECS::ComponentTypeId effectTypeId, int32_t order)>
+        SetStackEffectOrder;
     // The section header's enable dot tooltip for this type, replacing the generic
     // one: what the dot switches, then what off does, as in "Switch this component on
     // or off. Off stops its sound." (ComponentEnabledToggleTooltip). Empty = the
@@ -125,6 +186,22 @@ public:
     // lookup per type under one lock, copying the name alone (EntityDisplayName's fallback).
     std::string UntitledNameOf(const std::vector<ECS::ComponentTypeId>& types) const;
 
+    // HiddenInInspector without copying the traits: the inspector polls it for
+    // every component of the selected entity.
+    bool IsHiddenInInspector(ECS::ComponentTypeId typeId) const;
+
+    // Presence scans. Each returns only the types that set the trait, so a
+    // per-row or per-node scan does not copy every registered component.
+    std::vector<std::pair<ECS::ComponentTypeId, std::string>> HierarchyRowClasses() const;
+    std::vector<ECS::ComponentTypeId> PickInstanceRootTypes() const;
+    std::vector<ECS::ComponentTypeId> GizmoPivotAtEntityOriginTypes() const;
+    // Every registered BeforeGenericEdit; the caller runs them outside the
+    // registry's lock.
+    std::vector<std::function<GenericEditUndoRecorder(ECS::World&)>> BeforeGenericEditHooks() const;
+
+    // The component whose DisplayName is `displayName`, or 0 when none is.
+    ECS::ComponentTypeId FindByDisplayName(std::string_view displayName) const;
+
     // The component whose traits host `hostedTypeId`'s inspector section (see
     // EditorComponentTraits::HostsInspectorSection), with its traits; false when
     // no registered component hosts it. Register keeps the host unique for a
@@ -133,9 +210,9 @@ public:
     bool TryGetSectionHost(ECS::ComponentTypeId hostedTypeId, ECS::ComponentTypeId& outHostTypeId,
                            EditorComponentTraits& outHostTraits) const;
 
-    // Snapshot of (typeId, traits) pairs for presence scans (hierarchy row
-    // classes, pick roots). Small: one entry per plugin-owned component.
-    std::vector<std::pair<ECS::ComponentTypeId, EditorComponentTraits>> Snapshot() const;
+    // The volume component whose OwnsStackEffect claims `effectTypeId`, or 0
+    // when it is no stack effect.
+    ECS::ComponentTypeId FindStackEffectOwner(ECS::ComponentTypeId effectTypeId) const;
 
     // C12 editor-kind unload refusal diagnostics: append a description of
     // every entry attributed to `moduleId` (the traits' accessor callables are

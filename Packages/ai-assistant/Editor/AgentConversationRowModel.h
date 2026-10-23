@@ -61,6 +61,8 @@ struct AgentConversationRowModel
     std::vector<std::string> ReplyActions;
     /// On a user message: the mark-ups its tokens name, one chip each, in order.
     std::vector<MarkupChip> MarkupChips;
+    /// On a user message: the names of the files sent with it, shown after its mark-up chips.
+    std::vector<std::string> FileChips;
     /// The reply failed: the status reads as an error, and the row offers Retry (its
     /// prompt sent again as a new turn) where a finished reply offers its actions.
     bool Failed = false;

@@ -137,10 +137,19 @@ class CpuDrawStreamBuilder
         uint32_t Instance;
     };
 
+    struct KeyedList
+    {
+        uint64_t Key;
+        InstanceList List;
+    };
+
+    // Index[set] holds one entry per batch in ascending Key order (EmitLists
+    // walks the sorted entries), so a lookup is a binary search and a rebuild
+    // refills vectors whose capacity survives the frame.
     struct ViewLists
     {
         std::vector<uint32_t> Indices;
-        std::unordered_map<uint64_t, InstanceList> Index[2];
+        std::vector<KeyedList> Index[2];
     };
 
     // What one cull range reads; defined in the .cpp.

@@ -1,5 +1,6 @@
-// CSS value/keyword parsers and declaration expansion. Split out of
-// CSSParser.cpp (P4f); cold parse-time code, not on the per-frame cascade path.
+// CSS value/keyword parsers and declaration expansion. Parse-time code; the
+// cascade reaches it only through AppendDeclarationProperties when a var()
+// declaration misses the deferred-declaration memo.
 
 #include "UI/Parsers/CSSParser.h"
 #include "CSSParserDetail.h"

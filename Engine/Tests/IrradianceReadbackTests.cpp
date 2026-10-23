@@ -31,8 +31,11 @@
 #include "Rendering/Sky/SkySystem.h"
 #include "TestDeviceHelper.h"
 #include "Types/ColorUtils.h"
+#include "../Modules/Rendering/Source/Vulkan/TextureUsagePolicy.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <numbers>
@@ -346,4 +349,41 @@ TEST_F(IrradianceReadbackTest, AReflectionProbeCopiesTheRestingCubeOnce)
     EXPECT_TRUE(declaresCopy(0)) << "a readback that arrives between bakes must get a reading";
     for (uint64_t i = 1; i < 4; ++i)
         EXPECT_FALSE(declaresCopy(i)) << "frame " << i << ": the resting cube is copied once";
+}
+
+namespace
+{
+// The texture usage audit resolves once per process, so the variable is set before this fixture
+// creates its device. A suite that resolved it earlier, off, skips the test below.
+class IrradianceReadbackAuditTest : public IrradianceReadbackTest
+{
+  protected:
+    void SetUp() override
+    {
+#ifdef _WIN32
+        _putenv_s("GE_TEXTURE_USAGE_AUDIT", "1");
+#else
+        setenv("GE_TEXTURE_USAGE_AUDIT", "1", 1);
+#endif
+        IrradianceReadbackTest::SetUp();
+    }
+};
+} // namespace
+
+// The readback copies out of the irradiance cube, so the cube declares itself a copy source: a
+// backend that validates transfer usage strictly (WebGPU) rejects the copy otherwise.
+TEST_F(IrradianceReadbackAuditTest, TheCopyReadsACubeDeclaredAsACopySource)
+{
+    if (!TextureUsagePolicy::IsAuditEnabled())
+        GTEST_SKIP() << "the texture usage audit resolved off before GE_TEXTURE_USAGE_AUDIT=1 was set";
+    const TextureUsageSnapshot before = TextureUsagePolicy::Snapshot();
+
+    IrradianceReadbackFeature readback;
+    CopyRestingCube(readback, 0, 1);
+    float lux = -1.0f;
+    ASSERT_TRUE(readback.TryGetUpIrradianceLux(lux)) << "the copy ran";
+
+    const TextureUsageSnapshot after = TextureUsagePolicy::Snapshot();
+    EXPECT_GT(after.ObservedUses, before.ObservedUses) << "the audit saw the copy";
+    EXPECT_EQ(std::count(after.ViolationKeys.begin(), after.ViolationKeys.end(), "IBL_Irradiance#TransferSrc"), 0);
 }

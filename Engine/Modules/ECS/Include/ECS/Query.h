@@ -8,6 +8,7 @@
 #include "ECS/QueryAccessProbe.h"
 #include "ECS/QueryPolicy.h"
 #include "ECS/World.h"
+#include "ECS/Writable.h"
 #include "JobSystem/JobCounter.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include <array>
@@ -42,9 +43,13 @@ struct TypeTag
 // Access semantics (change-signaling design §4.3): read/write access per
 // component is the union of declared qualifiers (Read<T>/Write<T>) and
 // per-parameter constness inference (QueryAccessProbe.h). Declared and
-// inferred reads are INVOKED as const; visiting a chunk with write access
-// stamps its written columns (stamp-at-visit, §4.4) so Changed<>-filtered
-// consumers can skip clean chunks.
+// inferred reads are INVOKED as const. Write grants stamp the written column
+// of a chunk (§4.4) so Changed<>-filtered consumers can skip clean chunks:
+//  - Each and Parallel pass a Write<T> column as Writable<T> and stamp a
+//    chunk's column only when the callback wrote one of its rows (Mutable()
+//    or Set()), so a writer that changes few rows grants only their chunks;
+//  - every other write (pointer shapes, inferred writes of unqualified
+//    types) stamps each visited chunk before the callback.
 template <QualifiedComponent... Ts>
 class Query
 {
@@ -242,6 +247,14 @@ class Query
         }
     }
 
+    // Whether the query declares component C without Write<C>: Read<C>, or Optional<C>, which the
+    // callback receives as a pointer it reads through.
+    template <typename C>
+    static constexpr bool IsDeclaredRead()
+    {
+        return ((std::is_same_v<C, U<Ts>> && (IsRead<Ts>::value || IsOptional<Ts>::value)) || ...);
+    }
+
     // Resolve the filtered slots to this archetype's column indices.
     void ResolveChangedColumns(const std::array<int, sizeof...(Ts)>& colIdx,
                                std::array<int, kMaxChangedTypes>& outCols) const
@@ -257,8 +270,17 @@ class Query
             chunkIdx, std::span<const int>(changedCols.data(), m_ChangedSlotCount), m_ChangedGate);
     }
 
+    // Slots declared Write<T>: Each and Parallel pass them as Writable<T>.
+    static constexpr uint32_t WritableSlotMask()
+    {
+        uint32_t mask = 0u;
+        std::size_t slot = 0;
+        ((mask |= (IsWrite<Ts>::value ? (1u << slot) : 0u), ++slot), ...);
+        return mask;
+    }
+
     // Stamp-at-visit (design §4.4, C14): store the dispatch's version into
-    // each effective-write column of a visited chunk BEFORE the callback.
+    // each column in `writeMask` of a visited chunk BEFORE the callback.
     // Skipped (filtered / empty) chunks are never stamped.
     static void StampWriteColumns(ArchetypeTable& table, std::size_t chunkIdx,
                                   const std::array<int, sizeof...(Ts)>& colIdx,
@@ -284,6 +306,32 @@ class Query
         uint64_t StampVersion;
         bool HasGate;
     };
+
+    // Stamp-on-write: after the callback has run over every row of a chunk,
+    // store the dispatch's version into each Writable<T> column it wrote.
+    // The version was taken before any row was written, so it is newer than
+    // the entry sample of every consumer run that finished before this
+    // dispatch began.
+    static void StampWrittenColumns(ArchetypeTable& table, std::size_t chunkIdx,
+                                    const std::array<int, sizeof...(Ts)>& colIdx,
+                                    const std::array<bool, sizeof...(Ts)>& written,
+                                    uint64_t version)
+    {
+        for (std::size_t s = 0; s < sizeof...(Ts); ++s)
+        {
+            if (written[s])
+                table.StampColumnVersion(chunkIdx, static_cast<std::size_t>(colIdx[s]), version);
+        }
+    }
+
+    // A callback that takes a Write<T> slot as T& (or const T&) instead of
+    // Writable<T>: the reference shapes reject it with a message that names
+    // the fix.
+    template <typename F>
+    static constexpr bool kTakesWriteSlotAsReference =
+        WritableSlotMask() != 0u &&
+        (std::is_invocable_v<F, EntityHandle, Detail::RawRefArg<Ts>...> ||
+         std::is_invocable_v<F, Detail::RawRefArg<Ts>...>);
 
   public:
     explicit Query(World* w) : world(w) {}
@@ -341,6 +389,9 @@ class Query
     // (static_assert) — filtering un-queried types would force column
     // resolution the iteration loops never do. With<>-included types are not
     // supported as filter keys in v1 (no consumer needs it — minimal API).
+    // Each C must also be declared Read<C> (static_assert): the query's own
+    // writes stamp a column it writes, so a gate on that column would
+    // re-trigger itself on the query's next run.
     //
     // Consumer contract: entry-sample World::GetGlobalSystemVersion() BEFORE
     // iterating and write that sample back as the gate for the next run
@@ -354,6 +405,9 @@ class Query
         static_assert(((SlotOf<Cs>() >= 0) && ...),
                       "ECS Query: Changed<T> requires T to be one of the query's component "
                       "types (design Q2 -- un-queried types are never column-resolved)");
+        static_assert((IsDeclaredRead<Cs>() && ...),
+                      "ECS Query: Changed<T> requires T to be declared Read<T> or Optional<T>, not Write<T> -- the query's own writes "
+                      "stamp a column it writes, so a gate on that column re-triggers itself");
         m_ChangedSlots = {};
         std::size_t k = 0;
         ((m_ChangedSlots[k++] = SlotOf<Cs>()), ...);
@@ -490,6 +544,10 @@ void Query<Ts...>::Each(Func&& func)
     // dispatch precedence).
     constexpr bool kWantsEntity = std::is_invocable_v<F, EntityHandle, Detail::PlainRefArg<Ts>...>;
     constexpr bool kComponentOnly = std::is_invocable_v<F, Detail::PlainRefArg<Ts>...>;
+    static_assert(kWantsEntity || kComponentOnly || !kTakesWriteSlotAsReference<F>,
+                  "ECS Query::Each passes a Write<T> component as ECS::Writable<T>, not T& -- take "
+                  "Writable<T> by value (read with Get(), write with Mutable() or Set()), or "
+                  "declare Read<T> for a read");
     static_assert(kWantsEntity || kComponentOnly,
                   "Unsupported functor signature for Query::Each -- expected "
                   "(EntityHandle, components...) or (components...)");
@@ -498,6 +556,7 @@ void Query<Ts...>::Each(Func&& func)
         F, kWantsEntity ? Detail::CallShape::EntityRef : Detail::CallShape::PlainRef, Ts...>;
     constexpr uint32_t kReadMask = Probe::kReadMask;
     constexpr uint32_t kWriteMask = Probe::kWriteMask;
+    constexpr uint32_t kVisitStampMask = kWriteMask & ~WritableSlotMask();
 
     const uint64_t stampVersion = (kWriteMask != 0u) ? world->NextGlobalSystemVersion() : 0u;
     const uint32_t disabledOptionalMask = DisabledOptionalMask();
@@ -543,8 +602,8 @@ void Query<Ts...>::Each(Func&& func)
                 continue;
             if (m_HasChangedGate && !ChunkPassesGate(table, chunkIdx, changedCols))
                 continue;
-            if constexpr (kWriteMask != 0u)
-                StampWriteColumns(table, chunkIdx, colIdx, kWriteMask, stampVersion);
+            if constexpr (kVisitStampMask != 0u)
+                StampWriteColumns(table, chunkIdx, colIdx, kVisitStampMask, stampVersion);
 
             [&]<std::size_t... Is>(std::index_sequence<Is...>)
             {
@@ -553,6 +612,7 @@ void Query<Ts...>::Each(Func&& func)
                     (colIdx[Is] >= 0
                          ? chunk.template GetColumnByOffset<U<NthType<Is>>>(colOffsets[Is])
                          : static_cast<U<NthType<Is>>*>(nullptr))...);
+                [[maybe_unused]] std::array<bool, sizeof...(Ts)> written{};
 
                 // Per-slot argument with the effective (inferred) constness.
                 const auto argAt = [&]<std::size_t J>(std::integral_constant<std::size_t, J>,
@@ -567,6 +627,10 @@ void Query<Ts...>::Each(Func&& func)
                             return static_cast<const U<Q>*>(ptr ? &ptr[i] : nullptr);
                         else
                             return ptr ? &ptr[i] : nullptr;
+                    }
+                    else if constexpr (IsWrite<Q>::value)
+                    {
+                        return Writable<U<Q>>(&ptr[i], &written[J]);
                     }
                     else
                     {
@@ -588,6 +652,8 @@ void Query<Ts...>::Each(Func&& func)
                     for (uint32_t i = 0; i < chunkCount; ++i)
                         func(argAt(std::integral_constant<std::size_t, Is>{}, i)...);
                 }
+                if constexpr (WritableSlotMask() != 0u)
+                    StampWrittenColumns(table, chunkIdx, colIdx, written, stampVersion);
             }(std::make_index_sequence<sizeof...(Ts)>{});
         }
     }
@@ -699,7 +765,7 @@ void Query<Ts...>::BatchEach(Func&& func)
 // - Optional<T> components pass nullptr when the archetype lacks the column. Callbacks
 //   MUST check for null before dereferencing optional pointers.
 // - Callers must ensure no structural changes (entity create/destroy, add/remove component,
-//   CompactChunks, PruneEmptyArchetypes) run on the same World during iteration.
+//   CompactChunks) run on the same World during iteration.
 template <QualifiedComponent... Ts>
 template <typename Func>
 void Query<Ts...>::ParallelBatchEach(Func&& func, [[maybe_unused]] std::size_t minBatchSize)
@@ -883,6 +949,11 @@ void Query<Ts...>::Parallel(Func&& func, [[maybe_unused]] std::size_t minBatchSi
     using F = std::decay_t<Func>;
     // Parallel only supports callbacks that take EntityHandle as first arg.
     // For component-only callbacks (func(T&...)), use Each or ParallelBatchEach.
+    static_assert(std::is_invocable_v<F, EntityHandle, Detail::PlainRefArg<Ts>...> ||
+                      !kTakesWriteSlotAsReference<F>,
+                  "ECS Query::Parallel passes a Write<T> component as ECS::Writable<T>, not T& -- "
+                  "take Writable<T> by value (read with Get(), write with Mutable() or Set()), or "
+                  "declare Read<T> for a read");
     static_assert(std::is_invocable_v<F, EntityHandle, Detail::PlainRefArg<Ts>...>,
                   "Parallel callback must accept (EntityHandle, ...). "
                   "For component-only callbacks, use Each() or ParallelBatchEach().");
@@ -893,6 +964,7 @@ void Query<Ts...>::Parallel(Func&& func, [[maybe_unused]] std::size_t minBatchSi
     // dependent-context use as a reference.
     [[maybe_unused]] constexpr uint32_t kReadMask = Probe::kReadMask;
     constexpr uint32_t kWriteMask = Probe::kWriteMask;
+    constexpr uint32_t kVisitStampMask = kWriteMask & ~WritableSlotMask();
 
     const uint64_t stampVersion = (kWriteMask != 0u) ? world->NextGlobalSystemVersion() : 0u;
     const uint32_t disabledOptionalMask = DisabledOptionalMask();
@@ -996,8 +1068,8 @@ void Query<Ts...>::Parallel(Func&& func, [[maybe_unused]] std::size_t minBatchSi
                                              std::span<const int>(changedCols.data(), changedColCount),
                                              call->GateVersion))
                         continue;
-                    if constexpr (kWriteMask != 0u)
-                        StampWriteColumns(*tablePtr, ci, colIdx, kWriteMask, call->StampVersion);
+                    if constexpr (kVisitStampMask != 0u)
+                        StampWriteColumns(*tablePtr, ci, colIdx, kVisitStampMask, call->StampVersion);
 
                     const EntityHandle* entityPtr = chunk.GetEntityHandlesByOffset(ehOffset);
 
@@ -1007,6 +1079,8 @@ void Query<Ts...>::Parallel(Func&& func, [[maybe_unused]] std::size_t minBatchSi
                             (colIdx[Is] >= 0
                                  ? chunk.template GetColumnByOffset<U<NthType<Is>>>(colOffsets[Is])
                                  : static_cast<U<NthType<Is>>*>(nullptr))...);
+                        // Per chunk, so a task owns its chunks' flags and stamps.
+                        [[maybe_unused]] std::array<bool, sizeof...(Ts)> written{};
 
                         const auto argAt = [&]<std::size_t J>(
                                                std::integral_constant<std::size_t, J>,
@@ -1022,6 +1096,10 @@ void Query<Ts...>::Parallel(Func&& func, [[maybe_unused]] std::size_t minBatchSi
                                 else
                                     return ptr ? &ptr[i] : nullptr;
                             }
+                            else if constexpr (IsWrite<Q>::value)
+                            {
+                                return Writable<U<Q>>(&ptr[i], &written[J]);
+                            }
                             else
                             {
                                 if constexpr (kIsRead)
@@ -1033,6 +1111,8 @@ void Query<Ts...>::Parallel(Func&& func, [[maybe_unused]] std::size_t minBatchSi
 
                         for (uint32_t i = 0; i < chunkCount; ++i)
                             call->Fn(entityPtr[i], argAt(std::integral_constant<std::size_t, Is>{}, i)...);
+                        if constexpr (WritableSlotMask() != 0u)
+                            StampWrittenColumns(*tablePtr, ci, colIdx, written, call->StampVersion);
                     }(std::make_index_sequence<sizeof...(Ts)>{});
                 }
             };

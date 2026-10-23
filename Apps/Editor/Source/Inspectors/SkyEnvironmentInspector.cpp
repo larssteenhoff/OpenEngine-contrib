@@ -717,39 +717,27 @@ void RegisterSkyEnvironmentInspector()
                        FormatSkyInspectorFloat(rgb[1], 3) + ", " + FormatSkyInspectorFloat(rgb[2], 3) + ")";
             };
 
-            UIElement* row = InspectorUI::AddRow(parent);
-            Label* colorLabel = InspectorUI::AddLabel(row, label, tooltip);
-            if (colorLabel) colorLabel->AddClass("inspector-label-no-drag");
-            UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-            fieldContainer->Overrides()
-                .Set(Style::FlexDir, FlexDirection::Row)
-                .Set(Style::AlignItems, AlignItems::Center)
-                .Set(Style::Gap, StyleLength::Px(6.0f));
-
             uint32_t argb = 0xFFFFFFFFu;
             float unusedIntensity = 1.0f;
+            std::string valueText;
             if (auto* c = w->GetComponent<Components::SkyEnvironment>(e))
+            {
                 LinearRgbToPickerState(c->*member, argb, unusedIntensity);
+                valueText = formatRgb(c->*member);
+            }
 
-            auto swatch = std::make_unique<UIElement>();
-            UIElement* swatchRaw = swatch.get();
-            InspectorUI::StyleColorSwatch(swatchRaw, argb);
-            fieldContainer->AddChild(std::move(swatch));
-
-            auto rgbLabel = std::make_unique<Label>();
-            rgbLabel->AddClass("inspector-text");
-            if (auto* c = w->GetComponent<Components::SkyEnvironment>(e))
-                rgbLabel->SetText(formatRgb(c->*member));
-            rgbLabel->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-            Label* rgbLabelRaw = rgbLabel.get();
-            fieldContainer->AddChild(std::move(rgbLabel));
+            const InspectorUI::ColorSwatchRow colorRow =
+                InspectorUI::AddColorSwatchRow(parent, label, tooltip, argb, valueText);
+            Label* colorLabel = colorRow.Title;
+            UIElement* swatchRaw = colorRow.Swatch;
+            Label* rgbLabelRaw = colorRow.Value;
 
             auto updateUI = [swatchRaw, rgbLabelRaw, w, e, member, formatRgb]() {
                 auto* c = w->GetComponent<Components::SkyEnvironment>(e);
                 if (!c) return;
                 uint32_t a = 0; float inten = 1.0f;
                 LinearRgbToPickerState(c->*member, a, inten);
-                InspectorUI::StyleColorSwatch(swatchRaw, a);
+                InspectorUI::SetColorSwatchColor(swatchRaw, a);
                 rgbLabelRaw->SetText(formatRgb(c->*member));
             };
 

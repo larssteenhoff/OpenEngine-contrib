@@ -53,6 +53,7 @@ class SaveSceneChangesModal; // fwd (reused for layout switch prompt)
 class RenameLayoutModal;     // fwd (rename layout preset prompt)
 class UiReplayRunner; // fwd (automation)
 class Button; // fwd
+class AnimationWindowPanel; // fwd
 class AssetViewPanel; // fwd
 class AssetsPanel; // fwd
 class GraphPanel; // fwd
@@ -69,6 +70,7 @@ namespace Startup
 {
 struct EditorCommandLineArgs;
 } // namespace Startup
+class TileMapEditorIntegration;
 class UndoRedoService;
 class EditorChangeNotifications;
 class MarkupEditorBridge;
@@ -86,6 +88,8 @@ class PlayModeManager;
 class GameViewPointerLock;
 class RecipeControllers;
 class ScriptStatusIndicator;
+class SettingsStore;
+class SourceLocationOpener;
 class UniversalSearchController;
 class DiagnosticShortcuts;
 enum class PlayModeState : std::uint8_t;
@@ -110,13 +114,24 @@ struct SceneViewCameraPose;
 class EditorApplication : public Application
 {
     // Allow MCP debug handler registration to read internal editor state.
-    friend void RegisterDebugHandlers(EditorDebugServer& server,
-                                      EditorApplication& app,
-                                      Logger::RingBufferSink* ringBufferSink);
     friend void RegisterTerrainDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterTileMapDebugHandlers(EditorDebugServer& server, EditorApplication& app);
     friend void RegisterGpuToolingHandlers(EditorDebugServer& server, EditorApplication& app);
     friend bool ApplyMainSceneViewPose(EditorApplication& app, const SceneViewCameraPose& pose);
     friend void RegisterMarkupDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterUiAutomationDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterBuildDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterUndoDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterCaptureDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterSceneEntityDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterEditorStateDebugHandlers(EditorDebugServer& server,
+                                                 EditorApplication& app,
+                                                 Logger::RingBufferSink* ringBufferSink);
+    friend void RegisterSceneLifecycleDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterModelSpawnDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterRenderStatsDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterAssetDebugHandlers(EditorDebugServer& server, EditorApplication& app);
+    friend void RegisterMovieRecordDebugHandlers(EditorDebugServer& server, EditorApplication& app);
 
   public:
     enum class WindowRole : uint8_t
@@ -315,6 +330,131 @@ class EditorApplication : public Application
     // UI replay window resize hook: used by UiReplayRunner's windowResize event.
     bool ResizeUiReplayWindow(std::uint32_t windowIndex, std::uint32_t width, std::uint32_t height, std::string* outError);
 
+    // Initialize() phases, in call order. A bool result of false fails Initialize().
+    void InstallDebugLogSink();
+    void CreateEditorContext(const std::filesystem::path& projectAssetsRoot);
+    void MountEditorAssetSources(const std::filesystem::path& editorAssetsRoot);
+    void StartFileWatching();
+    bool ConfigureEditorInputActions();
+    void CreateHdrOutputController();
+    void CreateWindowDockingController();
+    void CreateColorPickerPresenter();
+    void CreateRuntimeInput();
+    // Null when the platform window cannot be created.
+    std::unique_ptr<EditorWindowContext> CreateMainWindow();
+    void BindMainWindowInput(EditorWindowContext* mainCtx);
+    // The main window's pre-routing key hook: true when the key was consumed.
+    bool HandleMainWindowKeyPre(EditorWindowContext* mainCtx, int key, int action, int mods);
+    void PreloadEditorUiAssets();
+    bool CreateMainRenderDevice(EditorWindowContext* mainCtx, const std::filesystem::path& startupSettingsRoot);
+    bool EnableEditorRenderingLoop(EditorWindowContext* mainCtx);
+    void PreloadPipelineShaderPackages(Engine::Renderer::RenderServices* rs);
+    void CreateMainViewControllers(EditorWindowContext* mainCtx);
+    void CreateThumbnailProvider();
+    void InstallNativeMenuBar();
+    void CreateMainUiManager(EditorWindowContext* main);
+    void LoadMainWindowLayoutAndStyle(EditorWindowContext* main);
+    void RegisterInspectorsAndApplySavedStyles(EditorWindowContext* main);
+    void MountMainWindowModals(EditorWindowContext* main);
+    void MountProjectFolderPicker(UIElement* rootEl);
+    // No --project on the command line: auto-load the last project, or show the picker.
+    void OpenLastProjectOrShowPicker(const ApplicationConfig& config);
+    bool IsShiftHeldAtLaunch();
+    void SeedPrimaryWorldScene();
+
+    // Initialize()'s docking model and panel wiring. Defined in EditorApplication.cpp.
+    struct TypedPanel;
+    struct StartupPanels;
+    std::vector<TypedPanel> BuildDockingModel(EditorWindowContext* main);
+    void BuildFallbackDocking(std::vector<TypedPanel>& typedPanels);
+    bool BuildDockingFromLayoutConfig(DockspaceElement* dockspaceForConfig, std::vector<TypedPanel>& typedPanels);
+    void AttachDockingModelConsumers();
+    void WireEditorPanels(EditorWindowContext* main, const std::vector<TypedPanel>& typedPanels);
+    void CreatePanelManager(const std::vector<TypedPanel>& typedPanels);
+    StartupPanels LocateStartupPanels(EditorWindowContext* main, EditorWindowContext* mainWindowCtx);
+    void RegisterPanelCommands(const StartupPanels& panels);
+    void CreateVersionControlService();
+    void WireSceneAndGameViewPanels(const StartupPanels& panels);
+    void WireUiDemoNativeDropdown(const StartupPanels& panels);
+    void WireInspectorPanel(const StartupPanels& panels);
+    void WireScriptEditorPanel(const StartupPanels& panels);
+    void WireErrorPanels(const StartupPanels& panels, const Editor::SourceLocationOpener& sourceOpener);
+    void WireGraphPanels(const StartupPanels& panels);
+    void WireMonitorsAndHierarchyUndo(const StartupPanels& panels);
+    void WireAnimationPanel(AnimationWindowPanel* panel, const StartupPanels& panels);
+    void WireAssetsAndInspectorPanels(const StartupPanels& panels, const Editor::SourceLocationOpener& sourceOpener);
+    void WireAssetOpenRouting(const StartupPanels& panels, const Editor::SourceLocationOpener& sourceOpener);
+    void OpenAssetWithEditorRouting(const std::filesystem::path& path,
+                                    const StartupPanels& panels,
+                                    const Editor::SourceLocationOpener& sourceOpener);
+    void WireLogPanel(const StartupPanels& panels, const Editor::SourceLocationOpener& sourceOpener);
+    void WireAssetsPanelEditActions(const StartupPanels& panels);
+    void WireHierarchySelection(const StartupPanels& panels);
+    void WireSceneViewSelection(const StartupPanels& panels);
+    // True when the layout's <dockspace id="dock"> was found and bound to the docking model.
+    bool BindMainDockspace(const StartupPanels& panels, EditorContext* editorCtx);
+    void WireBoundDockspace(DockspaceElement* dock,
+                            UIElement* rootEl,
+                            const StartupPanels& panels,
+                            EditorContext* editorCtx);
+    void WireAssetsPanelContext(const StartupPanels& panels,
+                                EditorContext* editorCtx,
+                                Editor::SettingsStore& cachedPrefs);
+    void WireSceneDocument(UIElement* rootEl, const StartupPanels& panels);
+    void WireHierarchyAndBookmarksContext(const StartupPanels& panels,
+                                          EditorContext* editorCtx,
+                                          Editor::SettingsStore& cachedPrefs);
+    void ConnectPanelsToEditorServices(const StartupPanels& panels, EditorContext* editorCtx);
+    void ConfigureAssetViewPanels(EditorWindowContext* main, EditorContext* editorCtx);
+    void WireSettingsPanelUiHooks(const StartupPanels& panels);
+    void DeferSettingsPanelInitialization(const StartupPanels& panels);
+    void EnsureTopToolbar(UIElement* rootEl);
+    // Logs the pre-toolbar sub-phase against tDockSub and restarts it.
+    void WireTopToolbar(UIElement* rootEl,
+                        EditorWindowContext* main,
+                        AssetsPanel* assetsPanel,
+                        Editor::SettingsStore& cachedPrefs,
+                        std::chrono::high_resolution_clock::time_point& tDockSub);
+    void CreateMovieRecorder(EditorWindowContext* main, AssetsPanel* assetsPanel);
+    void RegisterBuildSettingsPages(EditorWindowContext* main);
+    void ToggleFullscreenFromToolbar();
+    void PlayFromToolbar();
+    void WireTopToolbarButtons(UIElement* rootEl, EditorWindowContext* main);
+    void WireToolbarDragDrop(UIElement* rootEl, const StartupPanels& panels);
+    void ConnectPanelsWithoutDockspace(const StartupPanels& panels, EditorContext* editorCtx);
+    void CreateUniversalSearch(const StartupPanels& panels);
+    void StartDebugServer();
+    void RegisterReadbackCancelOnDeviceRebuild();
+
+    // Update() phases, in call order.
+    void ApplyPendingProjectFolderStyleRelayout();
+    void WireProjectServicesOnWorkspaceChange();
+    void PumpVersionControlStartup();
+    void TickDeferredStartupWork();
+    void SyncSceneDirtyStateAndWindowTitle();
+    void RefreshFooterStatus(float64 deltaTime);
+    void UpdateAssetViewPreviews(float64 deltaTime);
+    void PollPolyhavenDownloads();
+    void ApplyLoadedEditorCameraPose();
+    void PollSceneThumbnailCapture();
+    // True when --exit-after-frames has been reached and exit was requested.
+    bool ExitIfFrameLimitReached();
+    // False when the configured UI replay failed to start and exit was requested.
+    bool StartUiReplayIfConfigured();
+    void UpdateWorldAndSceneEditor(float64 deltaTime);
+    void RefreshScriptMenusAndToolbar();
+    void UpdateDebugPanels();
+    // False when a UI replay finished this frame and exit was requested.
+    bool UpdateWindowUis(float64 deltaTime);
+    void UpdateMountedSceneViewOverlays(EditorWindowContext* win, double uiDeltaTime);
+    void UpdateRuntimeInput(float64 deltaTime);
+    void TickPlayModeAndRecording(float64 deltaTime);
+    void RefreshInspectorAndAnimationPreviews();
+    void UpdateSceneViewCamerasAndShortcuts(float64 deltaTime);
+    void HandleEditorShortcutActions(Input::InputSystem* inputSystem,
+                                     SceneViewController* firstSceneController,
+                                     SceneViewController* activeInputSceneController);
+
     // Helper for debug/profiling hotkeys (F2): format a perf line similar to the SceneView overlay.
     std::string BuildPerfDumpLine() const;
 
@@ -330,6 +470,9 @@ class EditorApplication : public Application
 
     // Shared editor services (document-scoped for now).
     std::unique_ptr<Editor::UndoRedoService> m_UndoRedo;
+    // Tilemap authoring: owns the shared edit context and wires the panels and
+    // the Scene View paint tool that share it. Outlives any one panel rebuild.
+    std::unique_ptr<Editor::TileMapEditorIntegration> m_TileMapEditor;
     std::unique_ptr<Editor::EditorChangeNotifications> m_ChangeNotifications;
     std::unique_ptr<Editor::MarkupEditorBridge> m_MarkupBridge;
     std::unique_ptr<Editor::SceneEditorController> m_SceneEditor;
@@ -534,7 +677,6 @@ class EditorApplication : public Application
 
     // SettingsPanel wiring helpers
     void InitializeTreeAndListSettings(SettingsPanel* settingsPanel, AssetsPanel* assetsPanel, HierarchyPanel* hierarchyPanel);
-    void MigrateLegacySharedTreePreferences();
     void InitializeAssetsGridAndSmartFolderSettings(SettingsPanel* settingsPanel, AssetsPanel* assetsPanel);
     void InitializeInspectorSettings(SettingsPanel* settingsPanel);
     void ApplyInspectorToggleAlign(const std::string& value);
@@ -555,6 +697,9 @@ class EditorApplication : public Application
     void SetDockLayoutFromClone(const DockNode* src);
     void EnterPlayFullscreen();
     void ExitPlayFullscreen();
+    // Play mode ended, by any route: leave play fullscreen and show the toolbar
+    // toggle's Edit-mode meaning again (the play-fullscreen preference).
+    void EndPlayFullscreen();
     void RequestEnterPlayFullscreenAndPlay();
     bool CanEnterPlayFullscreen() const;
     void DeferToggleWindowFullscreen();
@@ -585,7 +730,6 @@ class EditorApplication : public Application
     std::filesystem::path m_StylePath;
 
     // Floating window behavior flags
-    bool m_FloatingFullCustomChrome = false; // borderless + custom toolbar (not enabled yet)
     bool m_FloatingShowInTaskbar = false;    // default off when owned
 
     // The window currently dispatching UI (set around UIManager::Render)
@@ -638,6 +782,32 @@ class EditorApplication : public Application
     RenderWindowFrameResult RenderWindowFrame(EditorWindowContext* ctx,
                                               Rendering::IDevice* dev,
                                               bool passiveUi);
+    // RenderWindowFrame after the world views are recorded: thumbnails, UI composite,
+    // terminal encode, capture readbacks, execute and present. Returns early when the
+    // frame is abandoned; result fields not filled by then keep their defaults.
+    void RecordAndPresentWindowFrameRG(EditorWindowContext* ctx,
+                                       Rendering::IDevice* dev,
+                                       bool passiveUi,
+                                       bool uiRootReady,
+                                       bool idleWorldForPicker,
+                                       RenderWindowFrameResult& result);
+    // Returns the milliseconds spent.
+    double TickWindowThumbnailsRG(EditorWindowContext* ctx, Rendering::RenderGraph::RGFrame& frame);
+    void AddTerminalEncodePass(EditorWindowContext* ctx,
+                               Rendering::IDevice* dev,
+                               Rendering::RenderGraph::RGFrame& frame,
+                               const Rendering::RenderGraph::RGTexture& finalLinear,
+                               const Rendering::RenderGraph::RGTexture& backbuffer,
+                               bool uiTargetEncoded);
+    void DeclareFrameReadbacksRG(EditorWindowContext* ctx,
+                                 Rendering::IDevice* dev,
+                                 Rendering::RenderGraph::RGFrame& frame,
+                                 const Rendering::RenderGraph::RGTexture& finalLinear,
+                                 const Rendering::RenderGraph::RGTexture& backbuffer,
+                                 UI::UITextureSpace compositeSpace,
+                                 bool uiReplayWantsComposite);
+    void AppendRgCsvSidecarRow(const RenderWindowFrameResult& result);
+    void LogEditorRgDiagnostics(EditorWindowContext* ctx, Rendering::RenderGraph::RGFrame& frame);
     void QueueUndockPanel(std::string panelId);
     void QueueNativeToolWindow(std::unique_ptr<EditorWindowContext> ctx);
 

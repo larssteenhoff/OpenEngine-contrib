@@ -30,6 +30,24 @@
 
 namespace JobSystem { class WorkStealingThreadPool; class TaskHandle; }
 
+namespace GameEngine::Components
+{
+struct Terrain;
+struct WorldTransform;
+} // namespace GameEngine::Components
+
+namespace GameEngine::Components
+{
+struct Terrain;
+struct WorldTransform;
+} // namespace GameEngine::Components
+
+namespace GameEngine::Components
+{
+struct Terrain;
+struct WorldTransform;
+} // namespace GameEngine::Components
+
 namespace GameEngine::TerrainECS
 {
 struct BakeStoreSnapshot;
@@ -627,6 +645,40 @@ public:
     static constexpr int32 kBakeBandRows = 32;
 
 private:
+    struct BakeFrame;
+    struct SingleTerrainBake;
+
+    // Update's phases, in the order it runs them.
+    void PrepareModifierFrame(ECS::World& world, TerrainService& terrainService);
+    void SettleDeferredSplatResplat(ECS::World& world, TerrainService& terrainService);
+    void TrackInteractiveDrag(bool interactiveDrag);
+    void HashModifierStack(ECS::World& world, TerrainService& terrainService, BakeFrame& frame);
+    // False when neither the modifier stack, the base inputs nor the streamed tiles changed.
+    bool DetectBakeWork(ECS::World& world, TerrainService& terrainService, BakeFrame& frame);
+    void DecideBakeScope(BakeFrame& frame);
+    void DiffAgainstLastBake(BakeFrame& frame);
+    bool ThrottlePreviewBake(BakeFrame& frame);
+    void BakeTerrain(ECS::World& world, ECS::EntityHandle entity,
+                     const Components::Terrain& terrain, const Components::WorldTransform& worldXf,
+                     TerrainService& terrainService, const BakeFrame& frame);
+    void BakeTiledTerrain(const Components::Terrain& terrain, float32 originY,
+                          TerrainService& terrainService, const BakeFrame& frame);
+    static void LogTiledBake(const std::vector<TileCoord>& bakedTiles, const BakeFrame& frame);
+    void BakeSingleTerrain(const Components::Terrain& terrain, float32 originX, float32 originY,
+                           float32 originZ, TerrainService& terrainService,
+                           const BakeFrame& frame);
+    void BakeSingleTerrainRegion(const Components::Terrain& terrain, SingleTerrainBake& bake,
+                                 TerrainService& terrainService, const BakeFrame& frame);
+    void RebakeSingleTerrainHeights(const Components::Terrain& terrain, SingleTerrainBake& bake,
+                                    TerrainService& terrainService);
+    void RebakeSingleTerrainSplat(const SingleTerrainBake& bake, const BakeFrame& frame);
+    void RegionSplatSingleTerrain(const SingleTerrainBake& bake, float32 minH, float32 maxH);
+    void FullSplatSingleTerrain(const SingleTerrainBake& bake);
+    void RecordAppliedBake(ECS::World& world, TerrainService& terrainService,
+                           const BakeFrame& frame);
+    void SettleDragBakeState(const BakeFrame& frame,
+                             std::chrono::steady_clock::time_point previewBakeStart);
+
     // Decoded stamp mask: R channel normalized to [0,1], row-major.
     struct DecodedStampMask
     {
@@ -930,8 +982,8 @@ private:
     // (Changed<> scans over modifier archetypes), a modifier was added or
     // removed (lifecycle events), the terrain-state hash moved, or a
     // structural fallback demands a full run (first gated run, lifecycle
-    // window gap > 1, World::Clear). Always true when gating is disabled
-    // (GE_TERRAIN_CHANGE_GATING=0 or GE_ECS_CHANGE_FILTER=0).
+    // window gap > 1, World::Clear). Always true when ECS change
+    // filtering is disabled (GE_ECS_CHANGE_FILTER=0).
     //
     // The scanned type set is folded out of ModifierRootComponents /
     // ModifierEffectComponents (TerrainModifierComponents.h) so it cannot drift
@@ -1170,8 +1222,7 @@ private:
     // so the release settle stays byte-identical to a fresh full bake of the final
     // position (settle diff = last-preview bounds ∪ final bounds). Payload edits
     // (brush strokes) are never coalesced (already sub-rect-scoped, and they need
-    // live feedback). Kill switch: GE_TERRAIN_MODIFIER_COALESCE=0 restores the
-    // per-frame bake.
+    // live feedback).
     //
     // The cadence adapts to the measured main-thread bake cost (kPreviewBudget-
     // Fraction): a cheap bake (small terrain, or a GPU-eval-skip preview that only

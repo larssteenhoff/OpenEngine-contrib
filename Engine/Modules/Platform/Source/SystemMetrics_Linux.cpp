@@ -1,6 +1,6 @@
 #include "Platform/SystemMetrics.h"
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if !defined(_WIN32) && (!defined(__APPLE__) || defined(GE_PLATFORM_IOS))
 
 namespace GameEngine::Platform
 {

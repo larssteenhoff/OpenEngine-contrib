@@ -1,6 +1,7 @@
 #include "Thumbnails/ThumbnailService.h"
 
 #include "AssetCore/AssetTypes.h"
+#include "Types/Fnv1a.h"
 #include "Types/StringUtils.h"
 #include "Assets/AssetManager.h"
 #include "Assets/AssetPathKey.h"
@@ -12,6 +13,7 @@
 #include "Core/Engine.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Thumbnails/TextureThumbnailHandler.h"
+#include "Thumbnails/SpriteFramesThumbnailHandler.h"
 
 #include "Logger/Logger.h"
 #include "Rendering/Core/RenderGraph/RGFrame.h"
@@ -488,6 +490,10 @@ std::string ThumbnailService::GetOrRequest(const std::filesystem::path& assetPat
     std::filesystem::path normalizedStorage;
     const std::filesystem::path& path = NormalizedOrSelf(assetPath, normalizedStorage);
 
+    // Every ready callback leaves here bound to the UI thread, so a handler is
+    // free to finish on whatever thread it likes.
+    onReady = DeliverOnUiThread(std::move(onReady));
+
     const uint64_t generation = m_ProjectGeneration.load(std::memory_order_acquire);
     const uint64_t cacheKey = MakeResultCacheKey(path, desiredSize, StaticModelListThumbnail, generation);
     std::string cached;
@@ -525,18 +531,7 @@ uint64_t ThumbnailService::MakeResultCacheKey(const std::filesystem::path& asset
                                               bool staticModelListThumbnail,
                                               uint64_t generation) const
 {
-    constexpr uint64_t kOffsetBasis = 1469598103934665603ull;
-    constexpr uint64_t kPrime = 1099511628211ull;
-
-    auto fold = [](uint64_t hash, uint64_t value)
-    {
-        for (int byte = 0; byte < 8; ++byte)
-        {
-            hash ^= (value >> (byte * 8)) & 0xFFull;
-            hash *= kPrime;
-        }
-        return hash;
-    };
+    auto fold = [](uint64_t hash, uint64_t value) { return Hashing::Fnv1a64Value(hash, value); };
 
     // Hash the path's own code units rather than a generic_string() copy of
     // them. Separators are folded so a native backslash keys the same as the
@@ -546,7 +541,7 @@ uint64_t ThumbnailService::MakeResultCacheKey(const std::filesystem::path& asset
     // Dot components and doubled separators are the entry points' problem:
     // GetOrRequest and GetOrRequestBrowser normalize through
     // NormalizedOrSelf before this key is computed.
-    uint64_t hash = kOffsetBasis;
+    uint64_t hash = Hashing::kFnv1a64OffsetBasis;
     const std::filesystem::path& normalized = assetPath;
     for (const std::filesystem::path::value_type unit : normalized.native())
     {
@@ -895,8 +890,39 @@ bool ThumbnailService::IsEngineThumbnailReadyForWindow(uint64_t windowId,
     return false;
 }
 
+std::function<void(const std::string& relPath)> ThumbnailService::DeliverOnUiThread(
+    std::function<void(const std::string& relPath)> onReady)
+{
+    if (!onReady)
+        return {};
+    return [pending = std::weak_ptr<PendingReadyState>(m_PendingReady),
+            generation = m_ProjectGeneration.load(std::memory_order_acquire),
+            onReady = std::move(onReady)](const std::string& relPath) {
+        if (const auto state = pending.lock())
+        {
+            std::lock_guard<std::mutex> lock(state->Mutex);
+            state->Callbacks.push_back({generation, onReady, relPath});
+        }
+    };
+}
+
 void ThumbnailService::BeginFrame()
 {
+    // Deliver first, and outside every lock. A callback is UI code: it may request
+    // another thumbnail, which re-enters this service.
+    {
+        std::vector<PendingReadyCallback> ready;
+        {
+            std::lock_guard<std::mutex> lock(m_PendingReady->Mutex);
+            ready.swap(m_PendingReady->Callbacks);
+        }
+        for (auto& item : ready)
+        {
+            if (item.Callback && item.Generation == m_ProjectGeneration.load(std::memory_order_acquire))
+                item.Callback(item.Path);
+        }
+    }
+
     ProcessBrowserRequests();
     std::unique_lock<std::mutex> lock(m_Mutex, std::try_to_lock);
     if (!lock.owns_lock())
@@ -1005,3 +1031,49 @@ void ThumbnailService::ResumeBrowserThumbnails(uint64_t windowId, UIManager* ui)
 }
 
 } // namespace GameEngine
+
+namespace GameEngine
+{
+std::string ThumbnailService::GetOrRequestAtlasRegion(
+    const std::filesystem::path& texturePath, const std::array<float, 4>& uv,
+    std::function<void(const std::string& relPath)> onReady, const std::array<float, 2>& magentaKey)
+{
+    SpriteFramesThumbnailHandler* handler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        const auto it = m_Handlers.find(AssetType::SpriteFrames);
+        if (it != m_Handlers.end())
+            handler = dynamic_cast<SpriteFramesThumbnailHandler*>(it->second.get());
+    }
+    if (handler == nullptr)
+    {
+        if (onReady)
+            onReady(std::string());
+        return {};
+    }
+    return handler->GetOrRequestAtlasRegion(texturePath, uv,
+                                      DeliverOnUiThread(std::move(onReady)), magentaKey);
+}
+
+std::string ThumbnailService::GetOrRequestSpriteFrame(
+    const std::filesystem::path& spriteFramesPath, const std::string& animationName, bool flipX,
+    std::function<void(const std::string& relPath)> onReady)
+{
+    SpriteFramesThumbnailHandler* handler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        const auto it = m_Handlers.find(AssetType::SpriteFrames);
+        if (it != m_Handlers.end())
+            handler = dynamic_cast<SpriteFramesThumbnailHandler*>(it->second.get());
+    }
+    if (handler == nullptr)
+    {
+        if (onReady)
+            onReady(std::string());
+        return {};
+    }
+    return handler->GetOrRequestFrame(spriteFramesPath, animationName, flipX,
+                                      DeliverOnUiThread(std::move(onReady)));
+}
+
+}

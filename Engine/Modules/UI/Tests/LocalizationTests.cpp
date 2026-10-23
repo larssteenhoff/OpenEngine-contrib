@@ -1,0 +1,149 @@
+#include "UI/Controls/Label.h"
+#include "IsolatedUIFixture.h"
+#include <gtest/gtest.h>
+#include <sstream>
+
+using namespace GameEngine;
+
+TEST(LabelLocalizationTests, HiddenMenuWarmupResolvesNestedFontsWithoutShowingTheMenu)
+{
+    UITesting::IsolatedUIFixture fixture;
+    const bool built = fixture.Build(1.0f,
+        R"(<uielement id="root"><uielement id="menu"><uielement id="group"><label id="title">冒険</label></uielement></uielement></uielement>)",
+        R"(#root { width: 400px; height: 300px; }
+            #menu { display: none; font-family: Roboto; font-size: 18px; }
+            #group { font-size: 24px; }
+            .large { font-size: 32px; })");
+    if (!fixture.DeviceAvailable()) GTEST_SKIP() << fixture.Diagnostic();
+    ASSERT_TRUE(built) << fixture.Diagnostic();
+    auto* root = fixture.Element("root");
+    auto* title = fixture.Element("title");
+    ASSERT_NE(root, nullptr);
+    ASSERT_NE(title, nullptr);
+    // Callers can preload a nested screen directly while its parent stays hidden.
+    ASSERT_NE(fixture.Element("group"), nullptr);
+    EXPECT_EQ(fixture.Manager().PrepareTextSubtree(fixture.Element("group")),
+              UIManager::TextWarmupStatus::Ready);
+    EXPECT_EQ(fixture.Manager().PrepareTextSubtree(root), UIManager::TextWarmupStatus::Ready);
+    EXPECT_FLOAT_EQ(title->GetResolvedStyle().Visual.FontSize, 24.0f);
+    EXPECT_EQ(fixture.Element("menu")->GetResolvedStyle().Layout.DisplayMode, DisplayMode::None);
+
+    title->AddClass("large");
+    EXPECT_EQ(fixture.Manager().PrepareTextSubtree(root), UIManager::TextWarmupStatus::Ready);
+    EXPECT_FLOAT_EQ(title->GetResolvedStyle().Visual.FontSize, 32.0f);
+    EXPECT_EQ(fixture.Element("menu")->GetResolvedStyle().Layout.DisplayMode, DisplayMode::None);
+}
+
+TEST(LabelLocalizationTests, WarmupRejectsUnownedTrees)
+{
+    UIManager manager(nullptr);
+    UIElement detached;
+    EXPECT_EQ(manager.PrepareTextSubtree(nullptr), UIManager::TextWarmupStatus::Failed);
+    EXPECT_EQ(manager.PrepareTextSubtree(&detached), UIManager::TextWarmupStatus::Failed);
+}
+
+TEST(LabelLocalizationTests, SharedCatalogRefreshesLabelsAndPluralArguments)
+{
+    auto catalog = std::make_shared<Localization::LocalizationCatalog>();
+    std::istringstream input(R"({"en":{"play":"Play","coins":"{n, plural, one {# coin} other {# coins}}"},"nl":{"play":"Spelen","coins":"{n, plural, one {# munt} other {# munten}}"}})");
+    std::string error;
+    ASSERT_TRUE(catalog->Load(input, error)) << error;
+    UIManager manager(nullptr);
+    manager.SetLocalizationCatalog(catalog);
+    Label play;
+    Label coins;
+    play.SetOwnerManager(&manager);
+    coins.SetOwnerManager(&manager);
+    play.BindLocalization(HashStringId("play"), "Play");
+    coins.BindLocalization(HashStringId("coins"), "Coins", {{"n", int64_t{1}}});
+    EXPECT_EQ(play.GetText(), "Play");
+    EXPECT_EQ(coins.GetText(), "1 coin");
+    play.ClearDirty(UIElement::LayoutDirty | UIElement::VisualDirty);
+    ASSERT_TRUE(catalog->SetLocale("nl", error));
+    EXPECT_TRUE(play.IsDirty(UIElement::LayoutDirty));
+    EXPECT_EQ(play.GetText(), "Spelen");
+    EXPECT_EQ(coins.GetText(), "1 munt");
+    coins.SetLocalizationArguments({{"n", int64_t{2}}});
+    EXPECT_EQ(coins.GetText(), "2 munten");
+}
+
+TEST(LabelLocalizationTests, RebindingUnsubscribesAndDestructionIsSafe)
+{
+    auto first = std::make_shared<Localization::LocalizationCatalog>();
+    auto second = std::make_shared<Localization::LocalizationCatalog>();
+    std::string error;
+    std::istringstream a(R"({"en":{"play":"First"},"nl":{"play":"Eerste"}})");
+    std::istringstream b(R"({"en":{"play":"Second"}})");
+    ASSERT_TRUE(first->Load(a, error));
+    ASSERT_TRUE(second->Load(b, error));
+    {
+        UIManager manager(nullptr);
+        manager.SetLocalizationCatalog(first);
+        Label label;
+        label.SetOwnerManager(&manager);
+        label.BindLocalization( HashStringId("play"), "fallback");
+        manager.SetLocalizationCatalog(second);
+        ASSERT_TRUE(first->SetLocale("nl", error));
+        EXPECT_EQ(label.GetText(), "Second");
+        // Literal text replaces the binding, so a locale change leaves it alone.
+        label.SetText("Manual");
+        ASSERT_TRUE(second->SetLocale("nl", error));
+        EXPECT_EQ(label.GetText(), "Manual");
+        label.BindLocalization(HashStringId("missing"), "Visible fallback");
+        EXPECT_EQ(label.GetText(), "Visible fallback");
+        label.BindLocalization(HashStringId("play"), "fallback");
+        EXPECT_EQ(label.GetText(), "Second");
+        label.ClearLocalization();
+        manager.SetLocalizationCatalog(nullptr);
+        EXPECT_EQ(label.GetText(), "Second") << "a cleared binding still followed the catalog";
+    }
+    EXPECT_TRUE(second->SetLocale("en", error));
+}
+
+TEST(LabelLocalizationTests, AuthoredKeysUseSharedContextAndRestoreFallback)
+{
+    auto catalog = std::make_shared<Localization::LocalizationCatalog>();
+    std::istringstream input(R"({"en":{"play":"Play"},"nl":{"play":"Spelen"}})");
+    std::string error;
+    ASSERT_TRUE(catalog->Load(input, error));
+    UIManager manager(nullptr);
+    Label label;
+    label.SetOwnerManager(&manager);
+    static_cast<UIElement&>(label).OnAuthoredAttributesApplied({{"localization-key", "play"}, {"text", "Start"}});
+    manager.SetLocalizationCatalog(catalog);
+    EXPECT_EQ(label.GetText(), "Play");
+    ASSERT_TRUE(catalog->SetLocale("nl", error));
+    EXPECT_EQ(label.GetText(), "Spelen");
+    manager.SetLocalizationCatalog(nullptr);
+    EXPECT_EQ(label.GetText(), "Start");
+    manager.SetLocalizationCatalog(catalog);
+    static_cast<UIElement&>(label).OnAuthoredAttributesApplied({{"text", "Unbound"}});
+    EXPECT_EQ(label.GetText(), "Unbound");
+    ASSERT_TRUE(catalog->SetLocale("en", error));
+    EXPECT_EQ(label.GetText(), "Unbound");
+}
+
+TEST(LabelLocalizationTests, BindingBeforeOwnershipAndMovingBetweenManagers)
+{
+    auto catalog = std::make_shared<Localization::LocalizationCatalog>();
+    std::istringstream input(R"({"en":{"play":"Play"},"nl":{"play":"Spelen"}})");
+    std::string error;
+    ASSERT_TRUE(catalog->Load(input, error));
+    UIManager first(nullptr), second(nullptr);
+    first.SetLocalizationCatalog(catalog);
+    Label label;
+    label.BindLocalization(HashStringId("play"), "Start");
+    EXPECT_EQ(label.GetText(), "Start");
+    label.SetOwnerManager(&first);
+    EXPECT_EQ(label.GetText(), "Play");
+    label.SetOwnerManager(&second);
+    EXPECT_EQ(label.GetText(), "Start");
+    ASSERT_TRUE(catalog->SetLocale("nl", error));
+    EXPECT_EQ(label.GetText(), "Start");
+    second.SetLocalizationCatalog(catalog);
+    EXPECT_EQ(label.GetText(), "Spelen");
+    label.SetOwnerManager(nullptr);
+    EXPECT_EQ(label.GetText(), "Start");
+    ASSERT_TRUE(catalog->SetLocale("en", error));
+    EXPECT_EQ(label.GetText(), "Start");
+}

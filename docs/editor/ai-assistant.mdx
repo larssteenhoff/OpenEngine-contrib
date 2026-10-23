@@ -95,6 +95,17 @@ A path's block reads `kind="path" points="0,2,0 40,3,10 80,3,30" length="91.2"` 
 
 **Caps.** A block holds at most 8 KB. The shape and the members keep their room. The description is cut first, then the thread, and a last line says what was left out: `[not shown, the 8 KB block cap: the description's last 1200 bytes, 4 entries]`. A turn's context, unknown-token lines included, holds at most 32 KB. The mark-ups past that are counted on one line, `[3 more mark-ups not included: the 32 KB per-turn cap]`. To read more, the agent calls `markup_get`.
 
+## Files in a prompt
+
+The **+** at the left of the prompt picks files to send with the next prompt, up to 20. Files dragged onto the prompt, from your file browser or from the Assets panel, are added in the same way; a dragged folder is not. While you drag files from the Assets panel over the prompt, the **+** turns green; a drag that cannot be dropped shows a prohibited sign there instead. The picked files show in a strip above the prompt, an image with its thumbnail; the × on an item removes its file. A file is read in the background: its item is dimmed until the read finishes, and a prompt sent before then is not sent; the status line asks you to wait and send again. The files go with the prompt when you send it, and your row shows a chip per file under the prompt.
+
+| A file that is | Goes to the provider as |
+|---|---|
+| An image: PNG, JPEG, GIF or WebP (known by its first bytes, not its name), a file of at most 50 MB | An image the model sees. A file over 5 MB is scaled down to 1568 pixels on its longer edge (one of more than 64 megapixels is not added) and sent as a PNG, or as a JPEG when the PNG is still over 5 MB. Claude (API) and Claude (local session) send it in the message; Codex receives the file's path with `--image`. Only the prompt that carried it sends the image; later turns do not send it again. |
+| Text (UTF-8, no NUL byte) | A block after the prompt and its mark-ups: `<file name="notes.md" path="/project/notes.md">`, the text, `</file>`. A `</file` inside the text is sent as `&lt;/file`, so only the block's own end closes it. A file over 64 KB is cut on a character boundary and its block ends with `[the file continues; only its first 64 KB are shown]`. A turn's blocks hold at most 256 KB; the files past that are named on one line, `[files left out: the turn's files are over 256 KB: a.txt, b.txt]`. |
+
+Any other file, an empty file or a file that cannot be read is not added, and the status line names it and says why; the files of one pick or drop that are not added are named together. The file is read when you pick it: an edit after that is not sent.
+
 ## Local sessions: Claude Code and Codex
 
 A local session runs the command-line program you already use, under your own login, on this machine. For each prompt the editor starts the program in the project's folder, hands it the prompt, and shows the reply as the program reports it. The editor never stores, copies, or sends your login anywhere. The program runs with its own tools turned off (Claude Code) or in its read-only sandbox (Codex), so it cannot change your files itself. What it may do in the editor is the editor's decision, set by the mode control (see [Acting in the editor](#acting-in-the-editor)).

@@ -1,5 +1,6 @@
 #include "PhysicsECS/Systems/PhysicsInitSystem.h"
 
+#include "PhysicsECS/ContactSurfaceTable.h"
 #include "PhysicsECS/PhysicsWorldService.h"
 #include "PhysicsECS/Systems/PhysicsWorldHooks.h"
 
@@ -117,11 +118,11 @@ void PhysicsInitSystem::ReleaseDisabledBodies(ECS::World& world)
                              ECS::Optional<ECS::DisabledInHierarchy>,
                              ECS::Optional<ECS::ComponentDisabled<GameEngine::Components::PhysicsBody>>>();
         q.IncludeDisabled();
-        q.Each([](GameEngine::Components::PhysicsBody& body, const ECS::Disabled* disabled,
+        q.Each([](ECS::Writable<GameEngine::Components::PhysicsBody> body, const ECS::Disabled* disabled,
                   const ECS::DisabledInHierarchy* inactive,
                   const ECS::ComponentDisabled<GameEngine::Components::PhysicsBody>* bodyOff) {
-            if (HoldsBackendObjects(body) && (disabled || inactive || bodyOff))
-                ReleasePhysicsBody(body);
+            if (HoldsBackendObjects(body.Get()) && (disabled || inactive || bodyOff))
+                ReleasePhysicsBody(body.Mutable());
         });
         return;
     }
@@ -300,18 +301,20 @@ void PhysicsInitSystem::Update(ECS::World& world, float32 deltaTime)
                        const GameEngine::Components::Transform& local,
                        const GameEngine::Components::WorldTransform& wt,
                        const GameEngine::Components::PhysicsCollider& collider,
-                       GameEngine::Components::HeightFieldColliderShape& shape,
+                       ECS::Writable<GameEngine::Components::HeightFieldColliderShape> shapeRow,
                        const GameEngine::Components::PhysicsBody& body,
                        const GameEngine::Components::PhysicsColliderOwner* owner) {
-                HeightFieldData hfData = provider(shape.dataHandle, shape.dataGeneration, shape.lastBuiltVersion);
+                HeightFieldData hfData =
+                    provider(shapeRow->dataHandle, shapeRow->dataGeneration, shapeRow->lastBuiltVersion);
                 if (!hfData.samples || hfData.sampleCount < 4)
                     return;
 
                 // Skip if body is valid and data hasn't changed since last build.
                 const bool bodyBuilt = body.initialized && pw->IsBodyValid(body.body) && pw->IsShapeValid(body.shape);
-                if (bodyBuilt && shape.lastBuiltVersion == hfData.version)
+                if (bodyBuilt && shapeRow->lastBuiltVersion == hfData.version)
                     return;
 
+                GameEngine::Components::HeightFieldColliderShape& shape = shapeRow.Mutable();
                 const uint32 N = hfData.sampleCount;
 
                 if (bodyBuilt)
@@ -443,7 +446,8 @@ void PhysicsInitSystem::Update(ECS::World& world, float32 deltaTime)
         auto q = world.Query<ECS::Read<GameEngine::Components::WorldTransform>, ECS::Write<GameEngine::Components::PhysicsBody>>();
         q.Each([&](ECS::EntityHandle e,
                    const GameEngine::Components::WorldTransform& wt,
-                   GameEngine::Components::PhysicsBody& body) {
+                   ECS::Writable<GameEngine::Components::PhysicsBody> bodyRow) {
+            GameEngine::Components::PhysicsBody& body = bodyRow.Mutable();
             auto it = byBody.find(e);
             if (it == byBody.end() || it->second.empty())
                 return;
@@ -463,24 +467,7 @@ void PhysicsInitSystem::Update(ECS::World& world, float32 deltaTime)
             if (haveValidBody && haveValidShape && !forceRebuild)
                 return;
 
-            // Destroy old body + shape(s)
-            if (body.body.IsValid())
-            {
-                pw->DestroyBody(body.body);
-                body.body = {};
-            }
-            if (body.shape.IsValid())
-            {
-                pw->DestroyShape(body.shape);
-                body.shape = {};
-            }
-            for (uint16 i = 0; i < body.childShapeCount; ++i)
-            {
-                if (body.childShapes[i].IsValid())
-                    pw->DestroyShape(body.childShapes[i]);
-                body.childShapes[i] = {};
-            }
-            body.childShapeCount = 0;
+            ReleasePhysicsBody(body);
 
             // Extract body pose + scale from world transform.
             const auto wtAsTransform = TransformFromWorld(wt);
@@ -498,6 +485,10 @@ void PhysicsInitSystem::Update(ECS::World& world, float32 deltaTime)
             bool anySolid = false;
             float32 effectiveFriction = body.material.friction;
             float32 effectiveRestitution = body.material.restitution;
+            // The contact surface the body is solved against. Jolt is body-level
+            // for friction/restitution, so a compound body carries one index;
+            // the first collider that names a .physmat wins, as with the layer.
+            uint32 effectiveMaterialIndex = ContactSurfaceTable::kNoMaterial;
 
             for (const auto& c : it->second)
             {
@@ -519,7 +510,28 @@ void PhysicsInitSystem::Update(ECS::World& world, float32 deltaTime)
                 anyTrigger = anyTrigger || c.collider.isTrigger;
                 anySolid = anySolid || !c.collider.isTrigger;
 
-                const Physics::PhysicsMaterial mat = c.collider.overrideMaterial ? c.collider.material : body.material;
+                // Precedence: an assigned .physmat IS the collider's surface, and
+                // the inline values are the fallback for when none is assigned or
+                // it cannot be resolved yet.
+                const uint32 materialIndex =
+                    ContactSurfaceTable::ResolveMaterial(c.collider.materialAsset.ToGuid());
+                if (materialIndex != ContactSurfaceTable::kNoMaterial)
+                {
+                    if (effectiveMaterialIndex == ContactSurfaceTable::kNoMaterial)
+                        effectiveMaterialIndex = materialIndex;
+                    else if (effectiveMaterialIndex != materialIndex)
+                    {
+                        Logger::Log::Warning(
+                            "[PhysicsECS] Body entity {} has colliders with different physics "
+                            "materials; using first",
+                            e.id);
+                    }
+                }
+
+                const Physics::PhysicsMaterial mat =
+                    materialIndex != ContactSurfaceTable::kNoMaterial
+                        ? ContactSurfaceTable::MaterialAt(materialIndex)
+                        : (c.collider.overrideMaterial ? c.collider.material : body.material);
                 effectiveFriction = std::max(effectiveFriction, mat.friction);
                 effectiveRestitution = std::max(effectiveRestitution, mat.restitution);
             }
@@ -602,6 +614,9 @@ void PhysicsInitSystem::Update(ECS::World& world, float32 deltaTime)
             bs.centerOfMassOffset = Physics::Vector3(body.centerOfMassOffsetX, body.centerOfMassOffsetY, body.centerOfMassOffsetZ);
             bs.friction = effectiveFriction;
             bs.restitution = effectiveRestitution;
+            // What the engine's default contact predicate resolves this body's
+            // surface from; kNoMaterial keeps the backend's combined values.
+            bs.materialIndex = effectiveMaterialIndex;
 
             bs.linearVelocity = Physics::Vector3(body.linearVelocityX, body.linearVelocityY, body.linearVelocityZ);
             bs.angularVelocity = Physics::Vector3(body.angularVelocityX, body.angularVelocityY, body.angularVelocityZ);

@@ -2767,3 +2767,27 @@ TEST(PackageMountE2E, LoreVcsModuleStaysEditorOnlyAndChromeCssResolves)
                              }))
         << "lore-vcs carries no runtime modules at all";
 }
+
+TEST(PackageResolver, OptionalEnginePackageRequiresExplicitProjectOptIn)
+{
+    E2EProject project("ge_optional_engine_package");
+    const fs::path engineRoot = project.Root / "StagedPackages";
+    WriteTextFile(engineRoot / "optional-baker" / "package.json",
+                  R"({"name":"optional-baker","version":"1.0.0","assets":"","enabledByDefault":false})");
+    auto resolution = PackageResolver::Resolve(project.Root, engineRoot);
+    ASSERT_TRUE(resolution.Errors.empty());
+    EXPECT_TRUE(resolution.MountOrder.empty());
+    ASSERT_EQ(resolution.Disabled.size(), 1u);
+    const auto manifestFile = project.Root / "Packages" / "manifest.json";
+    std::string error;
+    ASSERT_TRUE(SetPackageDisabledInProjectManifest(manifestFile, "optional-baker", false, error)) << error;
+    resolution = PackageResolver::Resolve(project.Root, engineRoot);
+    ASSERT_TRUE(resolution.Errors.empty());
+    ASSERT_EQ(resolution.MountOrder.size(), 1u);
+    EXPECT_EQ(resolution.MountOrder.front().Manifest.Name, "optional-baker");
+    EXPECT_TRUE(resolution.Disabled.empty());
+    ASSERT_TRUE(SetPackageDisabledInProjectManifest(manifestFile, "optional-baker", true, error)) << error;
+    resolution = PackageResolver::Resolve(project.Root, engineRoot);
+    EXPECT_TRUE(resolution.MountOrder.empty());
+    EXPECT_EQ(resolution.Disabled.size(), 1u);
+}

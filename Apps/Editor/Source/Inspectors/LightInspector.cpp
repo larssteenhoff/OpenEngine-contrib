@@ -1,6 +1,7 @@
 #include "Inspectors/LightInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
 #include "Platform/SystemMetrics.h"
 
 #include "Components/Rendering/Light.h"
@@ -29,7 +30,6 @@
 #include "UI/Controls/Slider.h"
 #include "UI/Controls/FloatField.h"
 #include "UI/Controls/CollapsibleInfoCard.h"
-#include "UI/Controls/InspectorNotice.h"
 #include "UI/InfoCard.h"
 #include "UI/UIPrimitive.h"
 #include "UI/UITextureRegistry.h"
@@ -44,6 +44,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace GameEngine
 {
@@ -165,20 +166,6 @@ static uint32_t LightColorToArgb(const float (&c)[3])
     uint8_t g = static_cast<uint8_t>(clamp01(c[1] * scale) * 255.0f + 0.5f);
     uint8_t b = static_cast<uint8_t>(clamp01(c[2] * scale) * 255.0f + 0.5f);
     return (0xFFu << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
-}
-
-static void ArgbToLightColor(uint32_t argb, float (&out)[3])
-{
-    out[0] = ((argb >> 16) & 0xFF) / 255.0f;
-    out[1] = ((argb >> 8) & 0xFF) / 255.0f;
-    out[2] = (argb & 0xFF) / 255.0f;
-}
-
-static std::string FormatRgb(const float (&c)[3])
-{
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "(%.2f, %.2f, %.2f)", c[0], c[1], c[2]);
-    return buf;
 }
 
 // Linear RGB [0,1] -> sRGB-encoded ARGB bytes (0xFFRRGGBB).
@@ -414,16 +401,52 @@ static void AddSkyDriverNotice(UIElement* parent, ECS::World& world, ECS::Entity
 {
     if (!sky.IsValid())
         return;
-    auto notice = std::make_unique<EditorUI::InspectorNotice>(SkyDriverNoticeText(world, sky, fields),
-                                                              EditorUI::InspectorNotice::Kind::Information);
+    auto card = std::make_unique<EditorUI::CollapsibleInfoCard>(SkyDriverNoticeText(world, sky, fields));
     if (selectEntity)
-        notice->SetAction("Select sky", "Select the sky that drives this light, to change what it drives.",
-                          [selectEntity, sky]() { selectEntity(sky); });
-    parent->AddChild(std::move(notice));
+        card->SetAction("Select sky", "Select the sky that drives this light, to change what it drives.",
+                        [selectEntity, sky]() { selectEntity(sky); });
+    parent->AddChild(std::move(card));
+}
+
+// The inspector icon follows the light's type, so the section reads as the light it edits.
+static std::string LightIconClass(const ECS::World& world, ECS::EntityHandle entity)
+{
+    const auto* light = world.GetComponent<Components::Light>(entity);
+    if (!light)
+        return {};
+    switch (light->Type)
+    {
+    case LightType::Ambient:
+        return "inspector-section-icon-light-ambient";
+    case LightType::Directional:
+        return "inspector-section-icon-light-directional";
+    case LightType::Spot:
+        return "inspector-section-icon-light-spot";
+    case LightType::Point:
+        return "inspector-section-icon-light-point";
+    case LightType::Area:
+        return "inspector-section-icon-light-area";
+    case LightType::Volume:
+        return "inspector-section-icon-light-volume";
+    }
+    return {};
 }
 
 void RegisterLightInspector()
 {
+    constexpr int kLightSortKey = 130;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Light";
+        traits.SortKey = kLightSortKey;
+        traits.Tooltip = "Emits light into the scene (directional, point, spot, or ambient)";
+        traits.InspectorIconClass = "inspector-section-icon-light-directional";
+        traits.InspectorIconClassForEntity = LightIconClass;
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::Light>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())
@@ -721,7 +744,6 @@ void RegisterLightInspector()
 
         // Editable: Color — swatch + RGB values, click opens color picker window
         {
-            UIElement* row = InspectorUI::AddRow(ctx.Parent);
             const std::string drivenColorMeaning = intensityDrivenBySky
                 ? " Under its sun illuminance curve the colour is a hue at unit brightness, so a channel can read "
                   "above 1: the brightness is in Intensity."
@@ -734,28 +756,15 @@ void RegisterLightInspector()
                       " Turn off its Sky sets the light's colour (under a custom illuminance curve) or its Sky "
                       "drives sun light to author the color here."
                 : std::string("Light color (click to open color picker; double-click to reset to white)");
-            Label* colorLabel = InspectorUI::AddLabel(row, "Color", colorTooltip.c_str());
-            if (colorLabel) colorLabel->AddClass("inspector-label-no-drag");
-            UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-            fieldContainer->Overrides()
-                .Set(Style::FlexDir, FlexDirection::Row)
-                .Set(Style::AlignItems, AlignItems::Center)
-                .Set(Style::Gap, StyleLength::Px(6.0f));
-
-            const uint32_t argb = LightColorToArgb(light->Color);
-
-            auto swatch = std::make_unique<UIElement>();
-            UIElement* swatchRaw = swatch.get();
-            InspectorUI::StyleColorSwatch(swatchRaw, argb);
-            fieldContainer->AddChild(std::move(swatch));
-
-            auto rgbLabel = std::make_unique<Label>();
-            rgbLabel->AddClass("inspector-text");
-            rgbLabel->SetText(FormatRgb(light->Color));
-            if (!colorDrivenBySky)
-                rgbLabel->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-            Label* rgbLabelRaw = rgbLabel.get();
-            fieldContainer->AddChild(std::move(rgbLabel));
+            const InspectorUI::ColorSwatchRow colorRow = InspectorUI::AddColorSwatchRow(
+                ctx.Parent, "Color", colorTooltip.c_str(), LightColorToArgb(light->Color),
+                InspectorUI::FormatColorRgb(light->Color[0], light->Color[1], light->Color[2]));
+            Label* colorLabel = colorRow.Title;
+            UIElement* fieldContainer = colorRow.Field;
+            UIElement* swatchRaw = colorRow.Swatch;
+            Label* rgbLabelRaw = colorRow.Value;
+            if (colorDrivenBySky)
+                rgbLabelRaw->RemoveClass("inspector-color-swatch-value");
 
             // Read-only while a sky drives the light: an edit here would be overwritten on the next
             // frame, so the row says who owns it instead of accepting one.
@@ -803,8 +812,8 @@ void RegisterLightInspector()
                     UIElement* swatch = swatchRef.Get();
                     Label* rgbLabel = rgbLabelRef.Get();
                     if (!c || !swatch || !rgbLabel) return;
-                    InspectorUI::StyleColorSwatch(swatch, LightColorToArgb(c->Color));
-                    rgbLabel->SetText(FormatRgb(c->Color));
+                    InspectorUI::SetColorSwatchColor(swatch, LightColorToArgb(c->Color));
+                    rgbLabel->SetText(InspectorUI::FormatColorRgb(c->Color[0], c->Color[1], c->Color[2]));
                 };
 
                 ColorPickerCallbacks cbs;
@@ -813,7 +822,7 @@ void RegisterLightInspector()
                     {
                         edit->Preview([&] {
                             auto* c = w->GetComponentForWrite<Components::Light>(e);
-                            if (c) ArgbToLightColor(newArgb, c->Color);
+                            if (c) ColorUtils::ArgbToRgbFloats(newArgb, c->Color);
                         });
                         edit->Commit();
                     }
@@ -822,7 +831,7 @@ void RegisterLightInspector()
                         auto* c = w->GetComponent<Components::Light>(e);
                         if (!c) return;
                         Components::Light updated = *c;
-                        ArgbToLightColor(newArgb, updated.Color);
+                        ColorUtils::ArgbToRgbFloats(newArgb, updated.Color);
                         Editor::CommitComponentUpdate(w, e, n, updated);
                     }
                     updateUI();
@@ -836,7 +845,7 @@ void RegisterLightInspector()
                     {
                         edit->Preview([&] {
                             auto* c = w->GetComponentForWrite<Components::Light>(e);
-                            if (c) ArgbToLightColor(newArgb, c->Color);
+                            if (c) ColorUtils::ArgbToRgbFloats(newArgb, c->Color);
                         });
                     }
                     else
@@ -844,7 +853,7 @@ void RegisterLightInspector()
                         auto* c = w->GetComponent<Components::Light>(e);
                         if (!c) return;
                         Components::Light updated = *c;
-                        ArgbToLightColor(newArgb, updated.Color);
+                        ColorUtils::ArgbToRgbFloats(newArgb, updated.Color);
                         Editor::PreviewComponentUpdate(w, e, n, updated);
                     }
                     updateUI();

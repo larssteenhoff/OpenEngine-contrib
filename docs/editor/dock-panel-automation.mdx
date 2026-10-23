@@ -1,0 +1,22 @@
+---
+title: Dock panel automation
+description: Move editor panels between dock groups and read back their settled layout through MCP.
+---
+
+The `dock_panel` MCP tool moves an existing docked panel into another panel's tab group. Both identifiers are panel IDs, such as `Assets`, `Hierarchy`, and `Inspector`. The anchor must already belong to the main window's dock tree.
+
+```json title="Move the Inspector into the Assets group"
+{"panelId":"Inspector","anchorPanelId":"Assets"}
+```
+
+Omit `anchorPanelId` to activate a docked panel in place, without removing or reordering its tab. A closed panel opens through the editor's existing panel-opening policy. A floating panel that remains outside the main dock returns a refusal instead of reporting a successful move. Opening closed or floating panels can activate their window.
+
+The same operation is available through the raw debug API:
+
+```bash title="Request docking through the debug CLI"
+node mcp/ge.mjs raw dock_panel '{"panelId":"Inspector","anchorPanelId":"Assets"}'
+```
+
+The response waits for a layout update and reports `panelId`, `anchorPanelId`, `docked`, `leaf`, `activeTab`, `width`, and `height`. A moved panel also reports its previous leaf in `movedFrom`. Width and height are logical UI dimensions. Read `docked` and the returned leaf before relying on those dimensions; another layout operation can move or close a panel before readback.
+
+Invalid parameter types, unknown panels, and anchors outside the main dock are refused before removing any tab.

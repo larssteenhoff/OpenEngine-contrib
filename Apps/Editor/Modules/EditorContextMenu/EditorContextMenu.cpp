@@ -650,6 +650,9 @@ void EditorContextMenu::EnsureMenu()
 	            // Items other modules registered for folders.
 	            if (m_IsDirectory && Editor::EditorMenuRegistry::Get().TryInvokeDirectoryItem(cmd, path))
 	                break;
+	            // Items other modules registered for files.
+	            if (!m_IsDirectory && Editor::EditorMenuRegistry::Get().TryInvokeAssetFileItem(cmd, path))
+	                break;
 	            // Script-driven context menu items (Editor-managed snapshot)
 	            {
 	                uint64_t dom = 0;
@@ -764,6 +767,14 @@ void EditorContextMenu::ShowAssetMenu(const std::filesystem::path& assetPath,
             builder.AddItem("Render Pipeline", 0, MenuItemFlag_None, -500, EditorIcons::kSettings);
             builder.AddItem("Render Pipeline/Set Active", kCmdRenderPipelineSetActive, MenuItemFlag_None, -500, EditorIcons::kSettings);
         }
+    }
+
+    // Items other modules register for the files they accept.
+    if (!isDirectory)
+    {
+        for (const Editor::EditorAssetFileMenuItemSnapshot& item :
+             Editor::EditorMenuRegistry::Get().AssetFileMenuSnapshot(assetPath))
+            builder.AddItem(item.Path, item.CommandId, MenuItemFlag_None, item.Priority, item.Icon);
     }
 
     // If a handler is provided, allow opening C# scripts in the internal Script Editor.

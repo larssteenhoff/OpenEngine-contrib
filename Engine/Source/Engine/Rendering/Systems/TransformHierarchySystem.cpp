@@ -8,11 +8,11 @@
 #include "Components/Hierarchy.h"
 #include "Logger/Logger.h"
 #include "JobSystem/WorkStealingThreadPool.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -58,10 +58,7 @@ inline bool WriteRootWorldTransform(const float32* local, WorldTransform& out) {
 // GE_HIER_PROFILE=1 logs a per-phase decomposition of Update() every
 // kProfileLogInterval active frames. The cached path reports entity scanning,
 // direct-index construction, CSR rebuilding, and subtree propagation separately.
-const bool kProfileEnabled = [] {
-    const char* v = std::getenv("GE_HIER_PROFILE");
-    return v && v[0] == '1';
-}();
+const bool kProfileEnabled = Platform::EnvironmentSwitchEnabled("GE_HIER_PROFILE", false);
 constexpr uint32 kProfileLogInterval = 120u;
 
 // Dirty subtrees propagate on the job system from this many up; below it the
@@ -534,15 +531,15 @@ void TransformHierarchySystem::RebuildTopology(ECS::World& world) {
     if (m_ForceSerial) {
         auto q = world.Query<Read<Transform>, Write<WorldTransform>, Optional<Parent>>();
         q.IncludeDisabled();
-        q.Each([this](EntityHandle entity, const Transform& local, WorldTransform& worldTransform,
+        q.Each([this](EntityHandle entity, const Transform& local, Writable<WorldTransform> worldTransform,
                       const Parent* parent) {
-            AddNode(entity, local, worldTransform, parent ? parent->parent : EntityHandle{});
+            AddNode(entity, local, worldTransform.Mutable(), parent ? parent->parent : EntityHandle{});
         });
     } else {
         auto q = world.Query<Read<Transform>, Write<WorldTransform>, Read<Parent>>();
         q.IncludeDisabled();
-        q.Each([this](EntityHandle entity, const Transform& local, WorldTransform& worldTransform,
-                      const Parent& parent) { AddNode(entity, local, worldTransform, parent.parent); });
+        q.Each([this](EntityHandle entity, const Transform& local, Writable<WorldTransform> worldTransform,
+                      const Parent& parent) { AddNode(entity, local, worldTransform.Mutable(), parent.parent); });
     }
 
     size_t maxEntityIndex = 0;

@@ -21,6 +21,8 @@ namespace Rendering
 
 class MetalDevice;
 struct MetalTexture;
+struct MetalDescriptorSet;
+struct MetalPipeline;
 
 // Metal command list. Metal records through per-domain encoders (render /
 // blit / compute) that must be ended before switching domains, so this class
@@ -137,6 +139,8 @@ class MetalCommandList : public CommandList
                                           const float rgba[4]);
     void ApplyRenderState();
     void ApplyPushConstants();
+    void BindDirectDescriptorSet(uint32_t setIndex, MetalDescriptorSet& descriptors, const MetalPipeline& pipeline);
+    std::array<uint32_t, 31> m_DirectBufferSizes{};
 
     // Claims start/end boundary samples for a new encoder and binds pending
     // span-begin queries to the start. False when profiling is inactive or the

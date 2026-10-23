@@ -2,6 +2,7 @@
 
 #include "Editor/Settings/DynamicResolutionProjectSettings.h"
 #include "Editor/Settings/SettingsStore.h"
+#include "Engine/Rendering/SortingLayers.h"
 #include "Engine/Rendering/AntiAliasingProjectSettings.h"
 #include "Engine/Rendering/LodProjectSettings.h"
 #include "Engine/Rendering/RenderLayerNames.h"
@@ -227,6 +228,9 @@ void SetDirectionalShadowStableProjection(SettingsStore& store, bool stable)
 void ApplyProjectRenderSettings(Engine::Renderer::RenderServices& renderServices,
                                 const SettingsStore& store)
 {
+    std::string sortingError;
+    if (!Rendering::SortingLayers::SetCurrent(Rendering::SortingLayers::FromJson(store.Json()), sortingError))
+        Logger::Log::Error("Editor: failed to apply sorting layers: {}", sortingError);
     const nlohmann::json& rendering = FindRenderingSettings(store);
 
     {

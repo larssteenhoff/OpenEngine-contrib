@@ -13,6 +13,7 @@
 #include <deque>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -23,6 +24,7 @@ namespace ECS { class World; }
 namespace Rendering::RenderGraph { struct RGResourceDesc; }
 class RuntimeFrameReadback;
 class RuntimeHost;
+class PlayerDemoControls;
 struct RuntimeHostDesc;
 
 class PlayerApplication : public Application
@@ -164,6 +166,9 @@ private:
 #endif
     // The window, the render device, the pipeline, the scene and the frame.
     std::unique_ptr<RuntimeHost> m_Host;
+#if defined(GE_PLATFORM_MOBILE)
+    std::unique_ptr<PlayerDemoControls> m_DemoControls;
+#endif
     float m_LastRenderDeltaTime = 1.0f / 60.0f;
 };
 

@@ -43,6 +43,13 @@ float AveragePixelBrightness(const std::vector<uint8_t>& rgba, int w, int h)
 
 VideoThumbnailHandler::VideoThumbnailHandler() = default;
 
+void VideoThumbnailHandler::ResetForProjectSwitch()
+{
+    // Existing workers finish against their captured state and cache root. A
+    // late completion must not erase a new project's request for the same path.
+    m_State = std::make_shared<InFlightState>();
+}
+
 std::filesystem::path VideoThumbnailHandler::GetCachePath(const std::filesystem::path& assetPath) const
 {
     // Hash the absolute path to create a unique cache filename.

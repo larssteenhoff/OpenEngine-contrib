@@ -720,7 +720,7 @@ void ParticleExtraction::Extract(ECS::World& world, uint64 worldId, RenderServic
     if (!m_Impl->m_ParticleForwardProducer)
         m_Impl->m_ParticleForwardProducer = rs->RegisterForwardEmit(
             [this](ForwardEmitContext& context)
-            { EmitForwardCommands(context); }, false);
+            { EmitForwardCommands(context); }, {.WritesDepth = false});
     const auto& views = rs->Views().GetViews();
     auto& matchingViews = m_Impl->m_MatchingViews;
     matchingViews.clear();

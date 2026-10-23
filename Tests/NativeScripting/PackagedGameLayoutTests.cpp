@@ -5,6 +5,7 @@
 // before engine init. Tested against fake staged dirs.
 
 #include "Engine/Build/PackagedGameLayout.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
@@ -31,9 +32,8 @@ struct LayoutFixture
 
     explicit LayoutFixture(const char* name)
     {
-        Root = fs::temp_directory_path() / name;
+        Root = TestUtils::MakeUniqueTempDirectory(name);
         std::error_code ec;
-        fs::remove_all(Root, ec);
         fs::create_directories(Root, ec);
     }
 

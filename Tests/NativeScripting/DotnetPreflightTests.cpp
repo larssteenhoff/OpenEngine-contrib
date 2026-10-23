@@ -7,6 +7,7 @@
 
 #include "Engine/Build/BuildPipeline.h"
 #include "NativeScripting/SdkManifest.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
@@ -54,9 +55,8 @@ class ScopedEnvOverride
 
 fs::path MakeTempDir(const char* tag)
 {
-    const fs::path dir = fs::temp_directory_path() / tag;
+    const fs::path dir = GameEngine::TestUtils::MakeUniqueTempDirectory(tag);
     std::error_code ec;
-    fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
     return dir;
 }

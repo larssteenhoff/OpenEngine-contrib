@@ -572,10 +572,11 @@ TEST(ProjectPackagesManifestEdit, DisableEnableRoundTripPreservesOtherFields)
     ASSERT_TRUE(TryLoadProjectPackagesManifest(createdManifest, manifest, error)) << error;
     EXPECT_EQ(manifest.Disabled.count("pkg-a"), 1u);
 
-    // Enabling with no manifest is already the desired state; no file appears.
+    // Enabling records an explicit opt-in, including for default-disabled packages.
     const fs::path untouchedManifest = dir / "Untouched" / "manifest.json";
     EXPECT_TRUE(SetPackageDisabledInProjectManifest(untouchedManifest, "pkg-a", false, error)) << error;
-    EXPECT_FALSE(fs::exists(untouchedManifest));
+    ASSERT_TRUE(TryLoadProjectPackagesManifest(untouchedManifest, manifest, error)) << error;
+    EXPECT_EQ(manifest.Enabled.count("pkg-a"), 1u);
 
     std::error_code ec;
     fs::remove_all(dir, ec);

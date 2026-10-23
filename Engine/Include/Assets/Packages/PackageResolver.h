@@ -150,8 +150,9 @@ std::string PackageDefine(std::string_view packageName);
 // IMPLICITLY: every <enginePackagesRoot>/<dir>/package.json joins the set as
 // if the project manifest declared it, unless the project declares the same
 // package name itself (the project's spec wins — e.g. a file: checkout for
-// package development) or lists it in "disabled". An empty enginePackagesRoot
-// means the default, <executable dir>/Packages; tests inject a fixture
+// package development) or lists it in "disabled". A package whose manifest sets
+// enabledByDefault=false joins only when the project lists it in "enabled". An
+// empty enginePackagesRoot means the default, <executable dir>/Packages; tests inject a fixture
 // root.
 class PackageResolver
 {

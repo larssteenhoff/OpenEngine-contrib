@@ -1,3 +1,4 @@
+#include "Localization/LocalizationAsset.h"
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <GLFW/glfw3.h>
 
 #include "Rendering/Core/Device.h"
+#include "Rendering/Common/Utils.h"
 #include "Rendering/Core/RenderGraph/RGFrame.h"
 #include "Rendering/Core/RenderGraph/RGResourcePool.h"
 #include "Rendering/Core/RenderGraph/RGTransientPool.h"
@@ -17,6 +19,9 @@
 
 #include "FileWatcher/FileWatcher.h"
 #include <filesystem>
+#include <fstream>
+#include "Platform/Shell.h"
+#include "Core/Application.h"
 #include <algorithm>
 
 using namespace GameEngine;
@@ -62,6 +67,12 @@ int main() {
         return 1;
     }
 
+    // Preserve short key presses until the frame consumes them.
+    glfwSetInputMode(window, GLFW_STICKY_KEYS, GLFW_TRUE);
+
+    Utils::SetShaderPathResolver([](const std::filesystem::path& relativePath) {
+        return Platform::GetExecutablePath().parent_path() / relativePath;
+    });
     DeviceDesc desc{};
     desc.preferredAPI = GraphicsAPI::Vulkan;
     desc.enableSwapchain = true;
@@ -98,15 +109,11 @@ int main() {
     ui.SetPlatform(&platform);
     // Load layout and stylesheet from files (data-driven, no in-code UI construction)
     {
-        const char* xmlCandidates[] = {
-            "Assets/UI/UIDemoLayout.xml",
-            "Assets/UI/HotReloadTestCSS.xml",
-            "Assets/UI/HotReloadTest.xml"
-        };
-        const char* cssCandidates[] = {
-            "Assets/UI/UIDemoStyles.css",
-            "Assets/UI/HotReloadTestCSS.css"
-        };
+        const auto resourceRoot = Platform::GetExecutablePath().parent_path() / "Assets/UI";
+        const auto layoutPath = (resourceRoot / "UIDemoLayout.xml").string();
+        const auto stylePath = (resourceRoot / "UIDemoStyles.css").string();
+        const char* xmlCandidates[] = {layoutPath.c_str()};
+        const char* cssCandidates[] = {stylePath.c_str()};
         bool layoutLoaded = false; const char* layoutUsed = nullptr;
         for (const char* p : xmlCandidates) { if (ui.LoadLayoutFromFile(p)) { std::printf("[UI Demo] Loaded layout: %s\n", p); layoutLoaded = true; layoutUsed = p; break; } }
         bool styleLoaded = false; const char* cssUsed = nullptr;
@@ -234,6 +241,55 @@ int main() {
         std::printf("[UI Demo] Window close requested.\n");
     });
 
+    std::string localizationError;
+    Localization::LocalizationAsset catalogAsset(GUID{}, Platform::GetExecutablePath().parent_path() / "Localization/menu.localization");
+    const bool assetLoaded = catalogAsset.Load();
+    if (!assetLoaded) localizationError = "Could not load catalog asset.";
+    auto catalog = assetLoaded ? catalogAsset.CreateCatalog(localizationError) : nullptr;
+    const bool localizationLoaded = static_cast<bool>(catalog);
+    if (!localizationLoaded) std::fprintf(stderr, "Localization: %s\n", localizationError.c_str());
+    const auto preferencePath = PathUtils::GetUserDataDirectory() / "GameEngine" / "UIWindowDemo" / "language.txt";
+    if (localizationLoaded) {
+        catalog->SetSystemLocale(localizationError);
+        if (std::ifstream preference{preferencePath}; preference)
+            if (!catalog->RestoreLocale(preference, localizationError))
+                std::fprintf(stderr, "Saved language: %s\n", localizationError.c_str());
+    }
+    int64_t coinCount = 1;
+    auto bindTranslations = [&ui, catalog, &coinCount]() {
+        std::function<void(UIElement*)> visit = [&](UIElement* element) {
+            if (!element) return;
+            if (auto* label = dynamic_cast<Label*>(element)) {
+                if (label->GetId() == "clickEcho") {
+                    label->BindLocalization(HashStringId("menu.coins"), "Coins", {{"count", coinCount}});
+                }
+            }
+            for (const auto& child : element->GetChildren()) visit(child.get());
+        };
+        visit(ui.GetRootElement());
+    };
+    if (localizationLoaded) {
+        ui.SetLocalizationCatalog(catalog);
+        bindTranslations();
+    }
+    const std::vector<std::string> demoLocales{
+        "en", "nl", "pl", "ja", "ko", "zh-Hans", "zh-Hant", "ar", "he", "hi", "th"};
+    const auto selectedLocale = localizationLoaded
+        ? std::find(demoLocales.begin(), demoLocales.end(), catalog->GetLocale())
+        : demoLocales.end();
+    size_t demoLocaleIndex = selectedLocale == demoLocales.end() ? 0 : static_cast<size_t>(selectedLocale - demoLocales.begin());
+    bool languageKeyWasDown = false;
+    bool coinKeyWasDown = false;
+    auto updateCoins = [&ui, &coinCount]() {
+        std::function<void(UIElement*)> visit = [&](UIElement* element) {
+            if (!element) return;
+            if (auto* label = dynamic_cast<Label*>(element); label && label->GetId() == "clickEcho")
+                label->SetLocalizationArguments({{"count", coinCount}});
+            for (const auto& child : element->GetChildren()) visit(child.get());
+        };
+        visit(ui.GetRootElement());
+    };
+
     double lastTime = glfwGetTime();
     const char* minSecsEnv = std::getenv("UI_DEMO_MIN_SECONDS");
     // Exit immediately on close by default; override with UI_DEMO_MIN_SECONDS if needed
@@ -247,6 +303,30 @@ int main() {
 
     while (true) {
         glfwPollEvents();
+        const bool languageKeyDown = glfwGetKey(window, GLFW_KEY_F6) == GLFW_PRESS;
+        if (localizationLoaded && languageKeyDown && !languageKeyWasDown) {
+            demoLocaleIndex = (demoLocaleIndex + 1) % demoLocales.size();
+            if (!catalog->SetLocale(demoLocales[demoLocaleIndex], localizationError))
+                std::fprintf(stderr, "Localization: %s\n", localizationError.c_str());
+            std::error_code preferenceError;
+            std::filesystem::create_directories(preferencePath.parent_path(), preferenceError);
+            if (!preferenceError) {
+                std::ofstream preference(preferencePath, std::ios::trunc);
+                if (!catalog->WriteLocale(preference, localizationError))
+                    std::fprintf(stderr, "Saved language: %s\n", localizationError.c_str());
+            } else {
+                std::fprintf(stderr, "Saved language: %s\n", preferenceError.message().c_str());
+            }
+            // Reacquire controls after a possible layout hot reload.
+            bindTranslations();
+        }
+        languageKeyWasDown = languageKeyDown;
+        const bool coinKeyDown = glfwGetKey(window, GLFW_KEY_F7) == GLFW_PRESS;
+        if (localizationLoaded && coinKeyDown && !coinKeyWasDown) {
+            ++coinCount;
+            updateCoins();
+        }
+        coinKeyWasDown = coinKeyDown;
         double now = glfwGetTime();
         float dt = static_cast<float>(now - lastTime);
         lastTime = now;

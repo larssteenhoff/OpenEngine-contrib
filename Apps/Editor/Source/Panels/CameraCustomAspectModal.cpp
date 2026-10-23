@@ -1,6 +1,7 @@
 #include "Panels/CameraCustomAspectModal.h"
 
 #include "UI/Controls/Button.h"
+#include "UI/Controls/CollapsibleInfoCard.h"
 #include "UI/Controls/FloatField.h"
 #include "UI/Controls/Label.h"
 #include "UI/Controls/TextField.h"
@@ -47,10 +48,8 @@ CameraCustomAspectModal::CameraCustomAspectModal()
         auto content = std::make_unique<UIElement>();
         content->AddClass("camera-aspect-modal-content");
 
-        auto description = std::make_unique<Label>();
-        description->SetText("Enter the target width and height ratio used for projection and black bars.");
-        description->AddClass("camera-aspect-modal-description");
-        content->AddChild(std::move(description));
+        content->AddChild(std::make_unique<EditorUI::CollapsibleInfoCard>(
+            "Enter the target width and height ratio used for projection and black bars."));
 
         auto makeFieldRow = [](const char* labelText, FloatField*& outField) {
             auto row = std::make_unique<UIElement>();

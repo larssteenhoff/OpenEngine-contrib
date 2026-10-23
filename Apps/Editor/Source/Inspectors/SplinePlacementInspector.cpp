@@ -151,8 +151,7 @@ void BuildPoolRows(const InspectorContext& ctx, const std::string& poolLabel,
 // table index, the committed value is the entry's Value).
 //
 // A "// @ge-tooltip" marker on the field wins over the literal passed here —
-// the same precedence DefaultComponentInspector::FieldTooltip applies, and the
-// field is the one place a tooltip can be written once and reach every
+// DefaultComponentInspector shows only the marker, and the field is the one place a tooltip can be written once and reach every
 // inspector that renders it. Pass nullptr for a field that carries a marker.
 template <typename TEnum>
 void AddReflectedEnumRow(const InspectorContext& ctx, const std::string& label,

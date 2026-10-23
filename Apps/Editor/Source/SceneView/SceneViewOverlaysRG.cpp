@@ -52,6 +52,7 @@
 #include "SceneView/SceneViewOverlayShared.h"
 #include "SceneView/SceneViewTools.h"
 #include "Types/Color.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <cmath>
@@ -713,6 +714,7 @@ void SceneViewController::DeclareOverlaysRG(RenderGraph::RGFrame& frame, RenderG
                 float CamDistance = 0.0f;
                 float Opacity = 1.0f;
                 uint32_t Color = 0;
+                Grid2DCells Cells;
             } grid;
             grid.Show = m_ShowGrid;
             grid.CamPos[0] = static_cast<float>(m_CamPos[0]);
@@ -722,6 +724,7 @@ void SceneViewController::DeclareOverlaysRG(RenderGraph::RGFrame& frame, RenderG
             grid.CamDistance = m_CamDistance;
             grid.Opacity = m_Is2DMode ? svSettings.GetGridOpacity2D() : svSettings.GetGridOpacity3D();
             grid.Color = m_Is2DMode ? svSettings.GetGridColor2D() : svSettings.GetGridColor3D();
+            grid.Cells = m_Grid2DCells;
 
             frame.AddPass(
                 "SV.Gizmos_Overlay", kOverlayPhase,
@@ -758,9 +761,14 @@ void SceneViewController::DeclareOverlaysRG(RenderGraph::RGFrame& frame, RenderG
                     cl->SetScissor(0, 0, static_cast<int>(w), static_cast<int>(h));
 
                     if (grid.Show)
+                    {
+                        const float cells[4] = {grid.Cells.OriginX, grid.Cells.OriginY,
+                                                grid.Cells.Valid ? grid.Cells.Width : 0.0f,
+                                                grid.Cells.Valid ? grid.Cells.Height : 0.0f};
                         gridRenderer->RecordRG(ctx, &cam, grid.CamPos, grid.Is2D,
-                                                grid.CamDistance, static_cast<float>(h),
-                                                grid.Opacity, grid.Color);
+                                               grid.CamDistance, static_cast<float>(h),
+                                               grid.Opacity, grid.Color, cells);
+                    }
 
                     if (!camValid || (!lineDraws.size() && !triDraws.size()))
                         return;
@@ -1128,16 +1136,8 @@ void SceneViewController::DeclareSelectionOutlineRG(RenderGraph::RGFrame& frame,
     // m_OutlineMaskAnimated / m_OutlineMaskHasPlugin and forces a per-frame
     // re-render while either holds. (The mask is on-top, so foreign occluders
     // never affect it.) ──
-    uint64_t key = 1469598103934665603ull; // FNV-1a offset basis
-    auto foldBytes = [&key](const void* p, size_t n)
-    {
-        const auto* b = static_cast<const uint8_t*>(p);
-        for (size_t i = 0; i < n; ++i)
-        {
-            key ^= b[i];
-            key *= 1099511628211ull;
-        }
-    };
+    uint64_t key = Hashing::kFnv1a64OffsetBasis;
+    auto foldBytes = [&key](const void* p, size_t n) { key = Hashing::Fnv1a64(p, n, key); };
     auto foldU64 = [&](uint64_t v) { foldBytes(&v, sizeof(v)); };
     foldU64((static_cast<uint64_t>(w) << 32) | h);
     foldBytes(m_FrameCameraData.viewProj, sizeof(float) * 16);

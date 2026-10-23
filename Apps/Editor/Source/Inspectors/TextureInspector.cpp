@@ -13,6 +13,7 @@
 #include "UI/EditorIcons.h"
 #include "InspectorRegistry.h"
 #include "Inspectors/InspectorDragHelpers.h"
+#include "Inspectors/InspectorComponentSection.h"
 #include "Inspectors/InspectorUIHelpers.h"
 #include "Inspectors/TextureCoveragePolicyNotice.h"
 #include "Inspectors/TextureLoadingSuffix.h"
@@ -641,12 +642,7 @@ void BuildNineSliceSection(UIElement* root, TextureAsset* tex, const std::filesy
     };
 
     // Collapsible "Nine-Slice" section header.
-    auto foldoutOwned = std::make_unique<Foldout>();
-    foldoutOwned->SetTitle("Nine-Slice");
-    foldoutOwned->AddClass("inspector-foldout");
-    foldoutOwned->Collapse();
-    Foldout* foldout = foldoutOwned.get();
-    root->AddChild(std::move(foldoutOwned));
+    Foldout* foldout = InspectorUI::AddComponentSection(root, "Texture/Nine-Slice", "Nine-Slice", false);
 
     // Disable the slice controls unless "Sliced" is on. The disabled wrapper takes no
     // press, key or focus for anything inside it (the UI manager's delivery rule for

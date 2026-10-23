@@ -37,7 +37,6 @@ set(ANIMATION_SOURCES
     Source/SkeletonData.cpp
     Source/SkeletonModifierStack.cpp
     Source/SkeletonProfile.cpp
-    Source/SpriteFrames.cpp
     Source/TweenService.cpp
     Source/VRM1Importer.cpp
     Source/Nodes/AdditiveBlendNode.cpp

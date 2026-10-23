@@ -28,6 +28,9 @@
 #include "ECS/ECSTemplates.h"
 
 #include "Components/Transform.h"
+#include "Components/Hierarchy.h"
+#include "Components/Rendering/RenderSorting.h"
+#include "Engine/Rendering/SortingLayers.h"
 #include "Components/Animation/AnimatorRef.h"
 #include "Components/Animation/SkeletonRef.h"
 #include "Components/Rendering/LocalBounds.h"
@@ -2067,15 +2070,16 @@ TEST_F(ExtractionFastPathTest, CompositionCountsPublishedForResidualAttribution)
     EXPECT_EQ(h.Stats().VolumeCount, 0u);
     EXPECT_EQ(h.Stats().OceanCount, 0u);
 
-    // Positive control: an enabled ocean flips its count (and the digest —
-    // the ocean term is re-added per frame on both lanes).
+    // Positive control: an enabled ocean flips its count. Its content digest
+    // term is the Ocean feature's ContentDigest (FeatureContentDigestFoldsIntoItsWorldOnly),
+    // which this harness does not run, so extraction alone leaves the digest where it was.
     const uint64 digestBefore = h.rs.GetWorldRenderContentDigest(h.worldId);
     ECS::Entity ocean = h.world->Create();
     ocean.Set(OceanRenderer{});
     h.world->ProcessCommands();
     h.StepFrame();
     EXPECT_EQ(h.Stats().OceanCount, 1u);
-    EXPECT_NE(h.rs.GetWorldRenderContentDigest(h.worldId), digestBefore);
+    EXPECT_EQ(h.rs.GetWorldRenderContentDigest(h.worldId), digestBefore);
 
     // Positive control: an emitter running the default stack (eight particles a second) is counted,
     // with the particles its simulation keeps alive and the simulation's own time.
@@ -2089,6 +2093,46 @@ TEST_F(ExtractionFastPathTest, CompositionCountsPublishedForResidualAttribution)
     EXPECT_GT(h.Stats().LiveParticles, 0u);
     EXPECT_GT(h.Stats().ParticleSimulationMs, 0.0f);
 }
+
+// A render feature's ContentDigest reaches the world's published content
+// digest for its own world only, so feature-rendered content (ocean,
+// terrain) recaptures a "Once" reflection probe like mesh content.
+namespace
+{
+struct ContentDigestTestFeature final : IRenderFeature
+{
+    uint64_t ContentDigest(uint64_t worldId) const override { return worldId == TargetWorldId ? Term : 0u; }
+
+    uint64 TargetWorldId = 0;
+    uint64 Term = 0;
+};
+} // namespace
+
+TEST_F(ExtractionFastPathTest, FeatureContentDigestFoldsIntoItsWorldOnly)
+{
+    constexpr uint64 kFeatureTerm = 0x5EED5EED5EEDull;
+    ExtractionHarness h;
+    ASSERT_TRUE(h.Initialize(m_Device.get(), true));
+    h.SpawnRenderable(0.0f, 0.0f, 0.0f);
+    h.StepFrame();
+    const uint64 digestBefore = h.rs.GetWorldRenderContentDigest(h.worldId);
+
+    auto& feature = h.rs.EnsureFeature<ContentDigestTestFeature>();
+    feature.TargetWorldId = h.worldId + 1u;
+    feature.Term = kFeatureTerm;
+    h.StepFrame();
+    EXPECT_EQ(h.rs.GetWorldRenderContentDigest(h.worldId), digestBefore)
+        << "another world's feature content moved this world's digest";
+
+    feature.TargetWorldId = h.worldId;
+    h.StepFrame();
+    EXPECT_EQ(h.rs.GetWorldRenderContentDigest(h.worldId) - digestBefore, kFeatureTerm);
+
+    feature.Term = 0u;
+    h.StepFrame();
+    EXPECT_EQ(h.rs.GetWorldRenderContentDigest(h.worldId), digestBefore);
+}
+
 
 // Moving particles change a view's pixels without moving an instance or advancing a content
 // epoch, so extraction reports unversioned motion for each view that draws them, and the TAA
@@ -2798,4 +2842,83 @@ TEST_F(ExtractionFastPathTest, ContinuityStampMovesOnMaterialRebind)
         mr->materialAssetGuid.Set(materialB);
     h.StepFrame();
     EXPECT_NE(StampOf(h, slot), stampBefore) << "a material rebind changes what the slot renders";
+}
+
+TEST_F(ExtractionFastPathTest, SortingEditsAndDisableRefreshStationarySubmissions)
+{
+    ExtractionHarness h;
+    ASSERT_TRUE(h.Initialize(m_Device.get(), true));
+    auto actor = h.SpawnRenderable(0, 0, 0);
+    actor.Set(RenderSorting{10, 2, false});
+    ASSERT_TRUE(h.PrimeToFastPath());
+    auto readOrder = [&]()
+    {
+        const auto submissions = h.extraction->GetSubmissionsForTest();
+        EXPECT_FALSE(submissions.empty());
+        return submissions.empty() ? -999 : submissions.front().Sorting.Order;
+    };
+    EXPECT_EQ(readOrder(), 2);
+    actor.Set(RenderSorting{10, -5, false});
+    h.StepFrame();
+    EXPECT_EQ(readOrder(), -5);
+    h.world->SetComponentEnabledImmediate(actor.GetHandle(), ECS::GetComponentTypeId<RenderSorting>(), false);
+    h.StepFrame();
+    EXPECT_EQ(readOrder(), 0);
+}
+
+TEST_F(ExtractionFastPathTest, SortingParentMovementReparentAndRemovalRefreshDescendants)
+{
+    ExtractionHarness h;
+    ASSERT_TRUE(h.Initialize(m_Device.get(), true));
+    auto actor = h.SpawnRenderable(0, 0, 0);
+    auto parent = h.world->Create();
+    parent.Set(MakeTransformAt(0, 0, 2));
+    parent.Set(RenderSorting{10, 3, true});
+    actor.Set(Parent{parent.GetHandle()});
+    ASSERT_TRUE(h.PrimeToFastPath());
+    ASSERT_FALSE(h.extraction->GetSubmissionsForTest().empty());
+    EXPECT_EQ(h.extraction->GetSubmissionsForTest().front().Sorting.Group, parent.GetHandle());
+    parent.Set(MakeTransformAt(0, 0, 7));
+    h.StepFrame();
+    EXPECT_FLOAT_EQ(h.extraction->GetSubmissionsForTest().front().Sorting.GroupPosition[2], 7);
+    auto other = h.world->Create();
+    other.Set(MakeTransformAt(0, 0, 4));
+    other.Set(RenderSorting{-10, -3, true});
+    actor.Set(Parent{other.GetHandle()});
+    h.StepFrame();
+    EXPECT_EQ(h.extraction->GetSubmissionsForTest().front().Sorting.Group, other.GetHandle());
+    EXPECT_EQ(h.extraction->GetSubmissionsForTest().front().Sorting.Order, -3);
+    other.Remove<RenderSorting>();
+    h.StepFrame();
+    EXPECT_FALSE(h.extraction->GetSubmissionsForTest().front().Sorting.Authored);
+}
+
+TEST_F(ExtractionFastPathTest, SortingLayerPriorityReorderRefreshesStationaryArtwork)
+{
+    struct RestoreLayers
+    {
+        Rendering::SortingLayers Saved = Rendering::SortingLayers::Current();
+        ~RestoreLayers()
+        {
+            std::string error;
+            Rendering::SortingLayers::SetCurrent(Saved, error);
+        }
+    } restore;
+    ExtractionHarness h;
+    ASSERT_TRUE(h.Initialize(m_Device.get(), true));
+    auto actor = h.SpawnRenderable(0, 0, 0);
+    actor.Set(RenderSorting{10, 0, false});
+    ASSERT_TRUE(h.PrimeToFastPath());
+    auto layers = Rendering::SortingLayers::Defaults();
+    for (auto& layer : layers.Layers)
+        if (layer.Id == 10)
+            layer.Order = -100;
+    std::string error;
+    ASSERT_TRUE(Rendering::SortingLayers::SetCurrent(layers, error));
+    h.StepFrame();
+    ASSERT_FALSE(h.extraction->GetSubmissionsForTest().empty());
+    EXPECT_EQ(h.extraction->GetSubmissionsForTest().front().Sorting.Layer, -100);
+    ASSERT_TRUE(Rendering::SortingLayers::SetCurrent(Rendering::SortingLayers::Defaults(), error));
+    h.StepFrame();
+    EXPECT_EQ(h.extraction->GetSubmissionsForTest().front().Sorting.Layer, 10);
 }

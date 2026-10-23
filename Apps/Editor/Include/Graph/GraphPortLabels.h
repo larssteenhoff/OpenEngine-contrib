@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Types/StringUtils.h"
+
 #include <array>
 #include <string>
 #include <string_view>
@@ -41,20 +43,6 @@ inline constexpr std::array<WordAbbreviation, 15> kWordAbbreviations = {{
     {"Amount", "Amt"},
     {"Multiplier", "Mult"},
 }};
-
-inline bool EqualsIgnoreCase(std::string_view a, std::string_view b)
-{
-    if (a.size() != b.size())
-        return false;
-    for (size_t i = 0; i < a.size(); ++i)
-    {
-        const char ca = (a[i] >= 'A' && a[i] <= 'Z') ? static_cast<char>(a[i] + 32) : a[i];
-        const char cb = (b[i] >= 'A' && b[i] <= 'Z') ? static_cast<char>(b[i] + 32) : b[i];
-        if (ca != cb)
-            return false;
-    }
-    return true;
-}
 
 /* Parameter ids are camelCase; labels read as words: "fadeSeconds" ->
    "Fade Seconds". Names that already contain spaces pass through. */

@@ -3,6 +3,7 @@
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Scripting/CoreCLRHost.h"
 #include "Logger/Logger.h"
+#include "TestTempDir.h"
 #include <filesystem>
 #include <fstream>
 #include <chrono>
@@ -17,7 +18,7 @@ protected:
         Logger::Log::SetLogLevel(Logger::LogLevel::Info);
         
         // Create test project directory
-        testProjectDir = std::filesystem::temp_directory_path() / "HybridCompilationTest";
+        testProjectDir = TestUtils::MakeUniqueTempDirectory("HybridCompilationTest");
         std::filesystem::create_directories(testProjectDir);
         
         // Create test project file

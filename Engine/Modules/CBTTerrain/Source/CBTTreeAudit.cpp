@@ -3,6 +3,7 @@
 #include "CBTTerrain/CBTDeepDecode.h"
 #include "CBTTerrain/CBTInstance.h"
 #include "CBTTerrain/CBTSphereRoots.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <array>
@@ -425,15 +426,7 @@ uint64_t TreeSignature(const CBTTreeSnapshot& s)
         if (h != kFreeSlotHeapID)
             ids.push_back(h);
     std::sort(ids.begin(), ids.end());
-    uint64_t hash = 1469598103934665603ull; // FNV-1a
-    for (uint64_t h : ids)
-    {
-        for (uint32_t byte = 0; byte < 8u; ++byte)
-        {
-            hash ^= (h >> (byte * 8u)) & 0xFFull;
-            hash *= 1099511628211ull;
-        }
-    }
+    uint64_t hash = Hashing::Fnv1a64(ids.data(), ids.size() * sizeof(uint64_t));
     hash ^= ids.size();
     return hash;
 }

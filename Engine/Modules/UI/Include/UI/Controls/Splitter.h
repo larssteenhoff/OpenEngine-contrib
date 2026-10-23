@@ -112,9 +112,15 @@ private:
         m_HandlePx = m_IsRow ? GetLayoutWidth() : GetLayoutHeight();
         // Space shared by the two panes = parent main axis minus this splitter (not wA+wB, which can
         // disagree by a pixel or two and skew ratio vs Yoga's flex distribution).
+        // The splitter's MARGINS come out too: they are space the panes cannot
+        // have, and counting them as available maps mouse travel onto a longer
+        // span than exists, so the handle trails the cursor for the whole drag.
         {
             const float parentMain = m_IsRow ? p->GetLayoutWidth() : p->GetLayoutHeight();
-            const float splitMain = m_HandlePx;
+            const Box4& margin = GetResolvedStyle().Layout.Margin;
+            const float marginMain = m_IsRow ? (margin.Left + margin.Right)
+                                             : (margin.Top + margin.Bottom);
+            const float splitMain = m_HandlePx + marginMain;
             const float fromParent = std::max(0.0f, parentMain - splitMain);
             const float fromChildren = m_StartAPx + m_StartBPx;
             m_AvailPx = (fromParent > 1e-3f) ? fromParent : fromChildren;

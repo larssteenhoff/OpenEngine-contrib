@@ -10,6 +10,7 @@
 #include "Rendering/Core/Device.h"
 #include "Rendering/Common/Utils.h"
 #include "Rendering/ShaderCache/ShaderPackageIO.h"
+#include "Types/Fnv1a.h"
 #include "Types/NearestName.h"
 #include "Types/StringUtils.h"
 
@@ -33,25 +34,6 @@ using namespace ::GameEngine::Rendering;
 
 namespace
 {
-static uint64_t Fnv1a64(const void* data, size_t size)
-{
-    constexpr uint64_t kOffset = 1469598103934665603ull;
-    constexpr uint64_t kPrime = 1099511628211ull;
-    uint64_t h = kOffset;
-    const uint8_t* p = static_cast<const uint8_t*>(data);
-    for (size_t i = 0; i < size; ++i)
-    {
-        h ^= (uint64_t)p[i];
-        h *= kPrime;
-    }
-    return h;
-}
-
-static uint64_t HashString(const std::string& s)
-{
-    return Fnv1a64(s.data(), s.size());
-}
-
 // Whether the active pipeline declares a view this frame: its switch is on and it takes part (an
 // OnDemand view only while armed). A view on no layer still declares: it draws its clear and its sky.
 static bool PipelineDeclaresView(const Rendering::ViewDesc& view)
@@ -285,7 +267,7 @@ void DeclareDepthPrepassFeedersFirst(RenderPipelineBlueprint& bp, const RenderPi
 
 bool RequiresShaderPkg(const std::string& type)
 {
-    return type == "FullscreenShader" || type == "TemporalFullscreenShader" ||
+    return type == "FullscreenShader" || type == "TemporalFullscreenShader" || type == "DepthPixelation" ||
            type == "ComputeShader";
 }
 
@@ -820,15 +802,6 @@ void ValidateBlueprint(RenderPipelineBlueprint& bp, const RenderPipelineNodeRegi
                     addIssue(PipelineIssueSeverity::Warning, std::move(issue), bp.passes[i].id);
     }
 
-    // ── Deprecated node type keys (Warning) ──
-    // The Q4 rename made "ShadowMap" the canonical key for the shadow node; the
-    // old "CascadedShadowMap" key still parses (registered as an alias) but nudges
-    // authors to migrate so the legacy string can eventually be retired.
-    for (const auto& pass : bp.passes)
-        if (pass.type == "CascadedShadowMap")
-            addIssue(PipelineIssueSeverity::Warning,
-                     "legacy node type key 'CascadedShadowMap' — rename to 'ShadowMap'", pass.id);
-
     // ── Duplicate published output names (Warning) ──
     // Re-publishing a blackboard name is a first-class pattern here (the frame
     // resources are last-writer-wins), so this catches only the genuine mistake:
@@ -887,7 +860,7 @@ RenderPipelineBlueprint RenderPipelineCompiler::Compile(const GameEngine::Render
     bp.pipelineName = asset.GetDocument().pipelineName;
     bp.sourcePath = asset.GetPath().string();
     const char* sourceKey = sourceKind == Rendering::ShaderSourceKind::Wgsl ? "wgsl" : "spirv";
-    bp.contentHash = HashString(asset.GetDocument().jsonText + sourceKey);
+    bp.contentHash = Hashing::Fnv1a64(asset.GetDocument().jsonText + sourceKey);
 
     // Carry forward any asset-loader errors as pipeline issues.
     for (const auto& e : asset.GetErrors())
@@ -1230,7 +1203,7 @@ RenderPipelineBlueprint RenderPipelineCompiler::Compile(const GameEngine::Render
             pendingIds += issue.nodeId + '\n';
     }
     if (!pendingIds.empty())
-        bp.contentHash ^= HashString("pending script passes\n" + pendingIds);
+        bp.contentHash ^= Hashing::Fnv1a64("pending script passes\n" + pendingIds);
 
     return bp;
 }
@@ -1633,6 +1606,36 @@ void RenderPipelineInstance::Declare(Rendering::RenderGraph::RGFrame& frame,
             break;
         }
 
+    // Pixelated parent views only compose their band renders. No parent
+    // scene raster, depth prepass, or pre-composite post effects are needed.
+    uint32_t pixelationNode = static_cast<uint32_t>(m_Blueprint.passes.size());
+    for (uint32_t i = 0; i < m_Blueprint.passes.size(); ++i)
+        if (m_Blueprint.passes[i].enabled && m_Blueprint.passes[i].type == "DepthPixelation")
+        {
+            pixelationNode = i;
+            break;
+        }
+    std::unordered_set<Rendering::ViewId> compositeOnlyViews;
+    if (pixelationNode < m_Blueprint.passes.size())
+        for (const auto& vt : targets)
+        {
+            const auto* v = findView(vt.View);
+            if (!v || !m_Rs.FindDepthPixelationViews(v->id)) continue;
+            const auto& pp = m_Rs.GetEffectivePostProcessSettings(v->id, v->worldId);
+            if (pp.DepthPixelationIntensity > 0 || pp.DepthPixelationDebugRanges != 0)
+                compositeOnlyViews.insert(v->id);
+        }
+    // Same rule for the pixel-perfect crossing: without the node there is
+    // nowhere to zoom inside the graph, so its output stays at caller extent.
+    // The Game View retains its terminal nearest-upscale fallback in this case.
+    bool hasPixelPerfectCrossing = false;
+    for (const auto& [id, node] : m_Nodes)
+        if (node && std::strcmp(node->GetTypeName(), "PixelPerfectUpscale") == 0)
+        {
+            hasPixelPerfectCrossing = true;
+            break;
+        }
+
     // Per-view pre-pass: seed the View.* blackboard slots from the caller's
     // VALUES and apply the MSAA-off color collapse (when the color target is
     // single-sample the scene must render straight into the pipeline's
@@ -1662,6 +1665,63 @@ void RenderPipelineInstance::Declare(Rendering::RenderGraph::RGFrame& frame,
             height = dd.Height;
         }
 
+        if (compositeOnlyViews.contains(v->id))
+        {
+            m_FrameResources.Textures[{v->id, Names::View::Color}] = vt.Color;
+            m_FrameResources.Textures[{v->id, Names::View::Depth}] = vt.Depth;
+            m_FrameResources.Textures[{v->id, Names::View::Resolve}] = vt.Resolve.IsValid() ? vt.Resolve : vt.Color;
+            m_FrameResources.Textures[{v->id, Names::View::DepthResolved}] = vt.Depth;
+            auto& info = m_FrameResources.Views[v->id];
+            info.RenderWidth = info.OutputWidth = width;
+            info.RenderHeight = info.OutputHeight = height;
+            continue;
+        }
+
+        // Pixel-perfect crossing. The caller sized its targets to the camera's
+        // padded reference RT, so the raster extent is already the low one and
+        // the DISPLAY extent — the panel the integer zoom writes — comes from
+        // the view's pixel-perfect state. That divergence is what puts the LDR
+        // display effects (CRT, VHS, grain) on the output-basis side of the
+        // boundary at full resolution instead of one sample per art texel.
+        // Every value below collapses to the unsplit path when the extents
+        // agree (the Player, which never sizes down) — the byte-neutrality gate.
+        const Engine::Renderer::PixelPerfectViewState pixelPerfect =
+            m_Rs.Views().GetViewPixelPerfect(v->id);
+        const bool pixelPerfectWanted =
+            hasPixelPerfectCrossing && pixelPerfect.Active && pixelPerfect.DisplayWidth > 0 &&
+            pixelPerfect.DisplayHeight > 0 && width > 0 && height > 0 &&
+            (pixelPerfect.DisplayWidth != width || pixelPerfect.DisplayHeight != height);
+        // The display-extent colour the crossing writes and FinalColor ends up
+        // on. The caller cannot supply it — its targets ARE the padded
+        // reference RT — so the pipeline owns it, in the caller's colour format
+        // at one sample (the crossing's source is the post-resolve HDR chain,
+        // so an MSAA view crosses just the same). Pool-persistent because the
+        // host samples the physical. An import failure declines the crossing
+        // wholesale rather than half-applying the extent.
+        Rendering::RenderGraph::RGTexture pixelPerfectOutColor{};
+        if (pixelPerfectWanted)
+        {
+            Rendering::TextureDesc od{};
+            od.width = pixelPerfect.DisplayWidth;
+            od.height = pixelPerfect.DisplayHeight;
+            od.depth = 1;
+            od.mipLevels = 1;
+            od.arrayLayers = 1;
+            od.sampleCount = 1;
+            od.format = vt.Color.IsValid()
+                            ? frame.Graph().ResourceDesc(vt.Color.Id).Format
+                            : static_cast<uint32_t>(Rendering::TextureFormat::R16G16B16A16_FLOAT);
+            od.usage = static_cast<uint32_t>(Rendering::TextureUsage::RenderTarget) |
+                       static_cast<uint32_t>(Rendering::TextureUsage::ShaderResource);
+            const std::string name = "Pipeline." + m_Blueprint.pipelineName + ".View" +
+                                     std::to_string(static_cast<uint32_t>(v->id)) +
+                                     ".PixelPerfectOutput";
+            od.debugName = name.c_str();
+            pixelPerfectOutColor = frame.ImportPersistentTexture(name.c_str(), od);
+        }
+        const bool pixelPerfectCrossing = pixelPerfectOutColor.IsValid();
+        const uint32_t outputWidth = pixelPerfectCrossing ? pixelPerfect.DisplayWidth : width;
+        const uint32_t outputHeight = pixelPerfectCrossing ? pixelPerfect.DisplayHeight : height;
         // Internal-resolution split. Applies to any single-sample, unletterboxed
         // view at a sub-1.0 render scale whose blueprint routes world color
         // through a materialized resolve target (the internal SceneColor). The
@@ -1671,8 +1731,6 @@ void RenderPipelineInstance::Declare(Rendering::RenderGraph::RGFrame& frame,
         // resolve passthrough would leave internal-res content unupscaled. At
         // scale 1.0 every value below is exactly the unsplit path — that
         // identity is the byte-neutrality gate.
-        const uint32_t outputWidth = width;
-        const uint32_t outputHeight = height;
         Rendering::RenderGraph::RGTexture splitInternalDepth{};
         {
             const float scale = m_Rs.ResolveViewRenderScale(v->id);
@@ -1689,7 +1747,7 @@ void RenderPipelineInstance::Declare(Rendering::RenderGraph::RGFrame& frame,
             const bool splitEligible =
                 samples <= 1 && width > 0 && height > 0 && vt.Depth.IsValid() &&
                 !m_Blueprint.worldColorResolveTargetRef.empty() && crossingAvailable &&
-                !m_Rs.Views().GetViewLetterbox(v->id).active;
+                !m_Rs.Views().GetViewLetterbox(v->id).active && !pixelPerfectCrossing;
             m_DrsAnyViewEligible = m_DrsAnyViewEligible || splitEligible;
             // The split needs a single-sample raster, so a multisampled view draws at full
             // resolution whatever its render scale. Say so once, with the fix, rather than
@@ -1805,19 +1863,30 @@ void RenderPipelineInstance::Declare(Rendering::RenderGraph::RGFrame& frame,
             m_FrameResources.Textures[{v->id, Names::View::OutputColor}] = vt.Color;
             m_FrameResources.Textures[{v->id, Names::View::OutputDepth}] = vt.Depth;
         }
+        if (pixelPerfectCrossing)
+        {
+            // No OutputDepth: the crossing has no display-extent depth consumer,
+            // and its ABSENCE is what keeps RenderScaleUpscaleNode (which
+            // requires both) off a pixel-perfect view.
+            m_FrameResources.Textures[{v->id, Names::View::OutputColor}] = pixelPerfectOutColor;
+        }
         auto& info = m_FrameResources.Views[v->id];
         info.ResolveFromPipeline = resolveTarget.IsValid();
         info.RenderWidth = width;
         info.RenderHeight = height;
         info.OutputWidth = outputWidth;
         info.OutputHeight = outputHeight;
+        info.PixelPerfectCrossing = pixelPerfectCrossing;
 
         // The scale the renderer ACTUALLY used, after the even-pixel snap and
         // the TAA-active gate. Dynamic resolution fits its response model
         // against this, never against the requested value: the requested scale
         // is not always the applied one, and a model fitted to a number the
         // renderer never used integrates error against a fiction.
-        if (outputWidth > 0)
+        // A pixel-perfect view's Render/Output ratio is the camera's integer
+        // zoom, not a render scale — feeding it here would fit the dynamic
+        // resolution model against a lever it never moved.
+        if (outputWidth > 0 && !pixelPerfectCrossing)
             m_DrsLastAppliedScale =
                 static_cast<float>(width) / static_cast<float>(outputWidth);
     }
@@ -1868,6 +1937,8 @@ void RenderPipelineInstance::Declare(Rendering::RenderGraph::RGFrame& frame,
             const Rendering::ViewDesc* v = findView(vt.View);
             if (!v || !PipelineDeclaresView(*v))
                 continue;
+            if (compositeOnlyViews.contains(v->id) && nodeIdx < pixelationNode)
+                continue;
             ViewDeclare d(frame, *v, m_Rs, nb.id.c_str());
             d.m_Instance = this;
             d.m_NodeIdx = nodeIdx;
@@ -1889,6 +1960,16 @@ void RenderPipelineInstance::Declare(Rendering::RenderGraph::RGFrame& frame,
                 d.RenderHeight = vi->second.RenderHeight;
                 d.OutputWidth = vi->second.OutputWidth;
                 d.OutputHeight = vi->second.OutputHeight;
+                d.PixelPerfectCrossing = vi->second.PixelPerfectCrossing;
+            }
+            if (it->second->IsViewColorPostEffect())
+            {
+                for (const auto& [owner, callback] : m_BeforePostProcessCallbacks)
+                {
+                    (void)owner;
+                    if (callback)
+                        callback(d);
+                }
             }
             it->second->DeclareForView(d);
         }
@@ -2130,6 +2211,13 @@ RenderPipelineInstance::FrameResourcesFor(const Rendering::RenderGraph::RGFrame*
                : nullptr;
 }
 
+Rendering::RenderGraph::RGTexture ViewDeclare::FindPublishedViewTexture(Rendering::ViewId view, const std::string& ref) const
+{
+    if (!m_Instance || !m_Instance->FrameResourcesFor(&Frame))
+        return {};
+    return m_Instance->TableTexture(view, ref);
+}
+
 Rendering::RenderGraph::RGTexture ViewDeclare::ResolveTexture(const std::string& ref) const
 {
     if (ref == Names::View::Color)
@@ -2212,7 +2300,7 @@ const std::string& RenderPipelineInstance::ResolveSuffixedPassName(
     // Hash the suffix to a 16-bit key. Known suffixes are compile-time literals
     // (e.g. "Upload", "Cascade0"), so collision risk is negligible.
     const size_t len = std::strlen(suffix);
-    const uint16_t suffixHash = static_cast<uint16_t>(Fnv1a64(suffix, len) & 0xFFFF);
+    const uint16_t suffixHash = static_cast<uint16_t>(Hashing::Fnv1a64(suffix, len) & 0xFFFF);
     const uint64_t key = MakePassNameKey(nodeIdx, viewId, suffixHash);
 
     auto [it, inserted] = m_PassNameCache.try_emplace(key);

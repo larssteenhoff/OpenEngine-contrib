@@ -5,7 +5,33 @@
 # the new UI module via AssetRuntime's ParserRegistry (UILayoutAsset/UIStyleAsset
 # registration).
 set(EDITOR_TEST_SOURCES
+	TileMapRulesWindowTests.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/TileMapRulesWindow.cpp
+	TileMapTerrainBrushTests.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/TileMap/TileMapTerrainBrush.cpp
+	SpritePlacementSizeTests.cpp
+	TileMapEditContextTests.cpp
+	# A refused re-import writes nothing; a confirmed one replaces the outputs.
+	TileMapSourceImportTests.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/TileMap/TileMapSourceImport.cpp
+	TileSetDocumentTests.cpp
+	TileMapLayerRestoreTests.cpp
+	TileLayerEditsTests.cpp
+	TileMapThumbnailCompositeTests.cpp
+	TileThumbnailHandlerTests.cpp
+	TileMapLayerThumbnailTests.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/TileMap/TileMapEditContext.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/TileMap/TileSetDocument.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/TileMap/TileLayerEdits.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/TileMap/TileReplaceEdit.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/TileMap/TileMapEditCommand.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Thumbnails/TileMapThumbnailComposite.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Thumbnails/TileThumbnailHandler.cpp
+    ThumbnailImageOpsTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Thumbnails/ThumbnailImageOps.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Thumbnails/ThumbnailImageCache.cpp
 	CssInspectorIdleTests.cpp
+	EditorTextBlendTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Modules/CssInspector/CssInspector.cpp
 	SceneViewTransformToolTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/MeasureSceneGizmo.cpp
@@ -58,6 +84,9 @@ set(EDITOR_TEST_SOURCES
 	DefaultSceneEntitiesTests.cpp
 	NewSceneSeedTests.cpp
 	SceneViewExposureTests.cpp
+	# The editor pose helpers the gizmo and the Transform inspector share: the
+	# parent-chain TRS round trip and the physics-body teleport.
+	EntityWorldPoseTests.cpp
 	TerrainZoneStrokeCommandTests.cpp
 	SphereSculptStrokeCommandTests.cpp
 	SceneBackupZonePayloadFlushTests.cpp
@@ -65,6 +94,8 @@ set(EDITOR_TEST_SOURCES
 	SceneBackupRecoveryTests.cpp
 	SceneSaveDrivesOnceTests.cpp
 	SaveBlockedDuringPlayTests.cpp
+	# Fixed-id commands each owner registers with EditorMenuRegistry.
+	OwnerRegisteredCommandTests.cpp
 	SceneLoadFailureTests.cpp
 	ScriptStatusIndicatorTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Scripting/ScriptStatusIndicator.cpp
@@ -270,6 +301,7 @@ set(EDITOR_TEST_SOURCES
 	NavigationSurfaceInspectorTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/NavigationSurfaceInspector.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/DefaultComponentInspector.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/ReflectionProbeInspectorTools.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/RenderLayerField.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/Gizmos/NavigationSurfaceGizmo.cpp
 	# The Model Inspector's per-submesh LOD badge: whether the renderer draws the
@@ -347,7 +379,7 @@ set(EDITOR_TEST_SOURCES
 	OpenSceneResolutionTests.cpp
 	# The `path` parameter of open_asset/select_asset: resolved through the asset
 	# mounts, never the CWD the engine parks at the project root. Leaf TU
-	# (AssetManager only), so it compiles in rather than dragging DebugHandlers.cpp.
+	# (AssetManager only), so it compiles in rather than dragging AssetDebugHandlers.cpp.
 	OpenAssetPathTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/OpenAssetPath.cpp
 	RevertSceneTests.cpp
@@ -447,12 +479,13 @@ set(EDITOR_TEST_SOURCES
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/PlayMode/PlayButtonState.cpp
 	# The audio toggle right of Play: its icon and tooltip follow the same state as the
 	# menu row, in both directions, and audio is enabled by default.
-	AudioToggleButtonTests.cpp
-	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/PlayMode/AudioToggleButton.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/AudioEnabledSettings.cpp
+	# Once-per-instance setup across layout reconciles: a kept element is wired once, a
+	# replacement is wired, and two blocks of one pass both see a new element. Header-only.
+	ElementInstanceLedgerTests.cpp
 	# set_component's key-consumption contract: a values key that names no field must be
 	# reported, never answered `ok`. The reader is a leaf TU (nlohmann only), so it
-	# compiles in directly rather than dragging DebugHandlers.cpp.
+	# compiles in directly rather than dragging SceneEntityDebugHandlers.cpp.
 	ComponentValueReaderTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/ComponentValueReader.cpp
 	# set_component's render layer values: a JSON list, the scene text, all and none, and a refusal
@@ -463,11 +496,16 @@ set(EDITOR_TEST_SOURCES
 	# heightmap, and a refused key leaves the component as it was. Leaf TU (scene schema + ECS).
 	SchemaComponentApplyTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/SchemaComponentApply.cpp
+	# set_component's enum values: an integer the field's enum does not declare is refused,
+	# and the refusal lists the declared values. Leaf TU (reflection table + nlohmann), so it
+	# compiles in directly rather than dragging DebugHandlers.cpp.
+	ReflectedEnumValueTests.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/ReflectedEnumValue.cpp
 	# The `sceneDegraded` shape get_editor_state reports. It reconciles two records whose
 	# disagreement is the whole point — the load-time one the window title reads, and the
 	# outstanding one a save answers for — so the shape is a contract worth pinning. Same leaf-TU
 	# shape as the reader above (SceneLoadFailure + nlohmann), so it compiles in rather than
-	# dragging DebugHandlers.cpp.
+	# dragging EditorStateDebugHandlers.cpp.
 	SceneDegradedReportTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/SceneDegradedReport.cpp
 	# get_job_system's reply shape: field names and units an agent reads (the
@@ -490,7 +528,7 @@ set(EDITOR_TEST_SOURCES
 	# UIManager directly reaches the UI alone, leaving the editor InputSystem and
 	# the play-pointer remap — the whole runtime-input leg gameplay reads — unfed
 	# and untestable. Leaf TU (WindowInputRouter + UIManager + Window), so it
-	# compiles in rather than dragging DebugHandlers.cpp and EditorApplication.
+	# compiles in rather than dragging UiAutomationDebugHandlers.cpp and EditorApplication.
 	InjectedInputRoutingTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/InjectedInput.cpp
 	# What the game's input system keeps across a switch-off of game input. Leaf
@@ -519,7 +557,7 @@ set(EDITOR_TEST_SOURCES
 	# The request-shaped half of that gate: which field a rejected pointer coordinate
 	# is attributed to, and that the reply echoes the raw request number rather than
 	# the infinity it narrows to. Leaf TU (nlohmann + the injection predicate above),
-	# so it compiles in rather than dragging DebugHandlers.cpp.
+	# so it compiles in rather than dragging UiAutomationDebugHandlers.cpp.
 	PointerCoordsRequestTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/PointerCoordsRequest.cpp
 	# The debug server's drop: a payload reaches the drop target under a point through the
@@ -531,7 +569,7 @@ set(EDITOR_TEST_SOURCES
 	# layout box. FindById is visibility-blind, so hidden elements and mount hosts come back
 	# with a 0x0 box, and the centre of that box is the window corner — the pointer lands on
 	# whatever is there while the reply reports success. Leaf TU (UIElement + nlohmann), so
-	# it compiles in rather than dragging DebugHandlers.cpp.
+	# it compiles in rather than dragging UiAutomationDebugHandlers.cpp.
 	ElementPointerTargetTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/ElementPointerTarget.cpp
 	# How a handler's result becomes the response: a RefuseRequest refusal goes out as
@@ -558,10 +596,10 @@ set(EDITOR_TEST_SOURCES
 	# directly rather than dragging PhysicsDebugHandlers.cpp and the physics world service.
 	PhysicsRaycastRequestTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/PhysicsRaycastRequest.cpp
-	# get_render_graph_resources' lifetime/type/aliveOnly selector. The handler used to
-	# discard its request context, so every filtered query answered with the full list -
-	# a wrong answer shaped exactly like a right one. Leaf TU (nlohmann only), so it
-	# compiles in directly rather than dragging DebugHandlers.cpp.
+	# get_render_graph_resources' lifetime/type/aliveOnly selector. A handler that ignores
+	# its request context answers every filtered query with the full list - a wrong answer
+	# shaped exactly like a right one. Leaf TU (nlohmann only), so it compiles in directly
+	# rather than dragging RenderGraphDebugHandlers.cpp.
 	RenderGraphResourceFilterTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/RenderGraphResourceFilter.cpp
 	# set_play_mode's action/state contract. Play-mode transitions are the one editor
@@ -569,7 +607,7 @@ set(EDITOR_TEST_SOURCES
 	# ExitPlayMode both return early when already in the requested state, so a request
 	# that was merely forwarded would answer ok having done nothing. Also pins the wire
 	# spelling shared with get_editor_state. Leaf TU (nlohmann + the state enum), so it
-	# compiles in directly rather than dragging DebugHandlers.cpp.
+	# compiles in directly rather than dragging SceneLifecycleDebugHandlers.cpp.
 	PlayModeRequestTests.cpp
 	SaveBeforeProjectSwitchTests.cpp
 	PlayModeEntryGateTests.cpp
@@ -578,6 +616,8 @@ set(EDITOR_TEST_SOURCES
 	# CLEARED (or UIManager eats its W/A/S/D camera keys) and the Game View needs its
 	# viewport FOCUSED - opposite rules that look identical in a screenshot when swapped.
 	# Leaf TU (nlohmann + the panel-id constants).
+	DockPanelRequestTests.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/DockPanelRequest.cpp
 	ViewFocusRequestTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/ViewFocusRequest.cpp
 	# set_parallax_steps_view's enable/toggle contract: a toggle reads what the Scene Views
@@ -592,7 +632,7 @@ set(EDITOR_TEST_SOURCES
 	# get_camera's projection report: which FOV axis the numbers are, and that the
 	# aspect comes from the matrix rather than the viewport pixels. Leaf TU
 	# (nlohmann + the reverse-Z projection helpers), so it compiles in rather than
-	# dragging DebugHandlers.cpp.
+	# dragging CameraDebugHandlers.cpp.
 	CameraProjectionReportTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/DebugServer/CameraProjectionReport.cpp
 	# The applied terrain split threshold in get_terrain_stats: what the kernels were given at the
@@ -664,6 +704,7 @@ set(EDITOR_TEST_SOURCES
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Markups/MarkupInspector.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Markups/MarkupKind.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Markups/MarkupLabelOverlay.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Markups/MarkupPicking.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Markups/MarkupNotesEditCommand.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Markups/MarkupPresentation.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Markups/MarkupRenderFeature.cpp
@@ -691,11 +732,13 @@ set(EDITOR_TEST_SOURCES
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SceneViewGizmos.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SceneViewGizmoThickLines.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SplineOwnerQuery.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SceneOverlayPick.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SplineStrokeCapture.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SplineTool.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SplineSceneGizmo.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/UndoRedo/SplinePointEdits.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SceneViewTransformTool.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Entities/EntityWorldPose.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/SceneView/SceneViewSelectionTool.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/AnimationPreviewManager.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/PlayMode/PlayModeEntryGate.cpp
@@ -719,13 +762,15 @@ set(EDITOR_TEST_SOURCES
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Panels/SaveSceneAsModal.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Panels/SaveSceneChangesModal.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Panels/RestoreSceneBackupModal.cpp
-	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Panels/ConfirmActionModal.cpp
+	# ConfirmActionModal ships in EditorSDK.dll (linked below).
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Scene/DefaultSceneEntities.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/PlayMode/ModelAnimationPlayMode.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/PlayMode/AnimationPlayModeHelpers.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/AnimatorInspector.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/TransformInspector.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/RenderPipelineInspector.cpp
+	# RenderPipelineInspector reads the inspector label width from its owner.
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/InspectorRowLayoutSettings.cpp
 	# Inspectors build menus through CreateContextMenu(), which wraps them in
 	# the InterceptableContextMenu decorator (debug-server menu automation).
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Modules/EditorContextMenu/ContextMenuBackendPolicy.cpp
@@ -860,6 +905,12 @@ set(EDITOR_TEST_SOURCES
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/LuxText.cpp
 	# Source-level guard on the sky inspector: which container each group's rows are added to.
 	SkyInspectorSectionsTests.cpp
+	# The shared inspector section remembers a collapse across panel rebuilds, with or without the
+	# caller's own toggle handler. InspectorComponentSection.cpp is compiled in below.
+	InspectorComponentSectionTests.cpp
+	# Every inspector colour chip takes its look from the stylesheet's class; code sets only the
+	# colour. Header-only helper, so nothing extra is compiled in.
+	InspectorColorSwatchRowTests.cpp
 	# Undo of the sky edits that start and end its sun light drive, over the real undo
 	# service and the production sky system, including the generic edits (the component
 	# header's enable toggle, Remove Component, creation) that start one through the sky's
@@ -894,6 +945,8 @@ set(EDITOR_TEST_SOURCES
 	# declare, the rules that answer them, and the artwork those rules name must agree. The
 	# fields are component inspectors, so they are scanned rather than compiled in.
 	DropdownOptionIconsTests.cpp
+	# The Mark-ups panel header: the view toggle sized as Show all and Hide all.
+	MarkupsPanelHeaderTests.cpp
 	# Source-level guard on the other half of that panel: its sections are bars, which only
 	# happens while the class it asks for and the rule that answers it both exist.
 	TerrainInspectorSectionStyleTests.cpp
@@ -909,12 +962,12 @@ set(EDITOR_TEST_SOURCES
 	# The measured half of that same pair, for the class an inspector sub-heading shares with a
 	# component title: a declaration that suits the fixed-height header row can cost the
 	# sub-heading its height, which no structural check can see. Lays the real widgets out over
-	# the real editor stylesheets, so the section widget is compiled in rather than scanned.
+	# the real editor stylesheets; the section widget comes from EditorSDK.dll.
 	InspectorSectionHeaderLayoutTests.cpp
-	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/UI/InspectorSection.cpp
 	# The material inspector's row rhythm, measured the same way: every section bar, row and line
 	# one row gap below the last, open or closed, in the entity inspector and the asset view.
 	MaterialInspectorLayoutTests.cpp
+	AssetFieldThumbnailTests.cpp
 	# A pending asset's header: the name ellipsises first and "preparing" stays right after it.
 	PendingAssetHeaderLayoutTests.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/PendingAssetHeader.cpp
@@ -1203,6 +1256,7 @@ add_executable(SkySunDriveRowsTests
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/SkySunDriveRows.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/SkyDayCurveRow.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/SkySunCurveReference.cpp
+	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/InspectorComponentSection.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/LuxText.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Sky/SkySunIlluminanceSwitch.cpp
 	${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Sky/SkyEnvironmentEdit.cpp
@@ -1379,6 +1433,7 @@ target_link_libraries(EditorShortcutsTests PRIVATE
 	GTest::gtest
 	GTest::gtest_main
 )
+target_include_directories(EditorShortcutsTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 set_target_properties(EditorShortcutsTests PROPERTIES
 	CXX_STANDARD 20
 	CXX_STANDARD_REQUIRED ON
@@ -2122,3 +2177,43 @@ if(TARGET Editor)
 	)
 	set_tests_properties(EditorProjectOpenTests PROPERTIES LABELS "Editor" TIMEOUT 1900)
 endif()
+
+add_executable(AtlasRegionThumbnailTests
+    AtlasRegionThumbnailTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Thumbnails/SpriteFramesThumbnailHandler.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Thumbnails/ThumbnailImageOps.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Thumbnails/ThumbnailImageCache.cpp)
+target_include_directories(AtlasRegionThumbnailTests PRIVATE ${CMAKE_SOURCE_DIR}/Apps/Editor/Include)
+target_link_libraries(AtlasRegionThumbnailTests PRIVATE GTest::gtest GTest::gtest_main Engine)
+target_compile_features(AtlasRegionThumbnailTests PRIVATE cxx_std_20)
+ge_set_output_tests(AtlasRegionThumbnailTests)
+ge_stage_runtime_dependencies(AtlasRegionThumbnailTests)
+add_test(NAME AtlasRegionThumbnailTests COMMAND $<TARGET_FILE:AtlasRegionThumbnailTests>)
+add_executable(RenderSortingEditorTests
+    RenderSortingEditorTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Rendering/Sorting/RenderSortingDiagnostic.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Rendering/Sorting/SortingLayerSettingsWriter.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Rendering/Sorting/RenderSortingEdit.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Hierarchy/HierarchyLayerControls.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Hierarchy/HierarchyRenderLayerEdit.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/RenderLayerField.cpp
+)
+target_include_directories(RenderSortingEditorTests PRIVATE
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Include
+    ${CMAKE_SOURCE_DIR}/Tests
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source
+)
+target_link_libraries(RenderSortingEditorTests PRIVATE Engine EditorSDK GTest::gtest GTest::gtest_main)
+set_target_properties(RenderSortingEditorTests PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    VCPKG_APPLOCAL_DEPS OFF
+)
+ge_set_output_tests(RenderSortingEditorTests)
+ge_stage_runtime_dependencies(RenderSortingEditorTests)
+add_test(NAME RenderSortingEditorTests
+    COMMAND "${CMAKE_COMMAND}"
+        -DTEST_EXE=$<TARGET_FILE:RenderSortingEditorTests>
+        -DTEST_WORKING_DIR=$<TARGET_FILE_DIR:RenderSortingEditorTests>
+        -P "${CMAKE_SOURCE_DIR}/cmake/RunTestExecutable.cmake"
+)

@@ -533,7 +533,7 @@ TEST(MarkupContext, ATurnSendsItsContextAfterThePromptAndTheRowShowsChips)
     Conversation conversation;
     const Conversation::TurnId turn = conversation.AddTurn(
         "Widen @markup:road-2 by @markup:\"Village\"",
-        SentMarkups{"<markup …>", {{"@markup:road-2", "North road"}, {"@markup:\"Village\"", ""}}}, "claude-api", "",
+        SentMarkups{"<markup …>", {{"@markup:road-2", "North road"}, {"@markup:\"Village\"", ""}}}, {}, "claude-api", "",
         "", {});
     const ConversationMessage& user = *conversation.UserMessage(turn);
     EXPECT_EQ(user.SentText(), "Widen @markup:road-2 by @markup:\"Village\"\n\n<markup …>");

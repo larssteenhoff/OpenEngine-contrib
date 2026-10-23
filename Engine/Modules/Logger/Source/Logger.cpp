@@ -27,7 +27,12 @@
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <mach/vm_map.h>
+#else
 #include <mach/mach_vm.h>
+#endif
 #elif defined(__linux__)
 #include <sys/uio.h>
 #endif
@@ -97,8 +102,9 @@ void Log::Initialize(const Config& config)
 {
     auto& state = GetState();
 
-    // Configure sinks under Mutex (released before touching QueueMutex to
-    // preserve lock ordering: QueueMutex -> Mutex, never the reverse).
+    // The queue is left alone: records a running drain thread has not yet
+    // dispatched still reach the sinks, and after Shutdown the queue holds only
+    // records whose push raced Shutdown, which the new drain thread delivers.
     {
         std::lock_guard<std::mutex> lock(state.Mutex);
         state.m_Config = config;
@@ -113,17 +119,6 @@ void Log::Initialize(const Config& config)
         }
 
         state.m_EffectiveMinLevel.store(state.m_Config.GlobalMinLevel, std::memory_order_relaxed);
-    }
-
-    // Clear stale async state from previous session (handles re-init after Shutdown)
-    {
-        std::lock_guard<std::mutex> qLock(state.QueueMutex);
-        state.Queue.clear();
-        for (auto& p : state.FlushPromises)
-        {
-            p.set_value();
-        }
-        state.FlushPromises.clear();
     }
 
     // Start drain thread. Threadless wasm cannot: std::thread construction
@@ -246,6 +241,13 @@ void Log::AddSink(UniquePtr<LogSink> sink)
 
 void Log::ClearSinks()
 {
+    // Deliver every record logged before this call to the sinks it is about to
+    // remove. Flush takes QueueMutex and releases it before Mutex is taken here,
+    // keeping the QueueMutex -> Mutex order. A record logged concurrently with
+    // this call reaches whichever sinks are installed when the drain thread
+    // dispatches it.
+    Flush();
+
     auto& state = GetState();
     std::lock_guard<std::mutex> lock(state.Mutex);
 
@@ -753,6 +755,8 @@ const char* Log::GetCachedThreadId()
     {
 #if defined(_WIN32) || defined(_WIN64)
         std::snprintf(buffer, sizeof(buffer), "%lu", static_cast<unsigned long>(GetCurrentThreadId()));
+#elif defined(__ANDROID__)
+        std::snprintf(buffer, sizeof(buffer), "%lu", static_cast<unsigned long>(pthread_self()));
 #else
         std::snprintf(buffer, sizeof(buffer), "%lu", static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self())));
 #endif
@@ -823,11 +827,18 @@ bool TryCopyCString(const char* src, char* dest, size_t destSize, size_t& outLen
         const size_t chunk = (std::min)({destSize - offset, pageSize - address % pageSize, size_t{128}});
         size_t copied = 0;
 #if defined(__APPLE__)
+#if TARGET_OS_IPHONE
+        vm_size_t bytes = 0;
+        if (vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(address),
+                static_cast<vm_size_t>(chunk), reinterpret_cast<vm_address_t>(dest + offset), &bytes) != KERN_SUCCESS)
+            return false;
+#else
         mach_vm_size_t bytes = 0;
         if (mach_vm_read_overwrite(mach_task_self(), static_cast<mach_vm_address_t>(address),
                 static_cast<mach_vm_size_t>(chunk),
                 reinterpret_cast<mach_vm_address_t>(dest + offset), &bytes) != KERN_SUCCESS)
             return false;
+#endif
         copied = static_cast<size_t>(bytes);
 #elif defined(__linux__)
         iovec local{dest + offset, chunk};

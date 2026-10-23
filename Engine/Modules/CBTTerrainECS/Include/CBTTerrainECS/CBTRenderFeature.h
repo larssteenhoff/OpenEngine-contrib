@@ -25,6 +25,7 @@
 #include "Components/Terrain/Terrain.h" // kNoTerrainSeaLevel
 #include "Engine/Rendering/DrawBindings.h"
 #include "Engine/Rendering/IRenderFeature.h"
+#include "Engine/Rendering/WorldContentDigestTable.h"
 #include "Rendering/Materials/ShaderVariantKey.h"
 
 namespace GameEngine::Rendering
@@ -169,6 +170,11 @@ class CBTRenderFeature final : public Engine::Renderer::IRenderFeature
     {
         m_ActivityReadback.OnFrameStreamRetired(frame);
     }
+    // Per-world terrain identity for reflection-probe recapture. SetActive is
+    // last-writer-wins across worlds, so each world's CBTUpdateSystem tracks and
+    // sets its own entry here.
+    Engine::Renderer::WorldContentDigestTable& GetWorldContent() { return m_WorldContent; }
+    uint64_t ContentDigest(uint64_t worldId) const override { return m_WorldContent.Get(worldId); }
     const CBTTerrain::CBTClassifyDesc& GetClassify() const { return m_Classify; }
     const DomainConfig& GetDomainConfig() const { return m_DomainConfig; }
     float GetTargetPixelError() const { return m_TargetPixelError; }
@@ -416,6 +422,7 @@ class CBTRenderFeature final : public Engine::Renderer::IRenderFeature
     bool m_InitAttempted = false; // one bring-up attempt; failures don't retry-spam
     bool m_Active = false;
     bool m_MaterialAttempted = false;
+    Engine::Renderer::WorldContentDigestTable m_WorldContent;
 };
 
 } // namespace GameEngine::CBTTerrainECS

@@ -1,0 +1,10 @@
+---
+title: Material loading
+description: Prepare standalone materials for visible renderers and upcoming destinations.
+---
+
+Standalone materials are collected for enabled Mesh Renderer components. A disabled Mesh Renderer delays this automatic work until it is enabled. Shared materials are collected once. Model resolution still prepares model structure, bounds, and animation components independently.
+
+For a loading screen, call `RenderServices::RegisterAndPrewarmMaterial` for the loading presentation and destination resources. Disabling a renderer does not cancel explicit prewarming or unload an existing material. Use completion of the requested resources and GPU bindings to decide when to reveal the destination. A global shader queue can include unrelated prewarm requests and is not a destination loading percentage.
+
+Verify cold and warm startup and transitions in a packaged build. This policy does not defer scene parsing or guarantee a frame rate or load duration.

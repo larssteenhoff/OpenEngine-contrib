@@ -163,7 +163,6 @@ public:
     void HighlightVariableField(const std::string& varName);
 
     /// Highlight the matching variable field and move keyboard focus to it (script caret/selection in value).
-    void FocusScriptVariableField(const std::string& varName);
     
     // Clear variable field highlighting
     void ClearVariableFieldHighlight();
@@ -260,6 +259,29 @@ public:
 private:
     friend class Editor::InspectorVcsController;
     void ClearContent();
+    // ShowEntity phases, in call order.
+    void CoalesceShowEntityRequest(ECS::World* world, ECS::EntityHandle entity, bool force, bool keepMultiSelection);
+    void SetInspectedEntity(ECS::World* world, ECS::EntityHandle entity, bool keepMultiSelection);
+    void SubscribeToEntityChanges(ECS::EntityHandle entity);
+    void SaveSectionCollapseStates(uint64_t previousWorldId, uint32_t previousEntityId);
+    void ShowInvalidEntityNotice();
+    void BuildEntityHeader(ECS::EntityHandle entity, bool isMultiEdit);
+    void AddEntityHeaderIcon(UIElement* headerContainer, ECS::EntityHandle entity);
+    void AddEntityHeaderName(UIElement* headerContainer, ECS::EntityHandle entity, bool isMultiEdit);
+    void AddEntityEnableToggle(UIElement* headerContainer, ECS::EntityHandle entity, bool isMultiEdit);
+    bool CollectDisplayComponentIds(ECS::EntityHandle entity,
+                                    bool isMultiEdit,
+                                    std::vector<ECS::ComponentTypeId>& displayComponentIds);
+    int BuildComponentSections(ECS::EntityHandle entity, const std::vector<ECS::ComponentTypeId>& displayComponentIds);
+    void ShowComponentSectionContextMenu(ECS::ComponentTypeId typeId,
+                                         const std::string& title,
+                                         ECS::ComponentTypeId pseudoMaterialSectionId,
+                                         float x,
+                                         float y);
+    void HandleComponentContextMenuCommand(uint32_t cmd);
+    int BuildPreservedComponentSections(ECS::EntityHandle entity, bool isMultiEdit);
+    void AddComponentButton(ECS::EntityHandle entity);
+    void FinalizeComponentSections(int shown);
     // Snapshots the inspected entity's sorted, inspector-visible component signature into
     // m_LastComponentSignature. Hidden components (ECS::Disabled, Name, WorldTransform, …)
     // are excluded: they render no section, so their add/remove must not trip a rebuild —
@@ -303,8 +325,11 @@ private:
     void CommitGraphTransition(bool commitUndo);
     void AdjustValueByDrag(const std::string& varName, TextField* field, float deltaX);
     void WireSoloHandlersForSections();
+    // Removes the component, first asking when it is a volume whose removal
+    // takes its stack effects with it.
+    void RequestRemoveComponent(ECS::ComponentTypeId typeId);
     void ExecuteRemoveComponent(ECS::ComponentTypeId typeId);
-    void EnsurePostProcessVolumeRemoveModal();
+    void EnsureStackVolumeRemoveModal();
     void CaptureLoadedComponentValues(ECS::World* world,
                                       ECS::EntityHandle entity,
                                       const std::vector<ECS::ComponentTypeId>& componentTypeIds);
@@ -342,7 +367,6 @@ private:
 
     // Inspector selection history — every state change (entity, asset, script, smart folder, empty)
     // is recorded; back/forward navigate through all of them.
-    void ClearInspectorHistory();
     void RecordInspectorHistory(InspectorSelectionHistoryEntry entry);
     void NavigateInspectorHistoryAt(size_t index);
     void SyncInspectorHistoryButtonState();
@@ -369,7 +393,7 @@ private:
     UIElement* m_BottomRoot = nullptr;  // fixed bottom area (outside scroll viewport)
     SearchDialog* m_AddComponentDialog = nullptr; // non-owning; lives in root overlay
     std::shared_ptr<ComponentPresetSearchProvider> m_AddComponentProvider;
-    ConfirmActionModal* m_RemovePostProcessConfirmModal = nullptr; // non-owning; child of UI root/panel
+    ConfirmActionModal* m_RemoveStackVolumeConfirmModal = nullptr; // non-owning; child of UI root/panel
     ECS::ComponentTypeId m_PendingRemoveComponentTypeId{};
     UIElement* m_SearchBar = nullptr; // owned by UI tree
     TextField* m_SearchField = nullptr; // owned by UI tree

@@ -1,6 +1,34 @@
 # Editor application target
 
 set(EDITOR_SOURCES
+    Source/Panels/TilePaletteIntGridList.cpp
+    Source/Panels/TilePaletteTerrainList.cpp
+    Source/Panels/TileRulesEditorPanel.cpp
+    Source/Panels/TileSetTerrainBitEditor.cpp
+    Source/TileMap/TileMapTerrainBrush.cpp
+    Source/DebugServer/TileMapDebugHandlers.cpp
+    Source/DebugServer/TileMapRulesWindow.cpp
+    Source/Inspectors/TileMapLayerInspector.cpp
+    Source/Panels/TilePaletteBrushList.cpp
+    Source/Panels/TilePaletteGrid.cpp
+    Source/Panels/TilePaletteLayerList.cpp
+    Source/Panels/TilePalettePanel.cpp
+    Source/Panels/TileSetCollisionEditor.cpp
+    Source/Panels/TileSetEditorPanel.cpp
+    Source/SceneView/TileMapPaintOverlay.cpp
+    Source/SceneView/TileMapPaintToolStripEntry.cpp
+    Source/SceneView/TileMapPaintTool.cpp
+    Source/Thumbnails/TileMapThumbnailComposite.cpp
+    Source/Thumbnails/TileThumbnailHandler.cpp
+    Source/TileMap/TileLayerCommands.cpp
+    Source/TileMap/TileLayerEdits.cpp
+    Source/TileMap/TileMapEditCommand.cpp
+    Source/TileMap/TileMapEditContext.cpp
+    Source/TileMap/TileMapEditorIntegration.cpp
+    Source/TileMap/TileMapSourceImport.cpp
+    Source/TileMap/TileReplaceEdit.cpp
+    Source/TileMap/TileSetAtlasLookup.cpp
+    Source/TileMap/TileSetDocument.cpp
     Source/main.cpp
     Source/Editor/Application/BuildConfigStatus.cpp
     Source/Editor/Application/EditorVersion.cpp
@@ -14,6 +42,7 @@ set(EDITOR_SOURCES
     Source/Editor/Assets/AssetRelativePath.cpp
     Source/Editor/BuildExporters/SteamDeckBuildExporter.cpp
     Source/Editor/BuildExporters/WebBuildExporter.cpp
+    Source/Editor/BuildExporters/MobileBuildExporter.cpp
     Source/Editor/Settings/BuildRenderPipelineSettings.cpp
     Source/Editor/Settings/BuildSettingsPage.cpp
     Source/Editor/Settings/BuildSettingsStore.cpp
@@ -21,6 +50,27 @@ set(EDITOR_SOURCES
     Source/Editor/Settings/ExperimentalRenderingSettingsPage.cpp
     Source/Editor/Settings/InterfaceSettingsPage.cpp
     Source/Editor/Settings/AssetPreviewSettings.cpp
+    Source/Editor/Settings/AudioSettingsPage.cpp
+    Source/Editor/Settings/SceneSettingsPage.cpp
+    Source/Editor/Settings/InputSettingsPage.cpp
+    Source/Editor/Settings/PhysicsSettingsPage.cpp
+    Source/Editor/Settings/GridSettingsPage.cpp
+    Source/Editor/Settings/GizmoSettingsPage.cpp
+    Source/Editor/Settings/PerformanceSettingsPage.cpp
+    Source/Editor/Settings/ScriptSettingsPage.cpp
+    Source/Editor/Settings/AssetImportSettingsPage.cpp
+    Source/Editor/Settings/SvgRasterSizeField.cpp
+    Source/Editor/Settings/AnimationSettingsPage.cpp
+    Source/Editor/Settings/AccentColorSettings.cpp
+    Source/Editor/Settings/EditorAppearance.cpp
+    Source/Editor/Settings/CompactComponentHeadersSettings.cpp
+    Source/Editor/Settings/GraySlidersSettings.cpp
+    Source/Editor/Settings/InspectorRowLayoutSettings.cpp
+    Source/Editor/Settings/ScriptEditorSettings.cpp
+    Source/Editor/Settings/PopupShadowSettings.cpp
+    Source/Editor/Settings/TabIconsSettings.cpp
+    Source/Editor/Settings/TextRenderingSettings.cpp
+    Source/Editor/Settings/ValueBoxHeightSettings.cpp
     Source/Editor/Settings/ToggleAppearanceSettings.cpp
     Source/Editor/Settings/AudioEnabledSettings.cpp
     Source/Editor/Settings/LodProjectSettingsWriter.cpp
@@ -42,7 +92,9 @@ set(EDITOR_SOURCES
 	Source/Editor/Hierarchy/HierarchyLightIconTint.cpp
 	Source/Editor/Hierarchy/HierarchyNavigationBar.cpp
 	Source/Editor/Hierarchy/HierarchyRenderLayerEdit.cpp
+    Source/Editor/Hierarchy/HierarchyLayerControls.cpp
 	Source/Editor/Hierarchy/HierarchyReparentRules.cpp
+	Source/Editor/Entities/EntityWorldPose.cpp
 	Source/Startup/BuiltinAssetSync.cpp
 	Source/Startup/EditorCommandLine.cpp
 	Source/Startup/EditorPathPolicy.cpp
@@ -90,6 +142,7 @@ set(EDITOR_SOURCES
     Source/Panels/BuiltInPanelTypes.cpp
     Source/Panels/MovieRecorderPanel.cpp
     Source/Panels/HierarchyPanel.cpp
+    Source/Panels/HierarchyPanelCommands.cpp
     Source/Editor/Hierarchy/HierarchyEntityIcon.cpp
     Source/Editor/Hierarchy/HierarchyOrdering.cpp
     Source/Editor/Hierarchy/HierarchyEmptyParent.cpp
@@ -97,6 +150,7 @@ set(EDITOR_SOURCES
     Source/Panels/InspectorPanel.cpp
     Source/Panels/AssetViewPanel.cpp
     Source/Panels/LogPanel.cpp
+    Source/Panels/LogToolbarActions.cpp
     Source/Panels/LogView.cpp
     Source/Panels/ScriptDiagnosticsByAssembly.cpp
     Source/Panels/ScriptErrorsPanel.cpp
@@ -118,7 +172,6 @@ set(EDITOR_SOURCES
     Source/Projects/ZipArchive.cpp
     Source/Panels/SaveSceneAsModal.cpp
     Source/Panels/DownloadInProgressModal.cpp
-    Source/Panels/ConfirmActionModal.cpp
     Source/Panels/SaveSceneChangesModal.cpp
     Source/Panels/RestoreSceneBackupModal.cpp
     Source/Panels/RenameLayoutModal.cpp
@@ -128,6 +181,7 @@ set(EDITOR_SOURCES
     Source/Panels/VideoPlayerModal.cpp
     Source/EditorVideoPlayerController.cpp
     Source/Panels/GameViewPanel.cpp
+    Source/Panels/GameViewPanelCommands.cpp
     Source/Panels/SceneViewPanel.cpp
     Source/Panels/SceneViewPanelMenus.cpp
     Source/Panels/SceneViewPanelQuad.cpp
@@ -166,7 +220,6 @@ set(EDITOR_SOURCES
     Source/PlayMode/ModelAnimationPlayMode.cpp
     Source/PlayMode/AnimationPlayModeHelpers.cpp
     Source/PlayMode/RuntimeInputConnection.cpp
-    Source/PlayMode/AudioToggleButton.cpp
     Source/PlayMode/PlayButtonMenu.cpp
     Source/PlayMode/PlayButtonState.cpp
     Source/PlayMode/GameViewPointerLock.cpp
@@ -180,6 +233,7 @@ set(EDITOR_SOURCES
     Source/GameViewMovieCapture.cpp
     Source/MovieRecorderController.cpp
     Source/MovieRecorderToolbarMenu.cpp
+    Source/SceneViewPixelPerfect.cpp
     Source/SceneViewController.cpp
     Source/EditorComponentInstantiations.cpp
     Source/Scripting/EditorScriptMenuRegistry.cpp
@@ -203,8 +257,10 @@ set(EDITOR_SOURCES
 	Source/Thumbnails/ModelThumbnailPreviewScene.cpp
 	Source/Thumbnails/ModelThumbnailRenderLanes.cpp
 	Source/Thumbnails/TextureThumbnailHandler.cpp
+    Source/Thumbnails/SpriteFramesThumbnailHandler.cpp
+    Source/Thumbnails/ThumbnailImageCache.cpp
+    Source/Thumbnails/ThumbnailImageOps.cpp
 	Source/Thumbnails/VideoThumbnailHandler.cpp
-	Source/UI/InspectorSection.cpp
 	Source/UI/EditorSearchBars.cpp
 	Source/UI/UniversalSearchProvider.cpp
 	Source/Search/UniversalSearchController.cpp
@@ -216,6 +272,7 @@ set(EDITOR_SOURCES
 	Source/Display/HdrOutputMatch.cpp
 	Source/Docking/FloatingFrameHost.cpp
 	Source/Docking/WindowDockingController.cpp
+	Source/Docking/WindowDockingCommands.cpp
 	Source/UI/EditorTags.cpp
 	Source/UI/ToolbarDragDrop.cpp
 	Source/UI/UIAccentStyleHelper.cpp
@@ -245,10 +302,23 @@ set(EDITOR_SOURCES
 	Source/UI/Layout/DockConfigElements.cpp
 	Source/UI/Layout/EditorDockConfigParser.cpp
 	Source/Inspectors/TransformInspector.cpp
+	Source/Inspectors/Sprite2DComponentTraits.cpp
+	Source/Rendering/Sorting/RenderSortingEditor.cpp
+    Source/Rendering/Sorting/RenderSortingEdit.cpp
+    Source/Rendering/Sorting/RenderSortingDiagnostic.cpp
+    Source/Rendering/Sorting/SortingLayerSettings.cpp
+    Source/Rendering/Sorting/SortingLayerSettingsView.cpp
+    Source/Rendering/Sorting/SortingLayerSettingsWriter.cpp
 	Source/Inspectors/BuiltInInspectorRegistration.cpp
 	Source/Inspectors/ComponentIconClass.cpp
+	# Editor traits of built-in components with no inspector of their own.
+	Source/Editor/Entities/AnimationComponentTraits.cpp
+	Source/Editor/Entities/EntityComponentTraits.cpp
+	Source/Editor/Entities/OceanComponentTraits.cpp
+	Source/Editor/Entities/RenderingComponentTraits.cpp
 	Source/Inspectors/ComponentPresets.cpp
 	Source/Inspectors/DefaultComponentInspector.cpp
+	Source/Inspectors/ReflectionProbeInspectorTools.cpp
 	Source/Inspectors/GeneratedEntityNotice.cpp
 	Source/Inspectors/InspectorEntityActivity.cpp
 	Source/Inspectors/InspectorSectionHosts.cpp
@@ -273,6 +343,8 @@ set(EDITOR_SOURCES
 	Source/Inspectors/PhysicsBodyInspector.cpp
 	Source/Inspectors/CharacterControllerInspector.cpp
 	Source/Inspectors/PhysicsColliderInspector.cpp
+	Source/Inspectors/MovingPlatformInspector.cpp
+	Source/Inspectors/PhysicsMaterialInspector.cpp
 	Source/Inspectors/MaterialInspector.cpp
 	Source/Inspectors/MaterialInspectorSections.cpp
 	Source/Inspectors/DeclaredPropertyRowModel.cpp
@@ -318,6 +390,7 @@ set(EDITOR_SOURCES
 	Source/Inspectors/WindVolumeInspector.cpp
 	Source/Inspectors/BloomEffectInspector.cpp
 	Source/Inspectors/ChromaticAberrationEffectInspector.cpp
+	Source/Inspectors/DepthPixelationEffectInspector.cpp
 	Source/Inspectors/DepthOfFieldEffectInspector.cpp
 	Source/Inspectors/FilmSimulationEffectInspector.cpp
 	Source/Inspectors/AmbientOcclusionEffectInspector.cpp
@@ -327,6 +400,7 @@ set(EDITOR_SOURCES
 	Source/Inspectors/CrtEffectInspector.cpp
 	Source/Inspectors/FastBlurEffectInspector.cpp
 	Source/Inspectors/HeatDistortionEffectInspector.cpp
+	Source/Inspectors/RainSettingsEffectInspector.cpp
 	Source/Inspectors/VhsEffectInspector.cpp
 	Source/Inspectors/HeightFogEffectInspector.cpp
 	Source/Inspectors/ColorFilterEffectInspector.cpp
@@ -470,8 +544,10 @@ set(EDITOR_SOURCES
 	Source/SceneView/NavGridBrushTool.cpp
 	Source/SceneView/TerrainBrushTool.cpp
 	Source/SceneView/MeasureSceneGizmo.cpp
+	Source/SceneView/MeasureTool.cpp
 	Source/SceneView/SplineTool.cpp
 	Source/SceneView/SplineOwnerQuery.cpp
+	Source/SceneView/SceneOverlayPick.cpp
 	Source/SceneView/SplineStrokeCapture.cpp
 	Source/SceneView/SplineSceneGizmo.cpp
 	Source/SceneView/SplineDrapePolylines.cpp
@@ -489,6 +565,7 @@ set(EDITOR_SOURCES
 	Source/Markups/MarkupInspector.cpp
 	Source/Markups/MarkupKind.cpp
 	Source/Markups/MarkupLabelOverlay.cpp
+	Source/Markups/MarkupPicking.cpp
 	Source/Markups/MarkupNotesEditCommand.cpp
 	Source/Markups/MarkupPresentation.cpp
 	Source/Markups/MarkupRenderFeature.cpp
@@ -567,18 +644,27 @@ set(EDITOR_SOURCES
 	Source/EditorApplication_Shortcuts.cpp
 	Source/Editor/Shortcuts/DiagnosticShortcuts.cpp
 	Source/DebugServer/EditorDebugServer.cpp
+	Source/DebugServer/AssetDebugHandlers.cpp
 	Source/DebugServer/BenchSceneHandlers.cpp
+	Source/DebugServer/BuildDebugHandlers.cpp
+	Source/DebugServer/CaptureDebugHandlers.cpp
+	Source/DebugServer/CameraDebugHandlers.cpp
 	Source/DebugServer/CameraProjectionReport.cpp
 	Source/DebugServer/TerrainSplitThresholdReport.cpp
 	Source/DebugServer/SceneHierarchyReport.cpp
 	Source/DebugServer/ComponentValueReader.cpp
 	Source/DebugServer/RenderLayerMaskValue.cpp
 	Source/DebugServer/SchemaComponentApply.cpp
+	Source/DebugServer/CrashDebugHandlers.cpp
 	Source/DebugServer/DebugHandlers.cpp
+	Source/DebugServer/DebugHandlerHelpers.cpp
 	Source/DebugServer/DebugServerReply.cpp
+	Source/DebugServer/DisplayOutputDebugHandlers.cpp
+	Source/DebugServer/EditorStateDebugHandlers.cpp
 	Source/DebugServer/ElementPointerTarget.cpp
 	Source/DebugServer/AssistantSessionHandlers.cpp
 	Source/DebugServer/GpuToolingHandlers.cpp
+	Source/DebugServer/GraphDebugHandlers.cpp
 	Source/DebugServer/GroundQueryDebugHandlers.cpp
 	Source/DebugServer/JobSystemDebugHandlers.cpp
 	Source/DebugServer/JobSystemReport.cpp
@@ -593,18 +679,32 @@ set(EDITOR_SOURCES
 	Source/DebugServer/ParallaxDebugHandlers.cpp
 	Source/DebugServer/ParallaxStepsViewRequest.cpp
 	Source/DebugServer/InjectedInput.cpp
+	Source/DebugServer/MeshLodDebugHandlers.cpp
+	Source/DebugServer/ModelSpawnDebugHandlers.cpp
+	Source/DebugServer/MovieRecordDebugHandlers.cpp
 	Source/DebugServer/OpenAssetPath.cpp
 	Source/DebugServer/PhysicsDebugHandlers.cpp
 	Source/DebugServer/PhysicsRaycastRequest.cpp
 	Source/DebugServer/PlayModeRequest.cpp
 	Source/DebugServer/PerformDropRequest.cpp
 	Source/DebugServer/PointerCoordsRequest.cpp
+	Source/DebugServer/ProfilerDebugHandlers.cpp
+	Source/DebugServer/ReflectedEnumValue.cpp
 	Source/DebugServer/SceneDegradedReport.cpp
+	Source/DebugServer/SceneEntityDebugHandlers.cpp
+	Source/DebugServer/SceneLifecycleDebugHandlers.cpp
+	Source/DebugServer/SceneToolDebugHandlers.cpp
+	Source/DebugServer/ShadowDebugHandlers.cpp
+	Source/DebugServer/RenderGraphDebugHandlers.cpp
 	Source/DebugServer/RenderGraphResourceFilter.cpp
+	Source/DebugServer/RenderStatsDebugHandlers.cpp
 	Source/DebugServer/ScreenshotCaptureWait.cpp
 	Source/DebugServer/TerrainDebugHandlers.cpp
 	Source/DebugServer/TerrainStrokeTarget.cpp
+	Source/DebugServer/UndoDebugHandlers.cpp
 	Source/DebugServer/UITreeDump.cpp
+	Source/DebugServer/UiAutomationDebugHandlers.cpp
+	Source/DebugServer/DockPanelRequest.cpp
 	Source/DebugServer/ViewFocusRequest.cpp
 	Source/DebugServer/RenderDocCapture.cpp
 	Source/DebugServer/NsightGraphicsCapture.cpp
@@ -615,16 +715,25 @@ set(EDITOR_HEADERS
     Source/EditorApplication.h
     Source/EditorDockNodeJson.h
 	Source/DebugServer/EditorDebugServer.h
+	Source/DebugServer/AssetDebugHandlers.h
 	Source/DebugServer/BenchSceneHandlers.h
+	Source/DebugServer/BuildDebugHandlers.h
+	Source/DebugServer/CaptureDebugHandlers.h
+	Source/DebugServer/CameraDebugHandlers.h
 	Source/DebugServer/CameraProjectionReport.h
 	Source/DebugServer/TerrainSplitThresholdReport.h
 	Source/DebugServer/SceneHierarchyReport.h
 	Source/DebugServer/ComponentValueReader.h
 	Source/DebugServer/SchemaComponentApply.h
+	Source/DebugServer/CrashDebugHandlers.h
 	Source/DebugServer/DebugHandlers.h
+	Source/DebugServer/DebugHandlerHelpers.h
 	Source/DebugServer/DebugServerReply.h
+	Source/DebugServer/DisplayOutputDebugHandlers.h
+	Source/DebugServer/EditorStateDebugHandlers.h
 	Source/DebugServer/ElementPointerTarget.h
 	Source/DebugServer/GpuToolingHandlers.h
+	Source/DebugServer/GraphDebugHandlers.h
 	Source/DebugServer/GroundQueryDebugHandlers.h
 	Source/DebugServer/JobSystemDebugHandlers.h
 	Source/DebugServer/JobSystemReport.h
@@ -637,16 +746,29 @@ set(EDITOR_HEADERS
 	Source/DebugServer/ParallaxDebugHandlers.h
 	Source/DebugServer/ParallaxStepsViewRequest.h
 	Source/DebugServer/InjectedInput.h
+	Source/DebugServer/MeshLodDebugHandlers.h
+	Source/DebugServer/ModelSpawnDebugHandlers.h
+	Source/DebugServer/MovieRecordDebugHandlers.h
 	Source/DebugServer/OpenAssetPath.h
 	Source/DebugServer/PhysicsDebugHandlers.h
 	Source/DebugServer/PhysicsRaycastRequest.h
 	Source/DebugServer/PlayModeRequest.h
 	Source/DebugServer/PointerCoordsRequest.h
+	Source/DebugServer/ProfilerDebugHandlers.h
+	Source/DebugServer/ReflectedEnumValue.h
 	Source/DebugServer/SceneDegradedReport.h
+	Source/DebugServer/SceneEntityDebugHandlers.h
+	Source/DebugServer/SceneLifecycleDebugHandlers.h
+	Source/DebugServer/SceneToolDebugHandlers.h
+	Source/DebugServer/ShadowDebugHandlers.h
+	Source/DebugServer/RenderGraphDebugHandlers.h
 	Source/DebugServer/RenderGraphResourceFilter.h
+	Source/DebugServer/RenderStatsDebugHandlers.h
 	Source/DebugServer/TerrainDebugHandlers.h
 	Source/DebugServer/TerrainStrokeTarget.h
+	Source/DebugServer/UndoDebugHandlers.h
 	Source/DebugServer/UITreeDump.h
+	Source/DebugServer/UiAutomationDebugHandlers.h
 	Source/DebugServer/ViewFocusRequest.h
 	Source/DebugServer/RenderDocCapture.h
 	Source/DebugServer/NsightGraphicsCapture.h
@@ -675,7 +797,6 @@ set(EDITOR_HEADERS
     Include/UndoRedo/DeleteAssetPathsCommand.h
     Include/PlayMode/PlayModeManager.h
     Include/PlayMode/RuntimeInputConnection.h
-    Include/PlayMode/AudioToggleButton.h
     Include/PlayMode/PlayButtonMenu.h
     Include/PlayMode/PlayButtonState.h
     Include/PlayMode/GameViewPointerLock.h
@@ -750,6 +871,7 @@ set(EDITOR_HEADERS
 	Include/Docking/WindowDockingController.h
 	Include/UI/DragDropGhostRenderers.h
 	Include/UI/SyntaxHighlightSettings.h
+	Include/UI/ElementInstanceLedger.h
 	Include/UI/ToolbarDragDrop.h
 	Include/UI/Controls/SceneViewToolbar.h
 	Include/UI/Controls/LayoutPresetToolbar.h
@@ -767,6 +889,7 @@ set(EDITOR_HEADERS
 	Include/UI/Layout/DockConfigElements.h
 	Source/UI/Layout/EditorDockConfigParser.h
     Include/Assets/AssetDeletePathGuard.h
+    Include/Assets/AssetGridDragState.h
     Include/Assets/AssetPipelineCommands.h
     Include/Assets/AssetRename.h
     Include/Assets/AssetRenameController.h
@@ -788,6 +911,7 @@ set(EDITOR_HEADERS
 		Include/Panels/HierarchyPanel.h
 		Include/Editor/Entities/CopiedEntityRuntimeRefs.h
 		Include/Editor/Entities/EntityDuplicate.h
+		Include/Editor/Entities/EntityWorldPose.h
 		Include/Editor/Hierarchy/HierarchyEntityIcon.h
     Include/Panels/LogPanel.h
     Include/Panels/LogView.h
@@ -925,9 +1049,14 @@ set(EDITOR_SDK_SOURCES
 	Source/Editor/Registries/DebugRequestGateRegistry.cpp
 	Source/Editor/Registries/EditorPluginRegistry.cpp
 	Source/Editor/Entities/DDGIVolumeComponentTraits.cpp
+	Source/Editor/Entities/PlanarReflectionComponentTraits.cpp
 	Source/Editor/Entities/EditorComponentTraits.cpp
 	Source/Editor/Registries/EditorPanelRegistry.cpp
 	Source/Editor/Registries/EditorMenuRegistry.cpp
+	# Shared editor building blocks that package editor modules compose: the Inspector's
+	# section and the confirm modal.
+	Source/UI/InspectorSection.cpp
+	Source/Panels/ConfirmActionModal.cpp
 	Source/Editor/Registries/EditorSceneCommands.cpp
 	# The mark-up requests and actions package modules reach mark-ups through; the editor
 	# installs the requests (Markups/MarkupEditorSurfaces) and renders the actions.
@@ -938,6 +1067,9 @@ set(EDITOR_SDK_SOURCES
 	# Info-card look (background/outline/shadow/visibility): in the SDK because
 	# UI/InfoCard.h reads it, and package modules build cards through that.
 	Source/Editor/Settings/InfoCardAppearanceSettings.cpp
+	# Live-window tracking shared by the app-wide appearance settings; in the
+	# SDK because InfoCardAppearanceSettings uses it.
+	Source/Editor/Settings/TrackedEditorWindows.cpp
 	Source/Editor/Vcs/EditorVcsProviderRegistry.cpp
 	# Inspector row rules that are pure functions of a material document, and
 	# the by-name hand-off of its textures to the runtime material — in the SDK
@@ -1602,6 +1734,20 @@ ge_add_engine_package_module(GePkgModule_AiAssistantEditor
 	SOURCE_ROOT ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor
 	KIND editor
 	PREBUILT_SUBDIR Binaries/Editor)
+ge_add_engine_package_module(GePkgModule_LightmapBakingEditor
+	PACKAGE lightmap-baking
+	MODULE_NAME LightmapBaking.Editor
+	SOURCE_ROOT ${CMAKE_SOURCE_DIR}/Packages/lightmap-baking/Editor
+	KIND editor
+	PREBUILT_SUBDIR Binaries/Editor)
+add_subdirectory(${CMAKE_SOURCE_DIR}/Packages/lightmap-baking
+                 ${CMAKE_BINARY_DIR}/Packages/lightmap-baking)
+ge_add_engine_package_module(GePkgModule_LocalizationEditor
+	PACKAGE localization
+	MODULE_NAME Localization.Editor
+	SOURCE_ROOT ${CMAKE_SOURCE_DIR}/Packages/localization/Editor
+	KIND editor
+	PREBUILT_SUBDIR Binaries/Editor)
 ge_add_engine_package_module(GePkgModule_GitVcsEditor
 	PACKAGE git-vcs
 	MODULE_NAME GitVcs.Editor
@@ -1958,6 +2104,12 @@ ge_register_application_directory(Editor)
 # Prebuilt engine-package modules must exist before Editor's POST_BUILD
 # staging overlays them onto <exe dir>/Packages.
 add_dependencies(Editor EnginePackagePrebuilts)
+# An updated package DLL must rerun the Editor post-build staging commands,
+# even when no Editor translation unit changed.
+get_target_property(_editor_package_targets EnginePackagePrebuilts MANUALLY_ADDED_DEPENDENCIES)
+foreach(_editor_package_target IN LISTS _editor_package_targets)
+    set_property(TARGET Editor APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:${_editor_package_target}>")
+endforeach()
 
 # First-party packages (Packages/eztree, ...) staged next to Editor.exe;
 # the package resolver's implicit engine-package scan mounts them per project.
@@ -2083,6 +2235,9 @@ if(ENABLE_SCRIPTING)
 			        "${CMAKE_SOURCE_DIR}/Managed/Scripting.Bindings/bin/$<CONFIG>"
 			        "$<TARGET_FILE_DIR:Editor>"
 			COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+			        "${CMAKE_SOURCE_DIR}/Managed/TileMap.ABI/bin/$<CONFIG>"
+			        "$<TARGET_FILE_DIR:Editor>"
+			COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
 			        "${CMAKE_SOURCE_DIR}/Managed/Platform.ABI/bin/$<CONFIG>"
 			        "$<TARGET_FILE_DIR:Editor>"
 			COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
@@ -2125,7 +2280,7 @@ if(ENABLE_SCRIPTING)
 	# only runs once every dotnet build has completed.
 	set(_ge_editor_managed_deps
 		HotReloadAssembly CoreBridgeAssembly ScriptingAbiAssembly ScriptingBindingsAssembly
-		EcsAbiAssembly PlatformAbiAssembly ScriptingRuntimeAssembly
+		EcsAbiAssembly TileMapAbiAssembly PlatformAbiAssembly ScriptingRuntimeAssembly
 		EntitySystemGeneratorAssembly EditorManagedAssembly CompileServerHost)
 	add_dependencies(Editor ${_ge_editor_managed_deps})
 
@@ -2242,6 +2397,8 @@ list(APPEND _GE_STAGE_INPUTS
 	"${CMAKE_SOURCE_DIR}/Engine/Modules/VolumetricClouds/ThirdParty/SebLague-Clouds/UPSTREAM.md"
 	"${CMAKE_SOURCE_DIR}/ThirdParty/GTAO/LICENSE.txt"
 	"${CMAKE_SOURCE_DIR}/ThirdParty/GTAO/UPSTREAM.md"
+	"${CMAKE_SOURCE_DIR}/Packages/lightmap-baking/Licenses/Godot-MIT.txt"
+	"${CMAKE_SOURCE_DIR}/Packages/lightmap-baking/Licenses/NOTICE.txt"
 	"${CMAKE_SOURCE_DIR}/ThirdParty/metal-cpp/LICENSE.txt"
 	"${CMAKE_SOURCE_DIR}/ThirdParty/metal-cpp/VENDORED.md"
 	"${CMAKE_SOURCE_DIR}/Engine/Source/ThirdParty/ufbx/LICENSE"
@@ -2266,6 +2423,11 @@ set(_GE_EDITOR_MIRROR_COMMANDS "")
 # Editor-owned assets: icons, fonts, themes, UI, default graphs and scenes.
 _ge_editor_mirror_commands(_GE_EDITOR_MIRROR_COMMANDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Assets" "${_GE_EDITOR_ASSETS_DEST}")
+_ge_editor_mirror_commands(_GE_EDITOR_MIRROR_COMMANDS
+    "${CMAKE_SOURCE_DIR}/Tools/Mobile" "${_GE_EDITOR_ASSETS_DEST}/Tools/Mobile")
+get_filename_component(_GE_MOBILE_GLSLC_NAME "${GLSLC_EXECUTABLE}" NAME)
+list(APPEND _GE_EDITOR_MIRROR_COMMANDS COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${GLSLC_EXECUTABLE}" "${_GE_EDITOR_ASSETS_DEST}/Tools/${_GE_MOBILE_GLSLC_NAME}")
 # Project templates (manifest + payload folders), a sibling of Assets so
 # template content never enters the editor asset mount.
 _ge_editor_mirror_commands(_GE_EDITOR_MIRROR_COMMANDS
@@ -2622,3 +2784,7 @@ if(BUILD_TESTING)
 	enable_testing()
 	add_subdirectory(Tests)
 endif()
+
+# Build-tool source is an explicit compiler input, never an asset lookup root.
+set_source_files_properties(Source/Editor/BuildExporters/MobileBuildExporter.cpp PROPERTIES
+    COMPILE_DEFINITIONS "GE_MOBILE_ENGINE_SOURCE_ROOT=\"${CMAKE_SOURCE_DIR}\"")

@@ -913,6 +913,84 @@ TEST(UIScrollVirtualizationTests, VirtualizationCoordinator_DropsWorkForRemovedC
     DriveUiRender(ui, rg);
 }
 
+// A work item that re-enqueues itself on every run, so each drain point spends its whole
+// iteration budget and leaves the item queued for the next drain point in the frame.
+static int s_ChainRuns = 0;
+static bool s_ChainRequestsRelayout = false;
+static bool s_ChainReenqueues = true;
+
+static void VirtualizationCoordinator_Chain(UIElement* ctx, UIManager& ui, VirtualizationCoordinator::Reason reason)
+{
+    ++s_ChainRuns;
+    if (s_ChainRequestsRelayout)
+        ui.RequestRelayout();
+    if (s_ChainReenqueues)
+        ui.EnqueueVirtualizationWork(ctx, &VirtualizationCoordinator_Chain, reason);
+}
+
+// Work still queued when the late relayout runs must drain in that relayout, even though the
+// earlier drain in the same Update already ran work; otherwise it waits a frame.
+TEST(UIScrollVirtualizationTests, VirtualizationCoordinator_LateRelayoutDrainsAfterEarlierDrainRan)
+{
+    auto dev = MakeHeadlessDevice();
+    if (!dev)
+    {
+        GTEST_SKIP() << "Device init failed";
+    }
+
+    UIRegistration::RegisterBuiltInControls();
+
+    auto root = std::make_unique<UIElement>();
+    root->SetId("root");
+    auto host = std::make_unique<UIElement>();
+    host->SetId("host");
+    root->AddChild(std::move(host));
+
+    UIManager ui(dev.get());
+    ui.SetUpdateProfilingEnabled(true);
+    ui.SetRoot(std::move(root));
+
+    Stylesheet sheet{};
+    ASSERT_TRUE(CSSParser::ParseStylesFromString(R"(
+#root { width: 200px; height: 100px; }
+#host { width: 200px; height: 100px; }
+)", sheet));
+    ui.AddStylesheet(std::make_shared<Stylesheet>(sheet));
+
+    ui.Update(0.0f, /*interactive=*/false);
+    ui.Update(0.0f, /*interactive=*/false);
+
+    UIElement* hostEl = ui.GetRootElement()->FindById("host"_sid);
+    ASSERT_NE(hostEl, nullptr);
+
+    s_ChainRuns = 0;
+    s_ChainRequestsRelayout = false;
+    s_ChainReenqueues = true;
+    ui.EnqueueVirtualizationWork(hostEl, &VirtualizationCoordinator_Chain, VirtualizationCoordinator::Reason::DataChanged);
+
+    // Without a relayout request only the pre-solve and post-event drains run.
+    ui.Update(0.0f, /*interactive=*/false);
+    UIManager::UpdateProfileFrame profile{};
+    ASSERT_TRUE(ui.GetLastUpdateProfileFrame(profile));
+    ASSERT_EQ(profile.LateRelayoutCount, 0u);
+    const int runsWithoutLateRelayout = s_ChainRuns;
+    ASSERT_GT(runsWithoutLateRelayout, 0);
+
+    // The chain now requests a relayout, so the late relayout fires after the post-event drain
+    // has run work, and its own drain must run too.
+    s_ChainRuns = 0;
+    s_ChainRequestsRelayout = true;
+    ui.Update(0.0f, /*interactive=*/false);
+    ASSERT_TRUE(ui.GetLastUpdateProfileFrame(profile));
+    ASSERT_EQ(profile.LateRelayoutCount, 1u);
+    EXPECT_GT(s_ChainRuns, runsWithoutLateRelayout)
+        << "The late-relayout drain did not run after the post-event drain ran work.";
+
+    s_ChainRequestsRelayout = false;
+    s_ChainReenqueues = false;
+    ui.Update(0.0f, /*interactive=*/false);
+}
+
 // C-8: a MarkChanged on a visible ListView row (no scroll/viewport change) must
 // repaint that row on the next Update, driven by the UIManager change pump.
 //

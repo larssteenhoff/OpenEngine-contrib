@@ -1,10 +1,8 @@
 // Level-wave cascade probe orchestrator (UIStyleTests / bench ONLY).
 //
-// This is the third, previously-untested MT design for the UI style cascade.
-// The first two — MT-4 subtree fork-join and MT-4.3 work-first claim — were
-// both implemented and killed on measurement. Their kill mechanism was
-// per-run round-trips (fork/join or publish/park) whose latency dwarfed the
-// few-µs compute of a wide-shallow tree's tiny sibling runs.
+// A probe of a multithreaded UI style cascade that avoids per-run round-trips
+// (fork/join or publish/park), whose latency dwarfs the few-µs compute of a
+// wide-shallow tree's tiny sibling runs.
 //
 // LEVEL-SYNCHRONOUS WAVES sidestep per-run round-trips: elements at depth d are
 // independent given resolved depth d-1, so the cascade is driven one level at a
@@ -13,7 +11,7 @@
 // probe answers is the crossover N at which that trade wins.
 //
 // The parallel unit is the sibling-share GROUP, not the raw element: same-shape
-// siblings share one donor snapshot (P4), and letting two same-key elements
+// siblings share one donor snapshot, and letting two same-key elements
 // compute concurrently would race the shared donor cache. So per level the work
 // items are grouped by share key; each group's donor computes and its sharees
 // copy, all inside one group task. Groups touch disjoint elements and (for

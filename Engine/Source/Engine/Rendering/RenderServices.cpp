@@ -100,9 +100,22 @@ using namespace ::GameEngine::Rendering;
 
 
 
+namespace
+{
+// The pool the extraction systems that submit world draws run on. Null in a
+// host without an initialized engine (standalone render tests), which submits
+// from one thread.
+const JobSystem::WorkStealingThreadPool* EngineJobSystemOrNull()
+{
+    auto& engine = GameEngine::EngineCore::GetInstance();
+    return engine.IsInitialized() ? &engine.GetJobSystem() : nullptr;
+}
+} // namespace
+
 RenderServices::RenderServices()
     : m_DepthUnderDraw(std::make_unique<DepthUnderDrawTracker>()),
-      m_HlodRuntime(std::make_unique<Hlod::HlodRuntime>())
+      m_HlodRuntime(std::make_unique<Hlod::HlodRuntime>()),
+      m_WorldDrawBuilder(EngineJobSystemOrNull())
 {
 }
 

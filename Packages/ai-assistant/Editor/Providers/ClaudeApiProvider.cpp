@@ -1,6 +1,7 @@
 #include "ClaudeApiProvider.h"
 
 #include "ClaudeApiStream.h"
+#include "ClaudeUserContent.h"
 
 #include <cstdlib>
 #include <unordered_map>
@@ -55,7 +56,7 @@ std::string ClaudeApiProvider::BuildRequestBody(const AgentTurnRequest& request)
                             {"content", message.Role == MessageRole::User ? message.SentText()
                                                                           : message.Text}});
     }
-    messages.push_back({{"role", "user"}, {"content", request.UserText}});
+    messages.push_back({{"role", "user"}, {"content", ClaudeUserContent(request)}});
 
     nlohmann::json body = {
         {"model", request.Model.empty() ? std::string(kDefaultModel) : request.Model},

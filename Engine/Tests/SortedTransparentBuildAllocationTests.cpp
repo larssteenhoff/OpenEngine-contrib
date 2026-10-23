@@ -2,11 +2,13 @@
 // grown, a frame's build takes nothing from the heap (its working sets live in a ScratchScope).
 
 #include "ExtractionHarness.h"
+#include "Components/Rendering/RenderSorting.h"
 
 #include "Memory/AllocationCountScope.h"
 #include "Rendering/Core/GPUScene.h"
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace GameEngine::Testing::ExtractionFastPath
 {
@@ -84,6 +86,37 @@ TEST_F(SortedTransparentBuildAllocationTest, SortedTransparencyAllocatesNothingP
     }
     m_Device->WaitForIdle();
     EXPECT_EQ(measuredAllocations, 0u) << "over " << kMeasuredFrames << " builds";
+}
+
+// Also run with GE_FORCE_COMPAT=1: authored order must activate the direct
+// instance-list drain even when buffer device addresses are unavailable.
+TEST_F(SortedTransparentBuildAllocationTest, AuthoredMeshOrderingActivatesOnCompatibilityDevices)
+{
+    ExtractionHarness h;
+    ASSERT_TRUE(h.Initialize(m_Device.get(), true));
+    if (const char* forced = std::getenv("GE_FORCE_COMPAT"); forced && std::string_view(forced) == "1")
+    {
+        ASSERT_TRUE(h.rs.GetProfile().IsCompat());
+        ASSERT_FALSE(m_Device->GetCapabilities().supportsBufferDeviceAddress);
+    }
+    const GUID glass = FixedGuid(0x51);
+    ASSERT_NE(RegisterBlendMaterial(h, glass, "OrderedGlass", 1u), nullptr);
+    h.materialGuid = glass;
+    auto entity = h.SpawnRenderable(0.0f, 0.0f, 0.5f);
+    entity.Set(Components::RenderSorting{10, 2, false});
+    auto* scene = h.rs.GetGPUScene();
+    ASSERT_NE(scene, nullptr);
+    ASSERT_TRUE(m_Device->BeginFrame());
+    scene->AdvanceFrameSlot();
+    h.rs.BeginWorldDrawFrame();
+    h.StepFrame();
+    h.rs.BuildWorldBatchKeys();
+    scene->FlushGPUBuffers();
+    h.rs.BuildSortedTransparentForView(h.viewId);
+    EXPECT_TRUE(h.rs.IsSortedTransparentActive(h.viewId));
+    scene->EndFrame();
+    m_Device->Present();
+    m_Device->WaitForIdle();
 }
 
 } // namespace

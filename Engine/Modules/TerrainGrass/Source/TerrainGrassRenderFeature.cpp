@@ -34,11 +34,11 @@
 #include "Components/Terrain/TerrainGrass.h"
 #include "Core/Application.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -192,65 +192,6 @@ Rendering::ResourceBarrier MakeGrassPlaceReadyBarrier()
             | static_cast<uint64>(Rendering::ResourceAccessMask::ShaderRead));
 }
 
-void BindIblResources(Engine::Renderer::RenderServices& rs,
-                      Rendering::IDevice* device,
-                      std::vector<Engine::Renderer::DrawBindings::BufferEntry>& buffers,
-                      std::vector<Engine::Renderer::DrawBindings::TextureEntry>& textures)
-{
-    if (!device)
-        return;
-
-    auto& ibl = rs.EnsureFeature<Engine::Renderer::ImageBasedLightingFeature>();
-    if (!ibl.IsInitialized())
-        ibl.Initialize(device);
-    if (!ibl.IsInitialized())
-        return;
-
-    if (auto* sky = rs.GetFeature<Engine::Renderer::SkyRenderFeature>();
-        sky && sky->HasActiveSettings())
-    {
-        ibl.SetIblIntensity(sky->GetSettings().iblIntensity);
-    }
-    if (auto* iblSource = ibl.GetEnvironmentSource(); !iblSource || iblSource->InputDigest() == 0)
-        ibl.SetIblIntensity(0.0f);
-    const auto envBuffer = ibl.UploadEnvData(device);
-
-    const auto cubeSampler = ibl.GetCubeSampler();
-    const auto lutSampler = ibl.GetLutSampler();
-    if (cubeSampler.IsValid())
-    {
-        if (const auto irradiance = ibl.GetIrradianceCube(); irradiance.IsValid())
-        {
-            Engine::Renderer::DrawBindings::TextureEntry tex{};
-            tex.Name = HashStringId("ge_irradianceCube");
-            tex.Texture = irradiance;
-            tex.Sampler = cubeSampler;
-            textures.push_back(tex);
-        }
-        if (const auto prefilter = ibl.GetPrefilterCube(); prefilter.IsValid())
-        {
-            Engine::Renderer::DrawBindings::TextureEntry tex{};
-            tex.Name = HashStringId("ge_prefilterCube");
-            tex.Texture = prefilter;
-            tex.Sampler = cubeSampler;
-            textures.push_back(tex);
-        }
-    }
-    if (lutSampler.IsValid())
-    {
-        if (const auto brdfLut = ibl.GetBrdfLut(); brdfLut.IsValid())
-        {
-            Engine::Renderer::DrawBindings::TextureEntry tex{};
-            tex.Name = HashStringId("ge_brdfLUT");
-            tex.Texture = brdfLut;
-            tex.Sampler = lutSampler;
-            textures.push_back(tex);
-        }
-    }
-
-    if (envBuffer.IsValid())
-        buffers.push_back({HashStringId("Env"), envBuffer, 0u, 0u});
-}
 } // namespace
 
 class TerrainGrassForwardContributor final
@@ -400,7 +341,7 @@ public:
         // reachability seed in Compile), so the placement pass is never culled for want of a draw
         // consumer: a missing draw still leaves a TerrainGrass.Place line. Silence on THIS trace
         // with the placement still tracing means blades were placed and not drawn. Each site logs once.
-        static const bool kDbg = std::getenv("GE_TERRAIN_GRASS_DEBUG") != nullptr;
+        static const bool kDbg = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GRASS_DEBUG", false);
         auto once = [](bool& flag) { if (flag) return false; flag = true; return true; };
 
         if (!m_Feature.IsInitialized())
@@ -585,7 +526,6 @@ public:
                                   instances.IsValid(), instanceCapacity);
             return;
         }
-        BindIblResources(m_RenderServices, device, scratch.Shared, scratch.Textures);
 
         Rendering::MaterialKeyword passKeywords = Rendering::MaterialKeyword::None;
         if (auto kw = m_RenderServices.GetWorldPassKeywords(ctx.ViewId))
@@ -1336,15 +1276,9 @@ bool TerrainGrassRenderFeature::ShouldSkipPlacement(
     // Kill switches, read once (the house latch idiom the cull/scatter/cluster/SDSM families use):
     // GE_IDLE_ELISION=0 masters everything off, GE_IDLE_ELISION_GRASS=0 disables this family alone.
     // Both default ON — the gate is exact-input and fails toward recomputing.
-    static const bool kAllowElision = []
-    {
-        const auto enabled = [](const char* name)
-        {
-            const char* v = std::getenv(name);
-            return !v || std::strcmp(v, "0") != 0;
-        };
-        return enabled("GE_IDLE_ELISION") && enabled("GE_IDLE_ELISION_GRASS");
-    }();
+    static const bool kAllowElision =
+        Platform::EnvironmentSwitchEnabled("GE_IDLE_ELISION", true) &&
+        Platform::EnvironmentSwitchEnabled("GE_IDLE_ELISION_GRASS", true);
 
     auto it = m_PlacementScratch.find(viewId);
     if (it == m_PlacementScratch.end())
@@ -1451,7 +1385,7 @@ void TerrainGrassRenderFeature::DispatchPlacementBody(
     uint32 frameIndex)
 {
     // GE_TERRAIN_GRASS_DEBUG: trace where the placement dispatch stops. Each logs once.
-    static const bool kDbg = std::getenv("GE_TERRAIN_GRASS_DEBUG") != nullptr;
+    static const bool kDbg = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GRASS_DEBUG", false);
     auto once = [](bool& flag) { if (flag) return false; flag = true; return true; };
 
     // Every return below leaves this view's grass wrong for the frame, and each one's stop= trace
@@ -1827,7 +1761,7 @@ TerrainGrassRenderFeature::EnsureAtlasBinding(TerrainECS::TerrainRenderFeature& 
     // is 0, grassAtlasBacked() is false in the shader and the atlas terrain falls to the unified path
     // (HeightmapBindless == 0) -> roots at the base plane -> buried; residentRows shows whether the
     // resolve is resident (full precision) or falls to the coarse field.
-    static const bool kGrassDebug = std::getenv("GE_TERRAIN_GRASS_DEBUG") != nullptr;
+    static const bool kGrassDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GRASS_DEBUG", false);
     if (kGrassDebug)
     {
         uint32 residentRows = 0;

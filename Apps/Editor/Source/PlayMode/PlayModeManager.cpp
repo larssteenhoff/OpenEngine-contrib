@@ -4,6 +4,8 @@
 #include "Inspectors/AnimationPreviewManager.h"
 #include "EditorChangeNotifications.h"
 
+#include "Automation/UiReplayCommandIds.h"
+#include "Editor/Registries/EditorMenuRegistry.h"
 #include "Scene/SceneEditorController.h"
 #include "UndoRedo/IEditorCommand.h"
 #include "UndoRedo/UndoRedoService.h"
@@ -57,9 +59,9 @@ static void ResetTransientRenderState(ECS::World& world)
     // including the ones belonging to entities that are switched off.
     world.Query<ECS::Write<Components::MeshGPUData>>()
         .IncludeDisabled()
-        .Each([](Components::MeshGPUData& meshGpu)
+        .Each([](ECS::Writable<Components::MeshGPUData> meshGpu)
               {
-                  meshGpu = Components::MeshGPUData{};
+                  meshGpu.Set(Components::MeshGPUData{});
               });
 }
 
@@ -150,6 +152,95 @@ void PlayModeManager::ApplyEditModeSystemGating()
     if (m_State != PlayModeState::Edit)
         return;
     SetRuntimeSimulationSystemsEnabled(false);
+}
+
+namespace
+{
+
+// State names in the fixed-id commands' error messages.
+const char* CommandStateName(PlayModeState state)
+{
+    switch (state)
+    {
+    case PlayModeState::Edit:
+        return "Edit";
+    case PlayModeState::EnteringPlay:
+        return "EnteringPlay";
+    case PlayModeState::Play:
+        return "Play";
+    case PlayModeState::Paused:
+        return "Paused";
+    case PlayModeState::ExitingPlay:
+        return "ExitingPlay";
+    case PlayModeState::ChangeReview:
+        return "ChangeReview";
+    }
+    return "Unknown";
+}
+
+bool ExpectState(PlayModeState actual, bool matches, const char* expected, std::string* outError)
+{
+    if (matches)
+        return true;
+    if (outError)
+        *outError = std::string("expected ") + expected + ", got " + CommandStateName(actual);
+    return false;
+}
+
+} // namespace
+
+void PlayModeManager::RegisterCommands()
+{
+    auto& registry = EditorMenuRegistry::Get();
+    registry.RegisterCommand(
+        {UiReplayCommandIds::PlayEnter, [this](std::string* outError) { return RunPlayEnterCommand(outError); }});
+    registry.RegisterCommand({UiReplayCommandIds::PlayTogglePause,
+                              [this](std::string* outError) { return RunPlayTogglePauseCommand(outError); }});
+    // Stop leaves Edit alone and discards a pending Change Review.
+    registry.RegisterCommand({UiReplayCommandIds::PlayStop, [this](std::string*) {
+                                  if (m_State != PlayModeState::Edit)
+                                      TogglePlayStop();
+                                  return true;
+                              }});
+    registry.RegisterCommand({UiReplayCommandIds::AssertPlayModeEdit, [this](std::string* outError) {
+                                  return ExpectState(m_State, m_State == PlayModeState::Edit, "Edit", outError);
+                              }});
+    registry.RegisterCommand({UiReplayCommandIds::AssertPlayModePlay, [this](std::string* outError) {
+                                  return ExpectState(m_State, m_State == PlayModeState::Play, "Play", outError);
+                              }});
+    registry.RegisterCommand({UiReplayCommandIds::AssertPlayModePaused, [this](std::string* outError) {
+                                  return ExpectState(m_State, m_State == PlayModeState::Paused, "Paused", outError);
+                              }});
+    registry.RegisterCommand({UiReplayCommandIds::AssertPlayModeNotRunning, [this](std::string* outError) {
+                                  const bool notRunning =
+                                      m_State == PlayModeState::Edit || m_State == PlayModeState::ChangeReview;
+                                  return ExpectState(m_State, notRunning, "not-running (Edit or ChangeReview)",
+                                                     outError);
+                              }});
+}
+
+bool PlayModeManager::RunPlayEnterCommand(std::string* outError)
+{
+    if (m_State != PlayModeState::Edit)
+    {
+        if (outError)
+            *outError = std::string("expected Edit before PlayEnter, got ") + CommandStateName(m_State);
+        return false;
+    }
+    EnterPlayMode();
+    return true;
+}
+
+bool PlayModeManager::RunPlayTogglePauseCommand(std::string* outError)
+{
+    if (!IsPlayingOrPaused())
+    {
+        if (outError)
+            *outError = "PlayTogglePause requires Play or Paused state";
+        return false;
+    }
+    TogglePause();
+    return true;
 }
 
 void PlayModeManager::TogglePlayStop()

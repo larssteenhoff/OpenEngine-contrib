@@ -551,29 +551,15 @@ static void AddColorSwatchRow(UIElement* parent, const std::string& labelText,
                                const char* tooltip = nullptr)
 {
     using namespace InspectorDrag;
-    UIElement* row = InspectorUI::AddRow(parent);
-    Label* lbl = InspectorUI::AddLabel(row, labelText, tooltip);
-    if (lbl) lbl->AddClass("inspector-label-no-drag");
-    UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-    fieldContainer->Overrides()
-        .Set(Style::FlexDir, FlexDirection::Row)
-        .Set(Style::AlignItems, AlignItems::Center)
-        .Set(Style::Gap, StyleLength::Px(6.0f));
-
     const uint32_t argb = FloatColorToArgb(hdr ? HdrNormalized(currentColor) : currentColor);
     const size_t numComponents = currentColor.size();
 
-    auto swatch = std::make_unique<UIElement>();
-    UIElement* swatchRaw = swatch.get();
-    InspectorUI::StyleColorSwatch(swatchRaw, argb);
-    fieldContainer->AddChild(std::move(swatch));
-
-    auto rgbaLabel = std::make_unique<Label>();
-    rgbaLabel->AddClass("inspector-text");
-    rgbaLabel->SetText(FormatColorRgba(currentColor));
-    rgbaLabel->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-    Label* rgbaLabelRaw = rgbaLabel.get();
-    fieldContainer->AddChild(std::move(rgbaLabel));
+    const InspectorUI::ColorSwatchRow swatchRow = InspectorUI::AddColorSwatchRow(
+        parent, labelText, tooltip,
+        argb,
+        FormatColorRgba(currentColor));
+    UIElement* swatchRaw = swatchRow.Swatch;
+    Label* rgbaLabelRaw = swatchRow.Value;
 
     // The color picker is an app-owned singleton whose live-preview callbacks outlive
     // this row: a material rebuild frees the swatch/label while the picker stays open.
@@ -584,7 +570,7 @@ static void AddColorSwatchRow(UIElement* parent, const std::string& labelText,
         Label* rgbaLabel = rgbaLabelRef.Get();
         if (!swatch || !rgbaLabel)
             return;
-        InspectorUI::StyleColorSwatch(swatch, FloatColorToArgb(hdr ? HdrNormalized(color) : color));
+        InspectorUI::SetColorSwatchColor(swatch, FloatColorToArgb(hdr ? HdrNormalized(color) : color));
         rgbaLabel->SetText(FormatColorRgba(color));
     };
 
@@ -711,29 +697,14 @@ static void AddShaderGraphAliasedColorRow(UIElement* parent, const std::string& 
     const MaterialDocument& doc = mat->GetDocument();
     const std::vector<float> currentColor = ReadShaderGraphColorFromKeys(doc, materialKeys);
 
-    UIElement* row = InspectorUI::AddRow(parent);
-    Label* lbl = InspectorUI::AddLabel(row, labelText);
-    if (lbl)
-        lbl->AddClass("inspector-label-no-drag");
-    UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-    fieldContainer->Overrides()
-        .Set(Style::FlexDir, FlexDirection::Row)
-        .Set(Style::AlignItems, AlignItems::Center)
-        .Set(Style::Gap, StyleLength::Px(6.0f));
-
     const uint32_t argb = FloatColorToArgb(currentColor);
 
-    auto swatch = std::make_unique<UIElement>();
-    UIElement* swatchRaw = swatch.get();
-    InspectorUI::StyleColorSwatch(swatchRaw, argb);
-    fieldContainer->AddChild(std::move(swatch));
-
-    auto rgbaLabel = std::make_unique<Label>();
-    rgbaLabel->AddClass("inspector-text");
-    rgbaLabel->SetText(FormatColorRgba(currentColor));
-    rgbaLabel->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-    Label* rgbaLabelRaw = rgbaLabel.get();
-    fieldContainer->AddChild(std::move(rgbaLabel));
+    const InspectorUI::ColorSwatchRow swatchRow = InspectorUI::AddColorSwatchRow(
+        parent, labelText, nullptr,
+        argb,
+        FormatColorRgba(currentColor));
+    UIElement* swatchRaw = swatchRow.Swatch;
+    Label* rgbaLabelRaw = swatchRow.Value;
 
     const UIElement::WeakRef<> swatchRef = UIElement::MakeWeakRef(swatchRaw);
     const UIElement::WeakRef<Label> rgbaLabelRef = UIElement::MakeWeakRef(rgbaLabelRaw);
@@ -742,7 +713,7 @@ static void AddShaderGraphAliasedColorRow(UIElement* parent, const std::string& 
         Label* rgbaLabel = rgbaLabelRef.Get();
         if (!swatch || !rgbaLabel)
             return;
-        InspectorUI::StyleColorSwatch(swatch, FloatColorToArgb(color));
+        InspectorUI::SetColorSwatchColor(swatch, FloatColorToArgb(color));
         rgbaLabel->SetText(FormatColorRgba(color));
     };
 

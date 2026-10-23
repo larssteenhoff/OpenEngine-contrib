@@ -11,6 +11,7 @@
 
 #include "AssetCore/AssetTypes.h"
 #include "AssetCore/GUID.h"
+#include "Assets/AssetGridDragState.h"
 #include "Assets/AssetManager.h"
 #include "Assets/AssetRegistry.h"
 #include "Core/Engine.h"
@@ -40,17 +41,6 @@
 
 namespace GameEngine
 {
-
-// Asset grid drag state, defined in BookmarksPanel.cpp — the drop slots below
-// accept a plain asset-grid drag as well as a DragDropManager payload.
-struct DragState
-{
-    bool active = false;
-    std::filesystem::path assetPath;
-    std::string scenePath;
-    std::string entityId;
-};
-extern DragState g_DragState;
 
 namespace Editor
 {
@@ -279,20 +269,20 @@ class BuildSceneListDropTarget final : public UIElement, public UI::Interaction:
         {
             if (e.Button != 0)
                 return;
-            if (!g_DragState.active || g_DragState.assetPath.empty())
+            if (!g_DragState.Active || g_DragState.AssetPath.empty())
                 return;
-            const std::string ext = g_DragState.assetPath.extension().string();
+            const std::string ext = g_DragState.AssetPath.extension().string();
             if (ext != ".scene" && ext != ".SCENE")
                 return;
             auto& assetManager = EngineCore::GetInstance().GetAssetManager();
             const std::string rel =
-                TryMakeAssetRelativePathString(assetManager, g_DragState.assetPath);
+                TryMakeAssetRelativePathString(assetManager, g_DragState.AssetPath);
             if (rel.empty())
                 return;
             if (m_OnDrop)
                 m_OnDrop({rel});
-            g_DragState.active = false;
-            g_DragState.assetPath.clear();
+            g_DragState.Active = false;
+            g_DragState.AssetPath.clear();
             e.Stop();
         });
     }
@@ -547,20 +537,20 @@ class BuildIconDropSlot final : public UIElement, public UI::Interaction::IDropT
         {
             if (e.Button != 0)
                 return;
-            if (!g_DragState.active || g_DragState.assetPath.empty())
+            if (!g_DragState.Active || g_DragState.AssetPath.empty())
                 return;
-            if (!IsSupportedBuildIconImage(g_DragState.assetPath))
+            if (!IsSupportedBuildIconImage(g_DragState.AssetPath))
                 return;
             auto& assetManager = EngineCore::GetInstance().GetAssetManager();
             const std::string rel =
-                TryMakeAssetRelativePathString(assetManager, g_DragState.assetPath);
+                TryMakeAssetRelativePathString(assetManager, g_DragState.AssetPath);
             if (rel.empty())
                 return;
             ApplyRelativePath(rel);
             if (m_OnChanged)
                 m_OnChanged(rel);
-            g_DragState.active = false;
-            g_DragState.assetPath.clear();
+            g_DragState.Active = false;
+            g_DragState.AssetPath.clear();
             e.Stop();
         });
     }
@@ -866,10 +856,10 @@ void AppendBuildPageFields(SettingsCategoryDescriptor& build, const BuildSetting
             if (hooks.OpenBuildPanel)
                 hooks.OpenBuildPanel();
         };
-        // Already front-most: the row would only take the user where they are.
-        control.IsVisible = [hooks]()
-        { return !(hooks.IsBuildPanelActive && hooks.IsBuildPanelActive()); };
         open.Control = std::move(control);
+        // Already front-most: the row would only take the user where they are.
+        open.IsVisible = [hooks]()
+        { return !(hooks.IsBuildPanelActive && hooks.IsBuildPanelActive()); };
         build.Fields.push_back(std::move(open));
     }
 

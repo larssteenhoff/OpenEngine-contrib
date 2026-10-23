@@ -23,12 +23,9 @@ using GameEngine::Engine::Renderer::ShadowMapRenderFeature;
 
 TEST(ShadowDitherBasis, UboMatchesTheShaderBlock)
 {
-    // 464 through shadowFilterParams, then the terrain's clearance map: four
-    // vec4s of grid and one uvec4 of sources (terrainShadowGrid0..3,
-    // terrainShadowSource). The struct is alignas(16), so a member that is not
-    // a 16-byte multiple would land here as an unexpected size rather than as
-    // padding nobody notices.
-    EXPECT_EQ(sizeof(ShadowDataGPU), 544u);
+    // 464-byte core, 80-byte terrain clearance map and 16-byte mirror depth plane.
+    EXPECT_EQ(sizeof(ShadowDataGPU), 560u);
+    EXPECT_EQ(offsetof(ShadowDataGPU, ShadowReferenceDepth), 544u);
 }
 
 // The dark-ship gate. Defaulting anywhere else would change the look of every

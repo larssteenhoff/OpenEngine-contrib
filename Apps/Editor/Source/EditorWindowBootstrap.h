@@ -32,9 +32,6 @@ void ApplyWindowDescriptor(EditorApplication::EditorWindowContext& ctx,
                            const EditorApplication::WindowDescriptor& desc,
                            uint64_t windowId);
 
-// Re-apply the persisted accent color to a freshly created UIManager.
-void ApplySavedAccentStyle(UIManager* ui);
-
 // Editor font registration + defaults for a freshly created UIManager.
 void ConfigureEditorUiFonts(UIManager* ui, AssetManager* assetManager,
                             const std::filesystem::path& assetsDirectory);

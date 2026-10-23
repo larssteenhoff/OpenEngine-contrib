@@ -5,6 +5,7 @@
 #include "ECS/Components.h"
 #include "ECS/Query.h"
 #include "ECS/World.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <cmath>
@@ -122,16 +123,6 @@ float SpatialWeight(const ExtractedWindVolume& vol, float worldX, float worldY, 
     return t * t * (3.0f - 2.0f * t);
 }
 
-void HashBytes(uint64& hash, const void* data, std::size_t size)
-{
-    const auto* bytes = static_cast<const std::uint8_t*>(data);
-    for (std::size_t i = 0; i < size; ++i)
-    {
-        hash ^= bytes[i];
-        hash *= 1099511628211ull;
-    }
-}
-
 int32 Quantize(float value, float scale)
 {
     return static_cast<int32>(std::lround(value * scale));
@@ -222,7 +213,7 @@ ResolvedWind WindVolumeResolver::ResolveAt(ECS::World& world,
             std::max(volume.Volume.Turbulence, 0.0f),
             std::max(volume.Volume.GustFrequency, 0.0f),
             std::max(volume.Volume.GustScale, 0.001f),
-            influence};
+            influence, std::clamp(volume.Volume.RainAmount, 0.0f, 2.0f)};
 
         if (volume.Volume.BlendMode == Components::WindVolumeBlendMode::Override)
         {
@@ -252,9 +243,12 @@ ResolvedWind WindVolumeResolver::ResolveAt(ECS::World& world,
             result.GustScale += (target.GustScale - result.GustScale) * influence;
         }
 
+        result.RainAmount += (volume.Volume.BlendMode == Components::WindVolumeBlendMode::Override ?
+            target.RainAmount - result.RainAmount : target.RainAmount - 1.0f) * influence;
         result.Weight = std::max(result.Weight, influence);
     }
 
+    result.RainAmount = std::clamp(result.RainAmount, 0.0f, 2.0f);
     result.Turbulence = std::max(result.Turbulence, 0.0f);
     result.GustFrequency = std::max(result.GustFrequency, 0.0f);
     result.GustScale = std::max(result.GustScale, 0.001f);
@@ -297,9 +291,50 @@ void WindVolumeResolver::ExtractGPU(ECS::World& world, std::vector<Rendering::Wi
     }
 }
 
+WeatherWindGPU WindVolumeResolver::ExtractForGpu(ECS::World& world)
+{
+    auto& volumes = ExtractVolumes(world);
+    std::erase_if(volumes, [](const ExtractedWindVolume& v) {
+        return (!v.Volume.IsGlobal && !v.ValidSpatial) || v.Volume.Weight <= 0.0f;
+    });
+    WeatherWindGPU result{};
+    const size_t first = volumes.size() > kMaxWeatherWindVolumes ? volumes.size() - kMaxWeatherWindVolumes : 0;
+    for (size_t i = first; i < volumes.size(); ++i)
+    {
+        const auto& v = volumes[i];
+        auto& gpu = result.Volumes[i - first];
+        for (size_t axis = 0; axis < 3; ++axis)
+        {
+            gpu.CenterBlend[axis] = v.Center[axis];
+            gpu.AxisXExtent[axis] = v.AxisX[axis];
+            gpu.AxisYExtent[axis] = v.AxisY[axis];
+            gpu.AxisZExtent[axis] = v.AxisZ[axis];
+        }
+        gpu.CenterBlend[3] = std::max(v.Volume.BlendDistance, 0.0f);
+        gpu.AxisXExtent[3] = std::max(v.HalfExtents[0], 0.001f);
+        gpu.AxisYExtent[3] = std::max(v.HalfExtents[1], 0.001f);
+        gpu.AxisZExtent[3] = std::max(v.HalfExtents[2], 0.001f);
+        float x = v.Volume.DirectionX, y = v.Volume.DirectionY, z = v.Volume.DirectionZ;
+        Normalize3(x, y, z);
+        const float speed = std::max(v.Volume.Speed, 0.0f);
+        gpu.VelocityWeight[0] = x * speed;
+        gpu.VelocityWeight[1] = y * speed;
+        gpu.VelocityWeight[2] = z * speed;
+        gpu.VelocityWeight[3] = Clamp01(v.Volume.Weight);
+        gpu.Gust[0] = std::max(v.Volume.Turbulence, 0.0f);
+        gpu.Gust[1] = std::max(v.Volume.GustFrequency, 0.0f);
+        gpu.Gust[2] = std::max(v.Volume.GustScale, 0.001f);
+        gpu.Gust[3] = v.Volume.IsGlobal ? 1.0f : 0.0f;
+        gpu.Mode[0] = static_cast<float>(v.Volume.Shape);
+        gpu.Mode[1] = static_cast<float>(v.Volume.BlendMode);
+        gpu.Mode[2] = std::clamp(v.Volume.RainAmount, 0.0f, 2.0f);
+    }
+    result.Count[0] = static_cast<float>(volumes.size() - first);
+    return result;
+}
+
 uint64 WindVolumeResolver::QuantizedHash(const ResolvedWind& wind)
 {
-    uint64 hash = 1469598103934665603ull;
     const int32 values[] = {
         Quantize(wind.VelocityX, 1000.0f),
         Quantize(wind.VelocityY, 1000.0f),
@@ -308,9 +343,9 @@ uint64 WindVolumeResolver::QuantizedHash(const ResolvedWind& wind)
         Quantize(wind.GustFrequency, 1000.0f),
         Quantize(wind.GustScale, 1000.0f),
         Quantize(wind.Weight, 1000.0f),
+        Quantize(wind.RainAmount, 1000.0f),
     };
-    HashBytes(hash, values, sizeof(values));
-    return hash;
+    return Hashing::Fnv1a64(values, sizeof(values));
 }
 
 } // namespace GameEngine::Engine::Renderer

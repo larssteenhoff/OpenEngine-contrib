@@ -21,22 +21,32 @@ void CharacterControllerWritebackSystem::Update(ECS::World& world, float32 /*del
                 ECS::Write<GameEngine::Components::WorldTransform>,
                 ECS::Write<GameEngine::Components::CharacterController>>()
         .Each([&](ECS::EntityHandle e,
-                  GameEngine::Components::Transform& t,
-                  GameEngine::Components::WorldTransform& wt,
-                  GameEngine::Components::CharacterController& cc)
+                  ECS::Writable<GameEngine::Components::Transform> t,
+                  ECS::Writable<GameEngine::Components::WorldTransform> wt,
+                  ECS::Writable<GameEngine::Components::CharacterController> controller)
               {
+                  const GameEngine::Components::CharacterController& cc = controller.Get();
                   if (!cc.initialized || !pw->IsCharacterValid(cc.character))
                       return;
 
-                  cc.grounded = pw->IsCharacterGrounded(cc.character);
+                  const bool grounded = pw->IsCharacterGrounded(cc.character);
                   const Physics::Vector3 n = pw->GetCharacterGroundNormal(cc.character);
-                  cc.groundNormalX = n.x;
-                  cc.groundNormalY = n.y;
-                  cc.groundNormalZ = n.z;
+                  if (cc.grounded != grounded || cc.groundNormalX != n.x ||
+                      cc.groundNormalY != n.y || cc.groundNormalZ != n.z)
+                  {
+                      GameEngine::Components::CharacterController& written = controller.Mutable();
+                      written.grounded = grounded;
+                      written.groundNormalX = n.x;
+                      written.groundNormalY = n.y;
+                      written.groundNormalZ = n.z;
+                  }
 
-                  if (WritePhysicsPose(world, e, pw->GetCharacterTransform(cc.character), nullptr, 1.0f, t, wt,
-                                       cc.WritebackRecord))
+                  if (const auto record = WritePhysicsPose(world, e, pw->GetCharacterTransform(cc.character),
+                                                           nullptr, 1.0f, t, wt, cc.WritebackRecord))
+                  {
+                      controller.Mutable().WritebackRecord = *record;
                       ++composed;
+                  }
               });
     PhysicsWorldService::SetLastCharactersComposed(composed);
 }

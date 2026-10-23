@@ -10,10 +10,12 @@
 set(GE_SCRIPT_SURFACE_MANAGED_DIRS
   ECS.ABI
   Scripting.Bindings
+  TileMap.ABI
   Platform.ABI
   Scripting.Runtime)
 set(GE_SCRIPT_SURFACE_ASSEMBLY_TARGETS
   EcsAbiAssembly
   ScriptingBindingsAssembly
+  TileMapAbiAssembly
   PlatformAbiAssembly
   ScriptingRuntimeAssembly)

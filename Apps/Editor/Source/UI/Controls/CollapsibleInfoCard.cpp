@@ -1,5 +1,6 @@
 #include "UI/Controls/CollapsibleInfoCard.h"
 
+#include "UI/Controls/Button.h"
 #include "UI/Controls/Label.h"
 #include "UI/InfoCard.h"
 #include "UI/UIEvents.h"
@@ -59,7 +60,31 @@ CollapsibleInfoCard::CollapsibleInfoCard(const std::string& text)
 
     AddChild(std::move(line));
 
+    auto action = std::make_unique<Button>();
+    action->AddClass("editor-info-card-action");
+    action->AddClass("small");
+    action->AddClass("hidden");
+    action->RegisterEventHandler(kEventButtonClick,
+                                 [this](UIEvent&)
+                                 {
+                                     if (m_OnInvoke)
+                                         m_OnInvoke();
+                                 });
+    m_Action = action.get();
+    AddChild(std::move(action));
+
     ApplyState();
+}
+
+void CollapsibleInfoCard::SetAction(const std::string& label, const std::string& tooltip,
+                                    std::function<void()> onInvoke)
+{
+    m_OnInvoke = std::move(onInvoke);
+    m_Action->SetText(label);
+    m_Action->SetTooltip(tooltip);
+    m_Action->RemoveClass("hidden");
+    AddClass("editor-info-card-has-action");
+    MarkDirtySubtree(StyleDirty | LayoutDirty | VisualDirty);
 }
 
 void CollapsibleInfoCard::OnPostLayout()
@@ -152,6 +177,9 @@ void CollapsibleInfoCard::UpdateToggleVisibility()
 
 void CollapsibleInfoCard::OnEvent(UIEvent& e)
 {
+    // A click on the action is the action's, never a fold toggle.
+    if (e.Target == m_Action)
+        return;
     if (m_Foldable && e.Id == kEventMouseUp && e.Button == 0)
     {
         SetExpanded(!m_Expanded);

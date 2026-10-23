@@ -5,6 +5,7 @@
 #include "UI/SmartFolder/SmartFolderManager.h"
 #include "Editor/Vcs/EditorVcsProviderRegistry.h"
 #include "VCSIntegration/IVCSIntegration.h"
+#include "Types/Fnv1a.h"
 #include "Types/StringUtils.h"
 #include "VCSIntegration/VCSFileStatus.h"
 #include <algorithm>
@@ -862,18 +863,6 @@ AssetsGridDataProvider::AssetsGridDataProvider() {
 
 namespace
 {
-static uint64_t Fnv1a64(const char* data, size_t len)
-{
-    // 64-bit FNV-1a
-    uint64_t hash = 1469598103934665603ull;
-    for (size_t i = 0; i < len; ++i)
-    {
-        hash ^= (uint64_t)(unsigned char)data[i];
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
-
 static uint64_t StableHashPath(const std::filesystem::path& p)
 {
     std::error_code ecAbs;
@@ -883,7 +872,7 @@ static uint64_t StableHashPath(const std::filesystem::path& p)
         abs = p;
     }
     const std::string key = abs.lexically_normal().generic_string();
-    return Fnv1a64(key.data(), key.size());
+    return Hashing::Fnv1a64(key);
 }
 } // namespace
 

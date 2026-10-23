@@ -97,8 +97,13 @@ namespace GameEngine {
        painted splat stores. GUID-referenced from the Terrain component, so one \
        library can back several terrains. */ \
     X(TerrainMaterialLibrary) \
+    X(TileSet) \
+    X(TileMap) \
     /* Pose graph (.animgraph JSON). Evaluated at runtime; node-graph authoring is later. */ \
+    /* Shared contact surface (.physmat JSON). */ \
+    X(PhysicsMaterial) \
     X(AnimationGraph) \
+    X(Localization) \
     /* A particle processor stack (.particlestack): JSON as authored, cooked binary in a \
        packaged game. GUID-referenced from ParticleEmitter3D. */ \
     X(ParticleStack)

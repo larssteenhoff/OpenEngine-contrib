@@ -1,4 +1,5 @@
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Core/RenderGraph/RGFrame.h"
 
 // Engine stage/access mask bits. (Header drags the old RenderGraph.h include
@@ -9,7 +10,6 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -329,10 +329,7 @@ void RGFrame::MarkRecordSecondary(RGPassId p)
 // R2 loop records every pass interior inline, exactly as pre-fork.
 static bool ParallelRecordEnabled()
 {
-    static const bool kEnabled = []() {
-        const char* e = std::getenv("GE_PARALLEL_RECORD");
-        return e != nullptr && e[0] != '0' && e[0] != '\0';
-    }();
+    static const bool kEnabled = Platform::EnvironmentSwitchEnabled("GE_PARALLEL_RECORD", false);
     return kEnabled;
 }
 
@@ -613,8 +610,8 @@ void RGFrame::RecordAndSubmit()
             // checkpoints, so arming checkpoints without per-pass markers would
             // leave every render-graph pass invisible to the executed-side dump.
             static const bool kRgPassDiagMarkers =
-                std::getenv("GE_VK_DEBUG_MARKERS") != nullptr ||
-                std::getenv("GE_VK_GPU_CHECKPOINTS") != nullptr;
+                Platform::EnvironmentSwitchEnabled("GE_VK_DEBUG_MARKERS", false) ||
+                Platform::EnvironmentSwitchEnabled("GE_VK_GPU_CHECKPOINTS", false);
             if (kRgPassDiagMarkers)
                 cl->SetMarker(name ? name : "RGPass");
 

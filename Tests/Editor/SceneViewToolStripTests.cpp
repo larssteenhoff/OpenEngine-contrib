@@ -322,3 +322,36 @@ TEST(SceneViewToolStrip, TerrainAvailabilityUsesEachViewsWorld)
     EXPECT_TRUE(entry.IsAvailable(&terrainWorld));
     EXPECT_FALSE(entry.IsAvailable(&empty));
 }
+
+TEST(SceneViewToolStrip, AToolRegisteredAfterABadgeGroupStaysBeforeItsDivider)
+{
+    for (const auto placement : {ToolStripPlacement::Floating, ToolStripPlacement::Inline})
+    {
+        SceneViewToolStripRegistry registry;
+        SceneViewToolStripEntry notes;
+        notes.Id = "notes";
+        notes.OnBadgeButton = [](UIElement&) {};
+        registry.Register(notes);
+
+        UIElement strip;
+        auto builtIn = std::make_unique<Button>();
+        UIElement* builtInPtr = builtIn.get();
+        strip.AddChild(std::move(builtIn));
+        Editor::RegisteredToolStrip kept;
+        kept.Populate(strip, placement, registry, {});
+        UIElement* divider = strip.GetChildren()[1].get();
+        UIElement* notesButton = FindButton(strip, placement, "notes");
+
+        SceneViewToolStripEntry paint;
+        paint.Id = "paint";
+        registry.Register(paint);
+        kept.Populate(strip, placement, registry, {});
+        kept.Populate(strip, placement, registry, {});
+
+        ASSERT_EQ(strip.GetChildren().size(), 5u);
+        EXPECT_EQ(strip.GetChildren()[0].get(), builtInPtr);
+        EXPECT_EQ(strip.GetChildren()[1].get(), FindButton(strip, placement, "paint"));
+        EXPECT_EQ(strip.GetChildren()[2].get(), divider);
+        EXPECT_EQ(strip.GetChildren()[3].get(), notesButton);
+    }
+}

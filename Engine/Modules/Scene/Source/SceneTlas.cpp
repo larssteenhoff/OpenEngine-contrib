@@ -18,6 +18,7 @@
 #include "ECSModules/Rendering/Systems/RenderExtractionSystem.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include "TlasInternal.h"
 
@@ -105,17 +106,13 @@ uint32 ParallelChunkOverrideFromEnv()
 
 RefitExecution SceneTlas::DefaultRefitExecution()
 {
-    // ON unless "0" (house idiom, mirrors GE_TLAS_DIRTY_GATE); latched once
+    // ON unless switched off (mirrors GE_TLAS_DIRTY_GATE); latched once
     // per process so a mid-run env change cannot split behavior. The
     // update system reads the same variable at its construction and passes
     // its policy explicitly — this default serves direct-API callers.
-    static const RefitExecution s_Default = []
-    {
-        if (const char* v = std::getenv("GE_TLAS_PARALLEL_REFIT");
-            v && std::strcmp(v, "0") == 0)
-            return RefitExecution::Serial;
-        return RefitExecution::Parallel;
-    }();
+    static const RefitExecution s_Default = Platform::EnvironmentSwitchEnabled("GE_TLAS_PARALLEL_REFIT", true)
+                                                ? RefitExecution::Parallel
+                                                : RefitExecution::Serial;
     return s_Default;
 }
 

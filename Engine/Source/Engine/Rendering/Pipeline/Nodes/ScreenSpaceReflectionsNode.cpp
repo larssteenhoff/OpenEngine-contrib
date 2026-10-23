@@ -138,7 +138,8 @@ PipelineHandle ScreenSpaceReflectionsNode::BeginProgram(RenderGraph::RGContext& 
                                                          const PostProcessSettings& settings,
                                                          uint32_t frameIndex,
                                                          bool historyValid,
-                                                         const Mathematics::Rect& viewportRect) const
+                                                         const Mathematics::Rect& viewportRect,
+                                                         bool hasPlanarMask) const
 {
     const ComputeProgram& p = m_Programs[program];
     PipelineHandle pipeline = ctx.GetOrCreatePipelineVariant(p.Pipeline);
@@ -160,6 +161,7 @@ PipelineHandle ScreenSpaceReflectionsNode::BeginProgram(RenderGraph::RGContext& 
             writer.Add("debugMode", SssrDebugMode());
             writer.Add("sampleQuality", settings.SSSRSampleQuality);
             writer.Add("multiBounce", settings.SSSRMultiBounce);
+            writer.Add("hasPlanarMask", hasPlanarMask ? 1u : 0u);
             // Rect is four consecutive floats in the shader's member order.
             static_assert(sizeof(Mathematics::Rect) == 4 * sizeof(float));
             writer.Add("viewportRect", viewportRect);
@@ -170,21 +172,6 @@ PipelineHandle ScreenSpaceReflectionsNode::BeginProgram(RenderGraph::RGContext& 
     return pipeline;
 }
 
-Mathematics::Rect ScreenSpaceReflectionsNode::ComputeViewportRect(const ViewLetterbox& letterbox,
-                                                                  uint32_t targetWidth,
-                                                                  uint32_t targetHeight)
-{
-    const Mathematics::Rect wholeTarget{0.0f, 0.0f, 1.0f, 1.0f};
-    if (!letterbox.active || targetWidth == 0 || targetHeight == 0 || letterbox.width == 0 ||
-        letterbox.height == 0)
-        return wholeTarget;
-    const float w = static_cast<float>(targetWidth);
-    const float h = static_cast<float>(targetHeight);
-    return Mathematics::Rect{static_cast<float>(letterbox.x) / w,
-                             static_cast<float>(letterbox.y) / h,
-                             static_cast<float>(letterbox.width) / w,
-                             static_cast<float>(letterbox.height) / h};
-}
 
 void ScreenSpaceReflectionsNode::DeclareForView(ViewDeclare& d)
 {
@@ -222,6 +209,10 @@ bool ScreenSpaceReflectionsNode::DeclareChain(ViewDeclare& d)
         return false;
     }
 
+    // Planar reflections can resolve material MRTs under MSAA, but this does
+    // not change SSR's single-sample world contract.
+    if (d.ViewDepth.IsValid() && d.Frame.Graph().ResourceDesc(d.ViewDepth.Id).SampleCount > 1)
+        return false;
     const RenderGraph::RGTexture depth = d.ViewDepthResolved;
     // Nearest-surface (MAX) pyramid: the intersect's crossing test needs the tile
     // NEAREST depth, not the occlusion HZB's farthest bound (which over-steps).
@@ -796,11 +787,15 @@ bool ScreenSpaceReflectionsNode::DeclareChain(ViewDeclare& d)
                 ctx.Cmd->Dispatch(gx, gy, 1);
         });
 
+    const auto planarMask = d.ResolveTexture(Names::View::PlanarReflectionMask);
+    const auto planarMaskBinding = planarMask.IsValid() ? planarMask : depth;
+
     d.Frame.AddPass(
         d.PassName("Composite").c_str(), PassPhase::kDefault,
         [&](RenderGraph::RGPassBuilder& p)
         {
             p.Read(input, RenderGraph::RGTextureRead::SampledCompute);
+            p.Read(planarMaskBinding, RenderGraph::RGTextureRead::SampledCompute);
             p.Read(historyWrite, RenderGraph::RGTextureRead::SampledCompute);
             p.Read(depth, RenderGraph::RGTextureRead::SampledCompute);
             p.Read(normalRoughness, RenderGraph::RGTextureRead::SampledCompute);
@@ -816,6 +811,7 @@ bool ScreenSpaceReflectionsNode::DeclareChain(ViewDeclare& d)
             const auto& meta = *m_Programs[Composite].Meta;
             NamedDescriptorWriter writer(device, set, meta, 0);
             writer.AddCombinedImageSampler("uSceneColor", ctx.GetTexture(input), m_PointSampler);
+            writer.AddCombinedImageSampler("uPlanarMask", ctx.GetTexture(planarMaskBinding), m_PointSampler);
             writer.AddCombinedImageSampler("uReflections", ctx.GetTexture(historyWrite), m_PointSampler);
             writer.AddCombinedImageSampler("uDepth", ctx.GetTexture(depth), m_PointSampler);
             writer.AddCombinedImageSampler("uNormalRoughness", ctx.GetTexture(normalRoughness),
@@ -828,7 +824,7 @@ bool ScreenSpaceReflectionsNode::DeclareChain(ViewDeclare& d)
             Detail::BindStorageImageByName(device, set, meta, "uOutput", ctx.GetTexture(output));
             Detail::BindStorageImageByName(device, set, meta, "uSceneHistoryOut",
                                            ctx.GetTexture(sceneHistoryWrite));
-            if (BeginProgram(ctx, Composite, set, settings, frameIndex, historyValid, viewportRect)
+            if (BeginProgram(ctx, Composite, set, settings, frameIndex, historyValid, viewportRect, planarMask.IsValid())
                     .IsValid())
                 ctx.Cmd->Dispatch(gx, gy, 1);
         });

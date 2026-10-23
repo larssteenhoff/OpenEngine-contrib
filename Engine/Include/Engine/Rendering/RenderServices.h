@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include "Engine/Rendering/SortedTransparentComposition.h"
+#include "Engine/Rendering/WindVolumeResolver.h"
+
 #include "AssetCore/Asset.h"          // SharedPtr<Asset> in PendingGpuUpload
 #include "AssetCore/AssetRegistry.h" // AssetReference
 #include "Types/ScopedSubscription.h"
@@ -144,6 +147,7 @@ namespace Engine::Renderer
 {
 class IRenderFeature;
 class ShadowMapRenderFeature;
+struct ShadowDataGPU;
 class RetargetRenderFeature;
 class MaterialCompiler;
 class SceneAccelerationStructureService;
@@ -264,8 +268,9 @@ struct alignas(16) ForwardLightUBO
     float uSecondaryCount[4];  // x=valid secondary directional count (as float)
     float uSecondaryDirs[kMaxSecondaryDirectionals][4];   // xyz=light->surface direction
     float uSecondaryColors[kMaxSecondaryDirectionals][4]; // rgb=color*intensity (premultiplied)
+    WeatherWindGPU WeatherWind{};
 };
-static_assert(sizeof(ForwardLightUBO) == 240, "LightUBO layout drifted from the GLSL block");
+static_assert(sizeof(ForwardLightUBO) == 3840, "LightUBO layout drifted from the GLSL block");
 static_assert(offsetof(ForwardLightUBO, uLightDirWorld) == 64);
 static_assert(offsetof(ForwardLightUBO, uLightColorWorld) == 80);
 static_assert(offsetof(ForwardLightUBO, uAmbient) == 96);
@@ -273,6 +278,7 @@ static_assert(offsetof(ForwardLightUBO, uTimeParams) == 112);
 static_assert(offsetof(ForwardLightUBO, uSecondaryCount) == 128);
 static_assert(offsetof(ForwardLightUBO, uSecondaryDirs) == 144);
 static_assert(offsetof(ForwardLightUBO, uSecondaryColors) == 192);
+static_assert(offsetof(ForwardLightUBO, WeatherWind) == 240);
 
 // The directionals the forward pass shades, from a finalized (strongest-first) world light list:
 // the primary (SelectPrimaryDirectional) in out[0], then up to kMaxSecondaryDirectionals
@@ -332,6 +338,7 @@ static_assert(sizeof(PointShadowSlotGPU) == 416, "PointShadowSlotGPU must be 416
 
 class RenderServices;
 class MaterialBinder;
+struct DrawStreamLookupKey;
 
 // Central owner of rendering subsystems used by ECS-facing systems and Editor
 class RenderServices
@@ -1094,6 +1101,13 @@ class RenderServices
     Rendering::RenderGraph::RGTexture ImportTransmittanceShadowArrayRG(
         Rendering::RenderGraph::RGFrame& frame, Rendering::ViewId viewId, ShadowDeclareSeam);
 
+    void PublishDirectionalShadowDataRG(Rendering::RenderGraph::RGFrame& frame,
+        Rendering::ViewId viewId, Rendering::RenderGraph::RGFrame::TypedUpload<ShadowDataGPU> data);
+    // Reuse only same-frame, same-world directional resources. No new atlas or
+    // shadow render is created. Receiver matrices are rebased for the mirror.
+    bool ShareDirectionalShadowsRG(Rendering::RenderGraph::RGFrame& frame,
+        Rendering::ViewId sourceView, Rendering::ViewId receiverView);
+
     // Publish a punctual (area/spot/point) family's per-view map + data upload
     // into ViewFrameRG so the world binding table's BuildPassResourcesRG reads
     // them (bound by name "AreaShadowData" / "SpotShadowData" / "PointShadowData",
@@ -1160,6 +1174,32 @@ class RenderServices
 
     // Camera + view registries live in ViewRegistry (A1.2). RenderServices owns
     // it by value; reach it via Views().
+    struct DepthPixelationViews
+    {
+        static constexpr int kMaxBands = 10;
+        static constexpr int kSkyIndex = kMaxBands;
+        int BandCount = 3;
+        bool SimpleScreenSpace = false;
+        uint32_t GuardPixels = 1;
+        std::array<Rendering::ViewId, kMaxBands + 1> Views{};
+        std::array<Rendering::CameraId, kMaxBands + 1> Cameras{};
+        std::array<std::array<uint32_t, 2>, kMaxBands + 1> RasterExtents{};
+        std::array<std::array<float, 4>, kMaxBands + 1> UVTransforms{};
+    };
+    static std::array<uint32_t, 2> DepthPixelationRasterExtent(
+        const PostProcessSettings& pp, int band, uint32_t width, uint32_t height);
+    static Rendering::CameraData StabilizeDepthPixelationCamera(
+        const Rendering::CameraData& camera, uint32_t width, uint32_t height,
+        float focusDistance, bool enabled, std::array<float, 4>& uvTransform, uint32_t guardPixels = 1);
+    void SyncDepthPixelationViews(uint64 worldId, bool allowAllocation = true);
+    const DepthPixelationViews* FindDepthPixelationViews(Rendering::ViewId parent) const;
+    bool IsDepthPixelationView(Rendering::ViewId view) const;
+    bool GetDepthPixelationBandRange(Rendering::ViewId view, float& start, float& end, int& distanceMode) const;
+    void PrepareDepthPixelationFrame(Rendering::RenderGraph::RGFrame& frame,
+                                      std::span<const Pipeline::ViewTargetsRG> parents,
+                                      std::vector<Pipeline::ViewTargetsRG>& targets);
+    void AppendDepthPixelationTargets(Rendering::RenderGraph::RGFrame& frame,
+                                     std::vector<Pipeline::ViewTargetsRG>& targets);
     ViewRegistry& Views() { return m_ViewRegistry; }
     const ViewRegistry& Views() const { return m_ViewRegistry; }
 
@@ -1196,6 +1236,11 @@ class RenderServices
     {
         Rendering::RenderGraph::RGTexture Out{};
         Rendering::TextureHandle Physical{};
+        bool PixelPerfectCrossing = false;
+        bool NeedsPixelPerfectFallback(bool pixelPerfectActive) const
+        {
+            return pixelPerfectActive && !PixelPerfectCrossing;
+        }
         bool IsValid() const { return Out.IsValid() && Physical.IsValid(); }
     };
     PipelineOutputRG GetPipelineOutputRG(Rendering::RenderGraph::RGFrame& frame,
@@ -1371,8 +1416,8 @@ class RenderServices
     // Instances that moved THIS frame in a way the motion-vector pass must
     // rasterize: a nonzero object motion vector (prevTransform != transform),
     // an active skin palette (the pose deforms even when the root is still),
-    // or both. Extraction appends during its serial apply/patch phases
-    // (mutex-guarded for multi-world safety); the TAA movers motion-vector
+    // or both. Extraction appends during its serial apply/patch phases, one
+    // world at a time (see m_FrameMoversMutex); the TAA movers motion-vector
     // pass drains the list at declare time. Cleared in BeginWorldDrawFrame.
     //
     // Palette offsets are captured here rather than re-read at declare time
@@ -1428,6 +1473,7 @@ class RenderServices
     void EmitProducerForwardCommandsForView(
         Rendering::ViewId viewId,
         ForwardEmitPurpose purpose = ForwardEmitPurpose::World);
+    void EmitFrameForwardCommandsForView(Rendering::RenderGraph::RGFrame& frame, Rendering::ViewId viewId);
     // While true, the next world pass(es) declared bind a zero-intensity
     // EnvData so the forward IBL contributes no environment radiance. The
     // reflection-probe capture sets this around its own face passes (with
@@ -1572,6 +1618,8 @@ class RenderServices
     // start of each frame by BeginWorldDrawFrame(). Called by RenderExtractionSystem
     // for ECS worlds and directly by isolated renderers (e.g. thumbnails).
     void SubmitLight(uint64 worldId, const ExtractedLight& light);
+    void SetWorldWeatherWind(uint64 worldId, const WeatherWindGPU& wind) { m_WorldWeatherWind[worldId] = wind; }
+    void PackViewWeather(Rendering::ViewId viewId, uint64 worldId, ForwardLightUBO& ubo) const;
 
     // Sort a world's submitted lights strongest-first (view-independent
     // contribution), deterministic tie-break by SortId. Single source of truth:
@@ -1599,10 +1647,13 @@ class RenderServices
 
     // Digest of a world's renderable MEMBERSHIP (mesh, material, flags per
     // extracted instance — not transforms), published by RenderExtractionSystem
-    // each frame. Reflection probes fold it into their bake digest so a "Once"
-    // probe recaptures when scene content appears, disappears, or changes
-    // appearance, not merely when the sky or the probe itself changes.
-    void SetWorldRenderContentDigest(uint64 worldId, uint64 digest);
+    // each frame. The stored value adds every render feature's
+    // IRenderFeature::ContentDigest for the world (ocean, terrain, ...), so
+    // feature-rendered content counts too. Reflection probes fold it into their
+    // bake digest so a "Once" probe recaptures when scene content appears,
+    // disappears, or changes appearance, not merely when the sky or the probe
+    // itself changes.
+    void SetWorldRenderContentDigest(uint64 worldId, uint64 extractedDigest);
     // Returns the world's last published content digest (0 = never published).
     uint64 GetWorldRenderContentDigest(uint64 worldId) const;
 
@@ -1759,14 +1810,8 @@ class RenderServices
     using ForwardEmitFn = std::function<void(ForwardEmitContext&)>;
     using DepthEmitFn = std::function<void(DepthEmitContext&, DepthPassType)>;
 
-    // `writesDepth` is the producer's depth contract for idle recompute
-    // elision: true (the conservative default) declares its draws can change
-    // the rasterized DEPTH of a view (opaque/alpha-tested content — terrain,
-    // grass, water surfaces), which pins every depth-derived elision family
-    // to recompute each frame while the producer is registered. Blend-only
-    // producers that never write depth (smoke/spray billboards) pass false —
-    // their color animation is invisible to depth-derived passes.
-    [[nodiscard]] ScopedSubscription RegisterForwardEmit(ForwardEmitFn fn, bool writesDepth = true);
+    // `options` states the producer's depth contract and when it runs (ForwardProducerOptions).
+    [[nodiscard]] ScopedSubscription RegisterForwardEmit(ForwardEmitFn fn, ForwardProducerOptions options = {});
     [[nodiscard]] ScopedSubscription RegisterDepthEmit(DepthEmitFn fn);
 
     // Forward DrawCommand stream API. Producers (contributors today; ECS
@@ -1785,6 +1830,10 @@ class RenderServices
     // writable for the frame.
     void EmitForwardCommand(::GameEngine::Rendering::ViewId viewId, const DrawCommand& cmd,
                             ForwardDrawDepth depth, const DrawCommand* prepassHead = nullptr);
+    /// Submit a depth-tested, non-depth-writing draw to the shared transparent order.
+    /// The producer supplies per-view sorting and a stable entity/subdraw tie breaker.
+    void EmitSortedTransparentCommand(::GameEngine::Rendering::ViewId viewId,
+                                      const SortedTransparentCommand& command);
     void EmitLateForwardCommand(::GameEngine::Rendering::ViewId viewId, const DrawCommand& cmd);
     // Declared-read side channel for EmitForwardCommand: a producer whose
     // emitted draw samples a render-graph-written texture descriptor-direct
@@ -1891,6 +1940,51 @@ class RenderServices
                                  Rendering::MaterialKeyword passKeywords, WorldPassDrawScope scope,
                                  Rendering::GPUDrawStreamBuilder::SlicePhase phase,
                                  uint8_t sliceCascadeIndex);
+    // AddWorldPassImpl phases. WorldPassDeclaration carries the pass's
+    // declaration-time identity, WorldPassAttachmentPlan its load/clear/resolve
+    // decisions, WorldPassExecData the exec closure's captures,
+    // WorldPassRecordState the exec-time recording state and WorldEntityBatch
+    // one entity batch's resolved draw inputs.
+    struct WorldPassDeclaration;
+    struct WorldPassAttachmentPlan;
+    struct WorldPassExecData;
+    struct WorldPassRecordState;
+    struct WorldEntityBatch;
+    bool WorldPassHasWork(Rendering::ViewId viewId, const Rendering::ViewDesc* view,
+                          const WorldPassTargetsRG& targets, bool isRecover);
+    void ImportWorldPassSampledInputs(const WorldPassDeclaration& decl, Rendering::MaterialKeyword passKeywords,
+                                      bool wantsShadows);
+    WorldPassAttachmentPlan PlanWorldPassAttachments(const WorldPassDeclaration& decl);
+    void ResolveWorldPassViewport(const WorldPassDeclaration& decl, uint32_t& viewportW, uint32_t& viewportH);
+    Rendering::MaterialKeyword DeclareWorldRTShadowMask(
+        const WorldPassDeclaration& decl, const RenderGraph::RGFrame::TypedUpload<CameraData>& cam,
+        const ResolvedShadowSettings& worldShadowSettings, Rendering::MaterialKeyword passKeywords);
+    void DeclareRTShadowMaskPass(const WorldPassDeclaration& decl,
+                                 const RenderGraph::RGFrame::TypedUpload<CameraData>& cam,
+                                 const ResolvedShadowSettings& worldShadowSettings);
+    void DeclareWorldPassContractReads(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl);
+    void DeclareWorldPassSampledReads(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl,
+                                      Rendering::MaterialKeyword passKeywords, RenderGraph::RGTexture shadowArr,
+                                      bool wantsShadows);
+    void DeclareWorldPassBufferReads(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl);
+    void AttachWorldPassTargets(RenderGraph::RGPassBuilder& p, const WorldPassDeclaration& decl,
+                                const WorldPassAttachmentPlan& attachments);
+    void RecordWorldPass(RenderGraph::RGContext& ctx, WorldPassExecData& data);
+    void RecordWorldEntityBatches(WorldPassRecordState& state,
+                                  std::span<const WorldDrawBuilder::BatchKey> entityKeys);
+    void RecordWorldEntityBatch(WorldPassRecordState& state, const WorldDrawBuilder::BatchKey& key,
+                                const DrawStreamLookupKey& lookup);
+    void LogWorldBatchSkip(const WorldPassRecordState& state, const WorldDrawBuilder::BatchKey& key,
+                           const char* reason);
+    void RecordCompatEntityBatch(WorldPassRecordState& state, const WorldEntityBatch& batch);
+    void RecordIndirectEntityBatch(WorldPassRecordState& state, const WorldEntityBatch& batch,
+                                   const DrawStreamLookupKey& lookup);
+    void IssueWorldEntitySegment(WorldPassRecordState& state, const WorldEntityBatch& batch,
+                                 const Rendering::GPUDrawStreamBuilder::BatchDrawRange& drawRange,
+                                 const DrawBindings& drawBindings, uint64_t slotIndirectionBda,
+                                 Rendering::FrontFace winding, bool crossfading,
+                                 const Rendering::GPUDrawStreamBuilder::BatchDrawSegment& seg);
+    void RecordWorldContributor(WorldPassRecordState& state, const DrawCommand& cmd);
 
     // Declaration-time resolved-resource table for the RenderGraph arms (the old
     // ResolvePassResources resolves retained-graph handles at exec). Every
@@ -2145,7 +2239,11 @@ class RenderServices
     bool m_WarnedDrsUnreachable = false;
     bool m_WarnedDrsIneffective = false;
 
+    // The per-world state from here to m_WorldShadowSettings is unlocked: one world extracts at a
+    // time (the primary world's SystemManager joins its waves before returning; thumbnail worlds
+    // extract, and graph previews submit lights, on the main thread in Render).
     // Per-world extracted light lists (cleared at start of each frame).
+    std::unordered_map<uint64, WeatherWindGPU> m_WorldWeatherWind;
     std::unordered_map<uint64, std::vector<ExtractedLight>> m_WorldLights;
     // Worlds that already warned about carrying more directional lights than
     // kMaxDirectionalLights (the overflow lights contribute nothing; see
@@ -2157,6 +2255,7 @@ class RenderServices
     // republished by each world's extraction pass before probes read them).
     std::unordered_map<uint64, uint64> m_WorldRenderContentDigests;
     // Per-world resolved post-process settings (cleared at start of each frame).
+    std::unordered_map<Rendering::ViewId, DepthPixelationViews> m_DepthPixelationViews;
     std::unordered_map<uint64, PostProcessSettings> m_WorldPostProcess;
     std::unordered_map<uint64, std::vector<VolumetricFogLocalVolume>> m_WorldVolumetricFogVolumes;
     static const PostProcessSettings kDefaultPostProcess;
@@ -2164,9 +2263,11 @@ class RenderServices
     std::unordered_map<uint64, ResolvedShadowSettings> m_WorldShadowSettings;
     static const ResolvedShadowSettings kDefaultShadowSettings;
 
-    // This frame's mover instances (see FrameMoverRecord above). The mutex
-    // guards multi-world extraction appends; reads happen at declare time
-    // after extraction completed.
+    // This frame's mover instances (see FrameMoverRecord above). Appended only
+    // by RenderExtractionSystem's serial apply/patch phases, one world at a time
+    // like the per-world maps above; read unlocked at declare time. The mutex
+    // serializes the appends with the BeginWorldDrawFrame clear, which the frame
+    // order already separates, so no current caller contends on it.
     std::vector<FrameMoverRecord> m_FrameMovers;
     // Views that reported unversioned motion this frame and the previous one;
     // guarded by the same mutex as the movers list.
@@ -2195,6 +2296,7 @@ class RenderServices
         // pointer alone is never enough (RGFrames are re-begun across frames).
         Rendering::RenderGraph::RGFrameStamp For;
         Rendering::RenderGraph::RGTexture ShadowMapArray{}; // pool import, ONCE per (view, frame)
+        Rendering::RenderGraph::RGFrame::TypedUpload<ShadowDataGPU> DirectionalShadowData{};
         Rendering::RenderGraph::RGTexture TransmittanceShadowArray{}; // pool import: per-cascade glass tint (translucent shadows), parallel to ShadowMapArray; only when the view has transmissive casters
         Rendering::RenderGraph::RGTexture MsmMoments{};     // external import (feature-owned physical)
         // PCSS min/max pyramid over the cascade depth (ShadowMinMaxPyramid):
@@ -2209,6 +2311,8 @@ class RenderServices
         // ONCE per (view, frame); dedup-by-handle lands these on the SAME ids the
         // IBLGen bake's writes produced, forming the bake->world StorageWrite->Sampled
         // edge (and ordering the bake before this view's world pass).
+        Rendering::RenderGraph::RGTexture IblLocalIrradiance[2]{};
+        Rendering::RenderGraph::RGTexture IblLocalPrefilter[2]{};
         Rendering::RenderGraph::RGTexture IblIrradiance{};
         Rendering::RenderGraph::RGTexture IblPrefilter{};
         Rendering::RenderGraph::RGTexture IblBrdfLut{};
@@ -2306,9 +2410,8 @@ class RenderServices
     // coherent across views.
     uint32_t m_CullingFrameIndex = 0;
 
-    // World draw builder (engine-level helper). Initially wired up
-    // in a simple, single-threaded implementation; later iterations can use
-    // JobSystem for parallel submission and list construction.
+    // World draw builder (engine-level helper). Its submission buffers are
+    // sized from the engine job pool when RenderServices is constructed.
     WorldDrawBuilder m_WorldDrawBuilder;
     // Compatibility profile only: the CPU twin of the GPU scatter's per-slice
     // instance stream. Rebuilt from the merged submissions right after the
@@ -2485,6 +2588,9 @@ class RenderServices
     struct SortedTransparentView
     {
         std::vector<SortedTransparentRecord> Records;
+        std::vector<uint32> CompositionMeshOrder;
+        std::vector<TransparentCompositionSlot> CompositionSlots;
+        DrawBindings::BufferEntry CompositionIndices;
         // One entry per run GROUP in discovery order; the partition maps
         // groups to draw slots. Representative binds the run's PSO +
         // descriptor state; Mesh resolves the shared bucket pools every
@@ -2566,7 +2672,7 @@ class RenderServices
     {
         uint64_t Handle = 0;
         ForwardEmitFn Fn;
-        bool WritesDepth = true; // depth contract (see RegisterForwardEmit)
+        ForwardProducerOptions Options;
     };
     struct DepthProducerEntry
     {

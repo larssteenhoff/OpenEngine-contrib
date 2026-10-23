@@ -5,6 +5,7 @@
 #include "UI/Interaction/DragDropGhostRendererRegistry.h"
 #include "UI/Interaction/Payload.h"
 #include "UI/Layout/ElementOverrideHelpers.h"
+#include "UI/OverlayZIndex.h"
 #include "UI/UIElement.h"
 #include "UI/StyleProperties.h"
 
@@ -145,7 +146,7 @@ void DragDropOverlay::EnsureGhost(UIElement* root)
         m_Ghost->Overrides()
             .Set(Style::Position, PositionType::Absolute)
             .Set(Style::PointerEvents, false)
-            .Set(Style::ZIndex, 9400);
+            .Set(Style::ZIndex, OverlayZIndex::kDragGhost);
         if (!m_LastGhostVisible)
             m_Ghost->Overrides().Set(Style::Display, DisplayMode::None);
     }
@@ -195,7 +196,7 @@ void DragDropOverlay::EnsureTooltip(UIElement* root)
         m_Tooltip->Overrides()
             .Set(Style::Position, PositionType::Absolute)
             .Set(Style::PointerEvents, false)
-            .Set(Style::ZIndex, 9500);
+            .Set(Style::ZIndex, OverlayZIndex::kDragTooltip);
         if (!m_LastTooltipVisible)
             m_Tooltip->Overrides().Set(Style::Display, DisplayMode::None);
     }

@@ -38,6 +38,10 @@ set(JOBSYSTEM_HEADERS
 # Create static library
 add_library(JobSystem OBJECT ${JOBSYSTEM_SOURCES} ${JOBSYSTEM_HEADERS})
 
+# GE_JOB_TOMBSTONE_STRICT reads through Platform's header-only environment switch.
+set_property(SOURCE Source/TaskDependencyGraph.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include)
+
 # Set C++20 standard
 target_compile_features(JobSystem PUBLIC cxx_std_20)
 

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "UI/UIElement.h"
+#include "UI/UIManagerRef.h"
 #include "UI/Layout/Docking.h"
 #include "UI/Layout/DockingHitTest.h"
 
@@ -28,21 +29,21 @@ enum class DockPatchFallbackReason : uint8_t
 class DockspaceElement final : public UIElement {
 public:
     DockspaceElement() = default;
+    ~DockspaceElement() override;
 
     void BindModel(DockingManager* model) { m_Model = model; MarkDirty(VisualDirty | ChildrenDirty | LayoutDirty); }
 
     DockingManager* GetModel() const { return m_Model; }
 
-    // The request is consumed by a heavy-pass poll in UIManager::Update; the
-    // mark is what makes it visible to the idle/pointer gates — several call
-    // sites mutate only DockingManager model objects (no UIElement dirt), and
-    // without it an idle UI would never transfer the request.
-    void RequestRebuildFromModel()
-    {
-        m_NeedsRebuild = true;
-        MarkDirty(VisualDirty | ChildrenDirty | LayoutDirty);
-    }
+    // Queues a rebuild with the owning UIManager, which runs it after event
+    // dispatch. The dirty mark is what makes the request visible to the
+    // idle/pointer gates: several call sites mutate only DockingManager model
+    // objects (no UIElement dirt), and without it an idle UI would never run it.
+    void RequestRebuildFromModel();
     bool ConsumeRebuildRequest() { bool v = m_NeedsRebuild; m_NeedsRebuild = false; return v; }
+
+    // Hands a pending rebuild request to the new owner.
+    void OnOwnerManagerChanged(UIManager* owner) override;
 
     bool RequestActivationPatch(const std::string& panelId);
     bool RequestTabReorder(const std::string& leafPath);
@@ -63,7 +64,6 @@ public:
         m_OnTabContextMenu(panelId, x, y);
         return true;
     }
-    bool m_NeedsRebuild = false;
 
     struct DockInstrumentation
     {
@@ -90,9 +90,6 @@ public:
     void SetDockDragGhostUndockMode(bool undocking);
     void HideDockDragGhost();
 
-    // Accent color forwarded to dock drop overlays (ARGB: 0xAARRGGBB)
-    void SetAccentColor(uint32_t argb) { m_AccentColor = argb; }
-
 private:
     // Shared leaf-view resolver: finds UI elements for a leaf given a panelId.
     struct LeafView
@@ -113,17 +110,19 @@ private:
     bool PatchActiveTabInLeaf(const std::string& panelId);
 
     void Fallback(DockPatchFallbackReason reason);
+    void QueueRebuildWith(UIManager* owner);
+    void CancelQueuedRebuild();
 
     DockingManager* m_Model = nullptr;
+    bool m_NeedsRebuild = false;
+    UIManagerRef m_RebuildQueuedWith; // the manager this dockspace queued a rebuild with
     DockInstrumentation m_Instrumentation{};
     std::function<void()> m_OnPostRebuild;
     std::function<void(const std::string&, float, float)> m_OnTabContextMenu;
 
     std::unique_ptr<DockNode> m_SavedRoot;
-    uint32_t m_AccentColor = 0xFF3A8FFF;
 
     UIElement* m_DragGhost = nullptr; // Non-owning; child of root element
-    Label* m_DragGhostLabel = nullptr;
     Label* m_DragGhostUndockLabel = nullptr;
     UIElement* m_DragGhostTab = nullptr;
     UIElement* m_DragGhostBody = nullptr;

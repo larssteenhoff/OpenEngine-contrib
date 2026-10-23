@@ -15,6 +15,9 @@ set(MEMORY_SOURCES
 )
 
 add_library(Memory OBJECT ${MEMORY_SOURCES})
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 17.0)
+    target_sources(Memory PRIVATE Source/MemoryResource_iOS.cpp)
+endif()
 
 target_compile_features(Memory PUBLIC cxx_std_20)
 

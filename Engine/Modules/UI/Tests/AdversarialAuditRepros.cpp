@@ -59,7 +59,7 @@ void CheckClipRadiusMatchesPaintedCorner(float scale)
 
     GameEngine::UIElement* panel = fx.Element("panel");
     ASSERT_NE(panel, nullptr);
-    ASSERT_NE(panel->m_ClipSlotIdx, 0xFFFFu) << "panel owns no clip slot; the repro never armed";
+    ASSERT_NE(panel->m_ClipSlotIdx, GameEngine::UI::kNoClip) << "panel owns no clip slot; the repro never armed";
 
     const GameEngine::UI::UIClipRect* clip =
         fx.Manager().PeekClipRectForTesting(panel->m_ClipSlotIdx);
@@ -122,7 +122,7 @@ void CheckPercentClipRadiusMatchesPaintedCorner(float scale)
 
     GameEngine::UIElement* panel = fx.Element("panel");
     ASSERT_NE(panel, nullptr);
-    ASSERT_NE(panel->m_ClipSlotIdx, 0xFFFFu) << "panel owns no clip slot; the repro never armed";
+    ASSERT_NE(panel->m_ClipSlotIdx, GameEngine::UI::kNoClip) << "panel owns no clip slot; the repro never armed";
 
     const GameEngine::UI::UIClipRect* clip =
         fx.Manager().PeekClipRectForTesting(panel->m_ClipSlotIdx);

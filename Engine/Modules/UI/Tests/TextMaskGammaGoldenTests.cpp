@@ -66,6 +66,22 @@ float ApplyTextContrast(float srca, float adjustedContrast)
     return srca + (1.0f - srca) * adjustedContrast * srca;
 }
 
+constexpr float kTextContrastByLuminance[4] = {-0.14f, 0.20f, 0.53f, 0.85f};
+constexpr float kTextContrastLevelEdges[3] = {63.5f / 255.0f, 127.5f / 255.0f, 191.5f / 255.0f};
+constexpr float kTextContrastEdgeHalfWidth = 0.5f / 255.0f;
+
+float TextChromeContrast(float srcEncoded)
+{
+    float k = kTextContrastByLuminance[0];
+    for (int edge = 0; edge < 3; ++edge)
+    {
+        const float t = Smoothstep(kTextContrastLevelEdges[edge] - kTextContrastEdgeHalfWidth,
+                                   kTextContrastLevelEdges[edge] + kTextContrastEdgeHalfWidth, srcEncoded);
+        k = Mix(k, kTextContrastByLuminance[edge + 1], t);
+    }
+    return k;
+}
+
 float TextTargetBlendLinear(float a, float src, float dst, float srcLin, float dstLin,
                             float blendGamma)
 {
@@ -86,7 +102,10 @@ float CorrectTextCoverage(float coverage, float glyphLuminanceLinear, float cont
     const float dst = 1.0f - src;
     const float dstLin = SrgbDecodeScalar(dst);
 
-    const float a = ApplyTextContrast(coverage, contrast * dstLin);
+    // Chrome's paint-keyed levels at the encoded target; Skia's dst-keyed
+    // boost at the linear target.
+    const float k = (blendGamma <= kTextBlendGammaLinearTarget) ? dstLin : TextChromeContrast(src);
+    const float a = ApplyTextContrast(coverage, contrast * k);
 
     if (blendSpaceEncoded == 0)
     {
@@ -136,6 +155,21 @@ double Boost(double coverage, double adjustedContrast)
     return coverage + (1.0 - coverage) * adjustedContrast * coverage;
 }
 
+// The contrast the paint's encoded luminance selects: the shader's level
+// table, read through the float mirror so the boundaries are the shader's.
+double ChromeContrast(double srcEnc)
+{
+    return shader::TextChromeContrast(static_cast<float>(srcEnc));
+}
+
+// The contrast the correction applies for target `g`: Chrome's levels at an
+// encoded target, Skia's dst-keyed boost (the guessed backdrop's linear level)
+// at the linear target.
+double Contrast(double srcEnc, double g)
+{
+    return g <= 0.0 ? Decode(1.0 - srcEnc) : ChromeContrast(srcEnc);
+}
+
 // Where a blend of coverage `a` between encoded endpoints src/dst lands in
 // linear light, blending linearly in the space of exponent g over encoded
 // values (g = 0 sentinel: linear light itself).
@@ -168,11 +202,11 @@ constexpr double kSimTolLinear = 5.0e-4;
 
 } // namespace
 
-// The shipped default path must be the boost and nothing else, exactly — this
-// is the byte-identity half of the dark landing at the model level (the other
-// half is the resolver pin: no constructible target space selects the encoded
-// arm).
-TEST(TextMaskGammaGolden, LinearArmDefaultTargetIsExactlyTheBoost)
+// The linear arm at the linear target (every HUD and Player label) is the
+// identity retarget and keeps Skia's dst-keyed boost, exactly: the paint-keyed
+// Chrome levels belong to the encoded target only, so game text does not get
+// bolder with them.
+TEST(TextMaskGammaGolden, LinearArmLinearTargetIsExactlyTheSkiaBoost)
 {
     for (int sl = 0; sl <= 20; ++sl)
     {
@@ -209,7 +243,7 @@ TEST(TextMaskGammaGolden, LinearArmLandsOnTheTargetBlend)
                 continue;
             for (const float c : kCoverages)
             {
-                const double a = model::Boost(c, 1.0 * dstLin);
+                const double a = model::Boost(c, model::ChromeContrast(srcEnc));
                 const float corrected = shader::CorrectTextCoverage(
                     c, static_cast<float>(srcLin), 1.0f, g, /*blendSpaceEncoded=*/0);
                 const double displayed =
@@ -236,12 +270,11 @@ TEST(TextMaskGammaGolden, EncodedArmLandsOnTheTargetBlend)
             const double srcLin = sl / 100.0;
             const double srcEnc = model::Encode(srcLin);
             const double dstEnc = 1.0 - srcEnc;
-            const double dstLin = model::Decode(dstEnc);
             if (std::abs(srcEnc - dstEnc) < shader::kTextSpanFadeEndEncoded * 1.01)
                 continue;
             for (const float c : kCoverages)
             {
-                const double a = model::Boost(c, 1.0 * dstLin);
+                const double a = model::Boost(c, model::Contrast(srcEnc, g));
                 const float corrected = shader::CorrectTextCoverage(
                     c, static_cast<float>(srcLin), 1.0f, g, /*blendSpaceEncoded=*/1);
                 const double displayed =
@@ -269,12 +302,11 @@ TEST(TextMaskGammaGolden, EncodedArmAtEncodedTargetIsTheIdentity)
     {
         const double srcLin = sl / 100.0;
         const double srcEnc = model::Encode(srcLin);
-        const double dstLin = model::Decode(1.0 - srcEnc);
         if (std::abs(srcEnc - (1.0 - srcEnc)) < shader::kTextSpanFadeEndEncoded * 1.01)
             continue;
         for (const float c : kCoverages)
         {
-            const double a = model::Boost(c, 1.0 * dstLin);
+            const double a = model::Boost(c, model::ChromeContrast(srcEnc));
             const float corrected = shader::CorrectTextCoverage(
                 c, static_cast<float>(srcLin), 1.0f, 1.0f, /*blendSpaceEncoded=*/1);
             tail = std::max(tail, std::abs(corrected - a));
@@ -293,14 +325,15 @@ TEST(TextMaskGammaGolden, EncodedArmAtEncodedTargetIsTheIdentity)
 TEST(TextMaskGammaGolden, BothArmsFadeToTheBoostAtMidGrey)
 {
     const float srcLin = shader::SrgbDecodeScalar(0.5f);
-    const float dstLin = shader::SrgbDecodeScalar(1.0f - shader::SrgbEncodeScalar(srcLin));
+    const float srcEnc = shader::SrgbEncodeScalar(srcLin);
+    const float encodedTargetContrast = shader::TextChromeContrast(srcEnc);
+    const float linearTargetContrast = shader::SrgbDecodeScalar(1.0f - srcEnc);
     for (const float c : kCoverages)
     {
-        const float boosted = shader::ApplyTextContrast(c, 1.0f * dstLin);
-        EXPECT_NEAR(boosted,
+        EXPECT_NEAR(shader::ApplyTextContrast(c, encodedTargetContrast),
                     shader::CorrectTextCoverage(c, srcLin, 1.0f, 1.0f, /*blendSpaceEncoded=*/0),
                     1e-6f);
-        EXPECT_NEAR(boosted,
+        EXPECT_NEAR(shader::ApplyTextContrast(c, linearTargetContrast),
                     shader::CorrectTextCoverage(c, srcLin, 1.0f, 0.0f, /*blendSpaceEncoded=*/1),
                     1e-6f);
     }
@@ -489,5 +522,59 @@ TEST(TextMaskGammaGolden, TheMeasuredFailureModesAndTheirCorrection)
         EXPECT_GT(heavy / ideal, 1.10); // the record's 1.16-1.34x class
         EXPECT_LT(heavy / ideal, 1.35);
         EXPECT_NEAR(corrected / ideal, 1.0, 0.01);
+    }
+}
+
+// The shipped configuration, the editor's: an encoded attachment at the
+// encoded target (UIManager's default TextBlendGamma 1.0) at contrast 1.0. It
+// must hand the encoded source-over exactly Chrome's macOS weight
+// c + k c (1 - c), with k from the paint's encoded luminance level. The level
+// edges and the four k values are the measurement (Chrome 155, macOS 15.7,
+// greys in steps of one): 63 and 64, 127 and 128, 191 and 192 sit in
+// different levels, and the editor's #bebebe (190) labels sit in the third.
+TEST(TextMaskGammaGolden, ShippedConfigurationIsChromeMacOsWeight)
+{
+    struct Level
+    {
+        int Grey;
+        float Contrast;
+    };
+    constexpr Level kLevels[] = {{0, -0.14f},  {63, -0.14f}, {64, 0.20f},  {127, 0.20f}, {128, 0.53f},
+                                 {190, 0.53f}, {191, 0.53f}, {192, 0.85f}, {230, 0.85f}, {255, 0.85f}};
+    for (const Level& level : kLevels)
+    {
+        const float srcLin = shader::SrgbDecodeScalar(static_cast<float>(level.Grey) / 255.0f);
+        for (const float c : kCoverages)
+        {
+            const float chrome = c + level.Contrast * c * (1.0f - c);
+            const float got = shader::CorrectTextCoverage(c, srcLin, 1.0f, 1.0f, /*blendSpaceEncoded=*/1);
+            EXPECT_NEAR(got, chrome, 2e-4f) << "grey=" << level.Grey << " coverage=" << c;
+        }
+    }
+}
+
+// The contrast is continuous in luminance, so a colour animated through a
+// level edge changes weight smoothly rather than in one step, while every
+// 8-bit grey keeps its Chrome level exactly (the ramp is one 8-bit level wide,
+// centred between the two levels either side of each edge).
+TEST(TextMaskGammaGolden, ContrastIsContinuousAcrossLevelEdges)
+{
+    double largestStep = 0.0;
+    float previous = shader::TextChromeContrast(0.0f);
+    constexpr int kSamples = 1 << 16;
+    for (int i = 1; i <= kSamples; ++i)
+    {
+        const float k = shader::TextChromeContrast(static_cast<float>(i) / kSamples);
+        largestStep = std::max(largestStep, static_cast<double>(std::abs(k - previous)));
+        previous = k;
+    }
+    // A step function jumps by up to 0.32 between neighbouring samples; the
+    // ramp spreads the jump over 1/255 of luminance, 257 samples here.
+    EXPECT_LT(largestStep, 0.005) << "the contrast steps between levels";
+
+    for (int grey = 0; grey <= 255; ++grey)
+    {
+        const float expected = shader::kTextContrastByLuminance[grey / 64];
+        EXPECT_NEAR(shader::TextChromeContrast(static_cast<float>(grey) / 255.0f), expected, 1e-5f) << "grey " << grey;
     }
 }

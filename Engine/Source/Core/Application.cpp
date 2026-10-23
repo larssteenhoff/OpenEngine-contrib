@@ -7,6 +7,7 @@
 #include "Input/GamepadPolling.h"
 #include "Input/InputSystem.h"
 #include "Platform/Thread.h"
+#include "Platform/Environment.h"
 #include "Platform/Window.h"
 #include "Core/CpuProfiler.h"
 #include "Core/DebugMetrics.h"
@@ -31,16 +32,7 @@ namespace
     // spamming logs in normal runs.
     inline bool IsFrameTraceEnabled()
     {
-        static bool s_Enabled = []() {
-            const char* env = std::getenv("GE_FRAME_TRACE");
-            if (!env || !*env)
-            {
-                return false;
-            }
-
-            // Treat "0" as explicit off; anything else enables tracing.
-            return !(env[0] == '0' && env[1] == '\0');
-        }();
+        static bool s_Enabled = GameEngine::Platform::EnvironmentSwitchEnabled("GE_FRAME_TRACE", false);
         return s_Enabled;
     }
 }

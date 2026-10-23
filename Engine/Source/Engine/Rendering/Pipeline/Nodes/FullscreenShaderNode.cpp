@@ -5,12 +5,15 @@
 #include "Engine/Rendering/Pipeline/RenderPipeline.h"
 #include "Engine/Rendering/Pipeline/ViewExposureCompensation.h"
 #include "Engine/Rendering/RenderServices.h"
+#include "Engine/Rendering/ImageBasedLightingFeature.h"
+#include "Engine/Rendering/IEnvironmentSource.h"
 #include "Engine/Rendering/ShadowMapRenderFeature.h"
 #include "Engine/Rendering/Pipeline/Nodes/PipelineNodeUtils.h"
 #include "Types/StringUtils.h"
 
 #include "Logger/Logger.h"
 #include "Rendering/Core/Device.h"
+#include "Rendering/Common/Math.h"
 #include "Rendering/Core/NamedDescriptorWriter.h"
 #include "Rendering/Core/NamedPushConstantWriter.h"
 #include "Rendering/Core/PipelineTypes.h"
@@ -124,6 +127,11 @@ FullscreenShaderNode::~FullscreenShaderNode()
             m_Device->DestroySampler(m_LinearClampSampler);
             m_LinearClampSampler = {};
         }
+        if (m_PointClampSampler.IsValid())
+        {
+            m_Device->DestroySampler(m_PointClampSampler);
+            m_PointClampSampler = {};
+        }
         if (m_LinearRepeatSampler.IsValid())
         {
             m_Device->DestroySampler(m_LinearRepeatSampler);
@@ -148,6 +156,7 @@ bool FullscreenShaderNode::Initialize(std::string nodeId, std::string nodeJson, 
     m_BufferUsages.clear();
     m_Samplers.clear();
     m_OutputRef = Names::View::Resolve;
+    m_DepthOutputRef.clear();
     m_ShaderPkg.clear();
     m_RequiredPackage.clear();
     m_VsBytes.clear();
@@ -161,6 +170,8 @@ bool FullscreenShaderNode::Initialize(std::string nodeId, std::string nodeJson, 
     m_ElideWhenIdentity = false;
     m_PushConstantDefaults.clear();
     m_PPOverrides = false;
+    m_VertexCount = 3;
+    m_InstanceCount = 1;
     m_SkipWhenFields.clear();
     m_PassthroughInputName.clear();
     m_ServiceTextureBindings.clear();
@@ -188,6 +199,8 @@ bool FullscreenShaderNode::Initialize(std::string nodeId, std::string nodeJson, 
 
         if (j.contains("output") && j["output"].is_string())
             m_OutputRef = j["output"].get<std::string>();
+        if (j.contains("depthOutput") && j["depthOutput"].is_string())
+            m_DepthOutputRef = j["depthOutput"].get<std::string>();
 
         if (j.contains("inputs") && j["inputs"].is_object())
         {
@@ -303,6 +316,28 @@ bool FullscreenShaderNode::Initialize(std::string nodeId, std::string nodeJson, 
 
         if (j.contains("ppOverrides") && j["ppOverrides"].is_boolean())
             m_PPOverrides = j["ppOverrides"].get<bool>();
+
+        if (j.contains("proceduralDraw"))
+        {
+            const auto& draw = j["proceduralDraw"];
+            if (!draw.is_object() || !draw.contains("vertexCount") ||
+                !draw.contains("instanceCount") || !draw["vertexCount"].is_number_integer() ||
+                !draw["instanceCount"].is_number_integer())
+            {
+                if (outError) *outError = "proceduralDraw requires integer vertexCount and instanceCount";
+                return false;
+            }
+            const auto vertices = draw["vertexCount"].get<int64_t>();
+            const auto instances = draw["instanceCount"].get<int64_t>();
+            if (vertices < 3 || vertices > 65535 || vertices % 3 != 0 ||
+                instances < 1 || instances > 1048576)
+            {
+                if (outError) *outError = "proceduralDraw requires 3..65535 vertices in triangles and 1..1048576 instances";
+                return false;
+            }
+            m_VertexCount = static_cast<uint32_t>(vertices);
+            m_InstanceCount = static_cast<uint32_t>(instances);
+        }
 
         // Ping-pong chain: "pingPongChain": true, or an object naming the
         // scene-color binding the chain rethreads between segments.
@@ -557,6 +592,11 @@ void FullscreenShaderNode::EnsureCachedResources(GameEngine::Rendering::IDevice*
             m_Device->DestroySampler(m_LinearClampSampler);
             m_LinearClampSampler = {};
         }
+        if (m_PointClampSampler.IsValid())
+        {
+            m_Device->DestroySampler(m_PointClampSampler);
+            m_PointClampSampler = {};
+        }
         if (m_LinearRepeatSampler.IsValid())
         {
             m_Device->DestroySampler(m_LinearRepeatSampler);
@@ -568,6 +608,8 @@ void FullscreenShaderNode::EnsureCachedResources(GameEngine::Rendering::IDevice*
     }
     m_Device = device;
 
+    if (!m_PointClampSampler.IsValid())
+        m_PointClampSampler = device->CreateSampler(Rendering::SamplerDesc::PointClamp("Pipeline.PointClamp"));
     if (!m_LinearClampSampler.IsValid())
     {
         auto sd = GameEngine::Rendering::SamplerDesc::MaterialLinearClamp("Pipeline_FS_LinearClamp");
@@ -637,8 +679,9 @@ void FullscreenShaderNode::EnsureCachedResources(GameEngine::Rendering::IDevice*
 
         // Fullscreen post defaults: no culling, no depth, dynamic viewport/scissor.
         gd.Rasterization.cullMode = GameEngine::Rendering::CullModeFlagBits::None;
-        gd.DepthStencil.depthTestEnable = false;
-        gd.DepthStencil.depthWriteEnable = false;
+        gd.DepthStencil.depthTestEnable = !m_DepthOutputRef.empty();
+        gd.DepthStencil.depthWriteEnable = !m_DepthOutputRef.empty();
+        gd.DepthStencil.depthCompareOp = GameEngine::Rendering::CompareOp::Always;
         GameEngine::Rendering::DynamicStateInfo dyn{};
         dyn.states = {GameEngine::Rendering::DynamicState::Viewport, GameEngine::Rendering::DynamicState::Scissor};
         gd.DynamicState = dyn;
@@ -816,9 +859,10 @@ FullscreenShaderNode::SamplerForPreset(const std::string& preset) const
 }
 
 void FullscreenShaderNode::Declare(RenderPipelineInstance& instance,
-                                   const PipelineDeclareContext& /*ctx*/)
+                                   const PipelineDeclareContext& ctx)
 {
     m_RenderServices = &instance.GetRenderServices();
+    m_FrameDeltaTime = std::isfinite(ctx.DeltaTimeSeconds) ? std::max(ctx.DeltaTimeSeconds, 0.0f) : 0.0f;
     if (!m_RequiredPackage.empty() &&
         !m_RenderServices->IsPackageAvailable(m_RequiredPackage))
         return;
@@ -888,6 +932,11 @@ void FullscreenShaderNode::WriteReflectedPPFields(Rendering::NamedPushConstantWr
         if (member.Name == "shaderAnimationTime")
         {
             writer.Add(member.Name, shaderAnimationTime);
+            continue;
+        }
+        if (member.Name == "frameDeltaTime")
+        {
+            writer.Add(member.Name, m_FrameDeltaTime);
             continue;
         }
         if (settings.TryWriteField(member.Name, writer))
@@ -1002,6 +1051,19 @@ void Detail::FullscreenShaderNodeRenderer::Declare(
     // The same volume stack can feed views with different render heights, so the
     // per-view derived push fields (bloom + fog-glow pyramid scales) resolve here.
     settings.ResolveDerivedForRenderHeight(d.RenderHeight);
+    // Pixel-perfect: the LDR chain runs at the display extent over an image
+    // that is one art texel per Zoom screen pixels, so the emulated CRT
+    // resolution is exactly framebuffer/Zoom — one emulated scanline per art
+    // texel row, spanning Zoom screen pixels, which is what gives the scanline
+    // its smooth intra-row profile instead of a per-texel screen door. Only
+    // crt.frag reads this field.
+    if (d.PixelPerfectCrossing)
+    {
+        const Engine::Renderer::PixelPerfectViewState pp =
+            services->Views().GetViewPixelPerfect(viewId);
+        if (pp.Active && pp.Zoom > 0)
+            settings.CrtEmulatedResolutionDiv = static_cast<float32>(pp.Zoom);
+    }
 
     // The old SetActivationPredicate, evaluated at declaration: skipped =
     // not declared (+ the chain variable threads through).
@@ -1189,6 +1251,29 @@ void Detail::FullscreenShaderNodeRenderer::Declare(
         }
     }
 
+    // Procedural translucent effects can use the same environment as the
+    // world materials. Import the cube to retain its bake-to-sample dependency;
+    // binding a service texture without this edge can read an unfinished bake.
+    if (std::find(node.m_ServiceTextureBindings.begin(), node.m_ServiceTextureBindings.end(),
+                  "ge_irradianceCube") != node.m_ServiceTextureBindings.end())
+    {
+        auto* ibl = services->GetFeature<ImageBasedLightingFeature>();
+        if (!ibl || !ibl->IsInitialized())
+        {
+            node.StitchThrough(d);
+            return;
+        }
+        const auto irradiance = d.Frame.ImportExternalTexture(
+            "IBL_Irradiance", ibl->GetIrradianceCube(), ResourceState::ShaderResource,
+            TextureFormat{}, 1, 6);
+        texEdges.push_back({irradiance, false});
+        texBinds.push_back({"ge_irradianceCube", d.Frame.PhysicalTexture(irradiance)});
+        // Env owns an intensity of zero when the source is disabled, so a
+        // retained last-baked cube cannot leave the rain lit by a stale sky.
+        bufBinds.push_back({"Env", ibl->UploadEnvData(services->GetDevice()), 0,
+                           ImageBasedLightingFeature::kEnvDataBytes});
+    }
+
     // Output resolved LAST: a declined stage never materializes a pool
     // texture nothing writes. (The old presentation-target/backbuffer
     // fallback dies — the frame driver owns the backbuffer.)
@@ -1228,6 +1313,16 @@ void Detail::FullscreenShaderNodeRenderer::Declare(
     // Desc snapshots BY VALUE — references into the resource table don't
     // survive later resolves (the materializer can grow it).
     const RenderGraph::RGResourceDesc od = d.Frame.Graph().ResourceDesc(out.Id);
+
+    RenderGraph::RGTexture depthOutput{};
+    if (!node.m_DepthOutputRef.empty())
+    {
+        depthOutput = d.ResolveTexture(node.m_DepthOutputRef);
+        if (!depthOutput.IsValid()) return;
+        const auto dd = d.Frame.Graph().ResourceDesc(depthOutput.Id);
+        if (dd.Width != od.Width || dd.Height != od.Height || dd.SampleCount != od.SampleCount)
+            return;
+    }
 
     PassCustomization customization{};
     if (customizePass && !customizePass(d, od, customization))
@@ -1420,6 +1515,13 @@ void Detail::FullscreenShaderNodeRenderer::Declare(
                     p.AttachColorResolve(0, segOut, resolvePair, ops);
                 else
                     p.AttachColor(0, segOut, ops);
+                if (depthOutput.IsValid())
+                {
+                    RenderGraph::RGAttachmentOps depthOps{};
+                    depthOps.Load = RenderGraph::RGLoadOp::DontCare;
+                    depthOps.Store = RenderGraph::RGStoreOp::Store;
+                    p.AttachDepth(depthOutput, depthOps, RenderGraph::RGDepthAccess::ReadWrite);
+                }
             },
             [&node, texBinds = std::move(segTexBinds), bufBinds, settings, cubeLut, bloomLensDirt,
              shaderAnimationTime, floatPushConstants = customization.FloatPushConstants,
@@ -1542,13 +1644,42 @@ void Detail::FullscreenShaderNodeRenderer::Declare(
                         std::string samplerPreset;
                         if (auto it = node.m_Samplers.find(tb.Name); it != node.m_Samplers.end())
                             samplerPreset = it->second;
-                        const auto sampler = node.SamplerForPreset(samplerPreset);
-                        if (sampler.IsValid())
+                        const auto sampler = Detail::RequiresPointSampling(
+                            device->GetTextureFormat(tb.Tex), device->GetCapabilities())
+                            ? node.m_PointClampSampler : node.SamplerForPreset(samplerPreset);
+                        if (Detail::TryGetSet0BindingByName(*node.m_ShaderMeta, tb.Name, binding, dtype))
                         {
-                            wdesc.AddCombinedImageSampler(tb.Name, tb.Tex, sampler);
-                            if (Detail::TryGetSet0BindingByName(*node.m_ShaderMeta, tb.Name, binding, dtype))
-                                writtenBindings.insert(binding);
+                            // ShaderMeta and DescriptorType use different enum
+                            // values for images/samplers. The pipeline layout
+                            // already contains the canonical converted type.
+                            const auto layoutBinding = std::find_if(node.m_Set0Layout.bindings.begin(),
+                                node.m_Set0Layout.bindings.end(),
+                                [binding](const auto& lb) { return lb.binding == binding; });
+                            if (layoutBinding == node.m_Set0Layout.bindings.end())
+                                continue;
+                            dtype = layoutBinding->type;
+                            if (dtype == Rendering::DescriptorType::Texture)
+                                wdesc.AddTexture(tb.Name, tb.Tex);
+                            else if (dtype == Rendering::DescriptorType::CombinedImageSampler && sampler.IsValid())
+                                wdesc.AddCombinedImageSampler(tb.Name, tb.Tex, sampler);
+                            else
+                                continue;
+                            writtenBindings.insert(binding);
                         }
+                    }
+                    // Separate images can share one sampler, keeping multi-band
+                    // effects within the per-stage sampler limit. Use the same
+                    // default as the existing unwired-sampler fallback.
+                    for (const auto& lb : node.m_Set0Layout.bindings)
+                    {
+                        if (lb.type != Rendering::DescriptorType::Sampler)
+                            continue;
+                        Rendering::DescriptorSetUpdate u{};
+                        u.binding = lb.binding;
+                        u.type = Rendering::DescriptorType::Sampler;
+                        u.samplers = {node.m_LinearClampSampler};
+                        device->UpdateDescriptorSet(set0, u);
+                        writtenBindings.insert(lb.binding);
                     }
                     for (const auto& svc : node.m_ServiceTextureBindings)
                     {
@@ -1612,7 +1743,7 @@ void Detail::FullscreenShaderNodeRenderer::Declare(
                     cl->BindDescriptorSet(0, set0, pipe);
                 }
 
-                cl->Draw(3, 1);
+                cl->Draw(node.m_VertexCount, node.m_InstanceCount);
             });
     }
 
@@ -1622,3 +1753,146 @@ void Detail::FullscreenShaderNodeRenderer::Declare(
 }
 
 } // namespace GameEngine::Engine::Renderer::Pipeline::Nodes
+
+namespace GameEngine::Engine::Renderer::Pipeline::Nodes
+{
+bool DepthPixelationNode::Initialize(std::string nodeId, std::string nodeJson, std::string* outError)
+{
+    auto j = nlohmann::json::parse(nodeJson);
+    m_SourceRef = j.contains("source") ? j.at("source").get<std::string>()
+                                      : j.at("inputs").at("uSceneColor").get<std::string>();
+    m_ResultRef = j.at("output").get<std::string>();
+    j["inputs"] = nlohmann::json::object();
+    j["buffers"] = {{"PixelationParams", "Pixelation.Params"}};
+    j["bufferUsages"] = {{"PixelationParams", "ConstantBuffer"}};
+    j["samplers"] = nlohmann::json::object();
+    j.erase("skipWhen");
+    j.erase("passthroughInput");
+    j["depthOutput"] = "Pixelation.OutputDepth";
+    j["ppOverrides"] = true;
+    for (int i = 0; i < RenderServices::DepthPixelationViews::kMaxBands; ++i)
+        for (const char* kind : {"Color", "Depth"})
+        {
+            const std::string band = "Band" + std::to_string(i);
+            const std::string binding = "u" + band + kind;
+            j["inputs"][binding] = "Pixelation." + band + kind;
+            j["samplers"][binding] = "LinearClamp";
+        }
+    j["inputs"]["uSkyColor"] = "Pixelation.SkyColor";
+    j["samplers"]["uSkyColor"] = "LinearClamp";
+    return FullscreenShaderNode::Initialize(std::move(nodeId), j.dump(), outError);
+}
+
+void DepthPixelationNode::DeclareForView(ViewDeclare& d)
+{
+    const auto* bands = d.Services.FindDepthPixelationViews(d.View.id);
+    const auto& pp = d.Services.GetEffectivePostProcessSettings(d.View.id, d.View.worldId);
+    const bool simple = pp.DepthPixelationSimpleScreenSpace != 0;
+    if (!bands || (pp.DepthPixelationIntensity <= 0 && pp.DepthPixelationDebugRanges == 0))
+    {
+        d.PublishTexture(m_ResultRef, d.ResolveTexture(m_SourceRef));
+        return;
+    }
+    const auto sky = bands->Views[simple ? 0 : RenderServices::DepthPixelationViews::kSkyIndex];
+    const auto skyColor = d.FindPublishedViewTexture(sky, m_SourceRef);
+    if (!skyColor.IsValid())
+    {
+        d.PublishTexture(m_ResultRef, d.ResolveTexture(m_SourceRef));
+        return;
+    }
+    d.PublishTexture("Pixelation.SkyColor", skyColor);
+    struct alignas(16) PixelationParams
+    {
+        std::array<std::array<float, 4>, 11> BandUV;
+        std::array<std::array<float, 4>, 11> BandGrid;
+        std::array<float, 4> DisplayMode;
+        std::array<float, 16> InvProjection;
+    };
+    const auto params = d.Frame.AllocUpload<PixelationParams>();
+    if (!params.Valid()) return;
+    if (simple)
+        params.Ptr->BandUV.fill(bands->UVTransforms[0]);
+    else
+        params.Ptr->BandUV = bands->UVTransforms;
+    params.Ptr->InvProjection = {};
+    if (simple)
+    {
+        // Reconstruct against the full-resolution source camera, including
+        // its stabilization and guard pixels.
+        const auto& rasterCamera = *d.Services.Views().FindCameraData(bands->Cameras[0]);
+        Matrix4x4 projection;
+        std::memcpy(projection.Data(), rasterCamera.proj, sizeof(rasterCamera.proj));
+        const auto inverse = GameEngine::Mathematics::Inverse(projection);
+        std::memcpy(params.Ptr->InvProjection.data(), inverse.Data(), sizeof(rasterCamera.proj));
+    }
+    params.Ptr->DisplayMode = {0, simple ? 1.0f : 0.0f, 0, 0};
+    for (int i = 0; i <= RenderServices::DepthPixelationViews::kSkyIndex; ++i)
+    {
+        float pixelWidth, pixelHeight;
+        if (pp.DepthPixelationAutoBandResolution != 0 || pp.DepthPixelationResolutionMode == 1)
+        {
+            float divisor = pp.GetDepthPixelationBandDivisor(i);
+            if (pp.DepthPixelationAutoBandResolution != 0)
+            {
+                const int exponent = i == RenderServices::DepthPixelationViews::kSkyIndex
+                    ? 0 : std::max(0, std::clamp(pp.DepthPixelationBandCount, 1, 10) - 1 - i);
+                divisor = static_cast<float>(std::clamp(pp.DepthPixelationAutoFarPixelSize, 1, 2) * (1 << exponent));
+            }
+            divisor = std::isfinite(divisor) ? std::max(1.0f, divisor) : 1.0f;
+            pixelWidth = pixelHeight = divisor;
+        }
+        else
+        {
+            const auto extent = RenderServices::DepthPixelationRasterExtent(pp, i, d.OutputWidth, d.OutputHeight);
+            pixelWidth = float(d.OutputWidth) / extent[0];
+            pixelHeight = float(d.OutputHeight) / extent[1];
+        }
+        // All display grids share the same origin. Exact screen-pixel steps
+        // keep Auto's powers of two nested even at odd viewport dimensions.
+        // Camera stabilization affects sampling, not the display-cell borders.
+        params.Ptr->BandGrid[i] = {pixelWidth / std::max(1u, d.OutputWidth),
+                                  pixelHeight / std::max(1u, d.OutputHeight), 0, 0};
+    }
+    d.PublishBuffer("Pixelation.Params", {params.Buffer, params.Offset, sizeof(PixelationParams), {}});
+    for (int i = 0; i < RenderServices::DepthPixelationViews::kMaxBands; ++i)
+    {
+        const auto child = simple ? sky : (bands->Views[i] != 0 ? bands->Views[i] : sky);
+        auto color = simple ? skyColor : d.FindPublishedViewTexture(child, m_SourceRef);
+        // Bands have no depth prepass: their color raster writes coverage.
+        // The pipeline's early DepthResolved copy precedes that raster and
+        // contains the previous frame. Sample the single-sample attachment
+        // itself so coverage and color come from the same camera/frame.
+        auto depth = d.FindPublishedViewTexture(child, "View.Depth");
+        if (!color.IsValid() || !depth.IsValid())
+        {
+            d.PublishTexture(m_ResultRef, d.ResolveTexture(m_SourceRef));
+            return;
+        }
+        const std::string band = "Pixelation.Band" + std::to_string(i);
+        d.PublishTexture(band + "Color", color);
+        d.PublishTexture(band + "Depth", depth);
+    }
+    // The parent never rasterizes the scene. Rebuild its depth from the same
+    // selected band samples as color so overlays remain correctly occluded.
+    auto compositeDepth = d.ViewDepth;
+    // Give the screen-space compositor its own depth attachment before
+    // copying display depth back for editor overlays.
+    if (simple || !compositeDepth.IsValid() || d.Frame.Graph().ResourceDesc(compositeDepth.Id).SampleCount != 1)
+    {
+        TextureDesc td{};
+        td.width = d.OutputWidth;
+        td.height = d.OutputHeight;
+        td.depth = td.mipLevels = td.arrayLayers = td.sampleCount = 1;
+        td.format = compositeDepth.IsValid() ? d.Frame.Graph().ResourceDesc(compositeDepth.Id).Format
+                                            : static_cast<uint32_t>(TextureFormat::D32_FLOAT);
+        td.usage = static_cast<uint32_t>(TextureUsage::DepthStencil | TextureUsage::ShaderResource);
+        compositeDepth = d.Frame.ImportPersistentTexture(d.PassName("CompositeDepth").c_str(), td);
+    }
+    d.PublishTexture("Pixelation.OutputDepth", compositeDepth);
+    FullscreenShaderNode::DeclareForView(d);
+    d.PublishTexture(Names::View::DepthResolved, compositeDepth);
+    if (d.ViewDepth.IsValid() && compositeDepth.Id != d.ViewDepth.Id && m_DepthCopy.EnsureLoaded(d.Services.GetDevice()))
+        m_DepthCopy.Declare(d.Frame, compositeDepth, d.ViewDepth, d.OutputWidth, d.OutputHeight,
+                           d.PassName("CopyDisplayDepth"));
+}
+}

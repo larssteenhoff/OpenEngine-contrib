@@ -30,8 +30,12 @@ namespace GameEngine::InspectorUI
 // could be closed but never stay closed. Titles repeat across panels and across nesting levels
 // ("Grass" is both a TerrainGrass section and a material layer), so scope the key rather than
 // letting a title collide: "Terrain/Advanced", "SurfaceRules/Rule0/Condition1".
+//
+// The section owns the Foldout's expanded-changed handler to remember the state; a caller that
+// reacts to the header toggling passes `onExpandedChanged`, which runs after the state is stored.
 Foldout* AddComponentSection(UIElement* parent, std::string_view key, std::string_view title,
-                             bool expandedByDefault = true);
+                             bool expandedByDefault = true,
+                             std::function<void(Foldout&, bool expanded)> onExpandedChanged = {});
 
 // One entry in a section header's options menu.
 //

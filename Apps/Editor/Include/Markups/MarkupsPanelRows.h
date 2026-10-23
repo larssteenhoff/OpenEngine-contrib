@@ -73,8 +73,9 @@ std::unique_ptr<UIElement> BuildMarkupRow(MarkupEditorBridge& bridge, const ECS:
 // the kind's marker (BuildMarkupEntryMarker), what was said or done, when, and the Mark-ups
 // tab's unseen dot. It carries its kind's class (MarkupEntryKindClass) and, for
 // an action, markup-entry-action, styled as the inspector's Thread styles them; `alternate`
-// rows take the alternating plate. Highlighted while it is an agent entry the viewer has not
-// seen (MarkupEditorBridge::FirstUnseenEntry), which also carries the dot. A comment's links and
+// rows carry markups-activity-row-alt, on the theme's secondary list stripe. Highlighted while it
+// is an agent entry the viewer has not seen (MarkupEditorBridge::FirstUnseenEntry), which also
+// carries the dot. A comment's links and
 // entity links work in it (BuildMarkupCommentText).
 std::unique_ptr<UIElement> BuildActivityRow(MarkupEditorBridge& bridge, ECS::World& world,
                                             const MarkupActivityItem& item, int64 now, bool alternate,

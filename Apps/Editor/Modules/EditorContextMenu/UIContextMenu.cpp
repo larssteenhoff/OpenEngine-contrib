@@ -10,6 +10,7 @@
 #include "Platform/Window.h"
 #include "Input/KeyCodes.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include <cctype>
 #include <cstdlib>
 #include <cmath>
@@ -1158,7 +1159,7 @@ UIContextMenu::UIContextMenu() = default;
                                           [this, id = item.id, raw, stickyEligible, radio](UIEvent& e)
                 {
                     if (e.Button != 0) return;
-                    if (const char* v = std::getenv("GE_UI_HOVER_TRACE"); v && v[0] == '1')
+                    if (Platform::EnvironmentSwitchEnabled("GE_UI_HOVER_TRACE", false))
                         Logger::Log::Info("[MenuTrace] command id={} dispatched={}", id,
                                           m_CommandHandler != nullptr);
                     if (m_CommandHandler) m_CommandHandler(id);

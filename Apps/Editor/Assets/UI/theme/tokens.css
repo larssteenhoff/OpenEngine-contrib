@@ -5,8 +5,16 @@
   --ui_color_bg_dockspace: transparent;
   --ui_color_bg_tabbar: #1D1D1C;
   --ui_color_bg_toolbar: #262727;
+  /* The filled bar across the top of a docked panel, holding its actions (the Log panel's
+     toolbar, .panel-toolbar). */
+  --ui_color_bg_panel_toolbar: #222222;
   --ui_color_bg_grid: #222222;
   --ui_color_bg_scrollbar_thumb: #383838;
+  /* A scroll view's bar and the space beside it, in logical px (ScrollView reads the thickness;
+     .scrollbar takes the margin). A layout beside a scroll view reserves the same gutter with
+     calc(var(--ui_scrollbar_thickness) + var(--ui_scrollbar_margin)). */
+  --ui_scrollbar_thickness: 12px;
+  --ui_scrollbar_margin: 6px;
 
   --ui_color_bg_hover: #2A2A2A;
   --ui_color_bg_hover_alt: #242424;
@@ -15,6 +23,8 @@
   /* Backdrop for anything framing a rendered image: graph node preview plates,
      texture drop slots, the shader graph's preview panel. */
   --ui_color_bg_plate: #2A2A2C;
+  /* The fill of an editable value box: the inspector's text and number fields, .value-box. */
+  --ui_color_bg_value_box: #202020;
   /* MarkdownText in the editor (its rules are the UI module's default sheet): a code block sits
      darker than the panel it is on, an inline code span lifts its words off the text around it. */
   --ui_color_markdown_link: var(--ui_color_accent_blue_hover);
@@ -24,14 +34,40 @@
   --ui_color_markdown_code_block: #1A1A1A;
   --ui_color_markdown_line: #4A4A4A;
   --ui_color_markdown_table_header: var(--ui_color_bg_plate);
+  /* A striped list's rows (the Mark-ups panel's Activity tab): the first, third... row on the
+     primary plate, every second row on the secondary one. Equal values turn the stripes off. */
+  --ui_color_list_stripe_primary: transparent;
+  --ui_color_list_stripe_secondary: var(--ui_color_bg_plate);
+  /* Log levels (panels/LogPanel.css): a level's text and filter check, the fill of its filter chip
+     while it is on, and that chip's border. */
+  --ui_color_log_debug: #9cdcfe;
+  --ui_color_log_debug_fill: rgba(156, 220, 254, 0.1);
+  --ui_color_log_debug_edge: rgba(156, 220, 254, 0.7);
+  --ui_color_log_info: #d4d4d4;
+  --ui_color_log_info_fill: rgba(212, 212, 212, 0.1);
+  --ui_color_log_info_edge: rgba(245, 245, 245, 0.7);
+  --ui_color_log_warning: #dcdcaa;
+  --ui_color_log_warning_fill: rgba(220, 220, 170, 0.1);
+  --ui_color_log_warning_edge: rgba(255, 255, 194, 0.7);
+  --ui_color_log_error: #f48771;
+  --ui_color_log_error_fill: rgba(244, 135, 113, 0.1);
+  --ui_color_log_error_edge: rgba(244, 135, 113, 0.7);
 
   --ui_color_border: #272727;
   --ui_color_border_subtle: #3A3A3A;
   --ui_color_border_panel: #2f2f2f;
+  /* Outline and body of the dock drag ghost (core.css .dock-drag-ghost-*). */
+  --ui_color_dock_ghost_border: #555555;
+  --ui_color_dock_ghost_body: #222222;
+  /* TreeView insertion line while dragging (views.css .tree-drop-indicator). */
+  --ui_color_drop_indicator: rgba(0, 200, 255, 0.9);
+  --ui_color_drop_indicator_denied: rgba(255, 80, 80, 0.9);
   /* The outline of a status plate on the asset grid's background (the folder bake
      status): 3.2:1 against the grid (#222222). The plate's fill is barely lighter
      than the grid, so the outline is its edge. */
   --ui_color_notice_outline: #707070;
+  /* The outline of a colour chip: light enough to frame a black chip on the panel. */
+  --ui_color_swatch_border: #555555;
   --ui_color_dropdown_outline: var(--ui_color_border_subtle);
   --ui_color_dropdown_outline_hover: #4A4A4A;
   /* The toggle knob while the control refuses input: a step down from the
@@ -97,13 +133,17 @@
   --ui_color_text_secondary: #BDBDBD;
 
   /* Accents */
-  --ui_color_accent: #006FFF;
-  --ui_color_accent_highlight: rgba(0, 111, 255, 0.3);
-  --ui_color_accent_translucent: rgba(0, 111, 255, 0.2);
+  --ui_color_accent: #3A8FFF;
+  --ui_color_accent_highlight: rgba(58, 143, 255, 0.3);
+  --ui_color_accent_translucent: rgba(58, 143, 255, 0.2);
+  /* Faint fill behind a drop or swap target. */
+  --ui_color_accent_tint: rgba(58, 143, 255, 0.14);
+  /* Soft glow around accent-bordered highlights (box-shadow colour). */
+  --ui_color_accent_glow: rgba(58, 143, 255, 0.5);
   --ui_color_accent_green: #4CAF50;
-  --ui_color_accent_blue: #006FFF;
-  --ui_color_accent_blue_hover: #4C9AFF;
-  --ui_color_accent_blue_pressed: #0053BF;
+  --ui_color_accent_blue: var(--ui_color_accent);
+  --ui_color_accent_blue_hover: #75B0FF;
+  --ui_color_accent_blue_pressed: #2B6BBF;
   --ui_color_accent_pressed: var(--ui_color_accent_blue_pressed);
   /* The accent held at a muted strength: a control that is switched ON but
      disabled still has to read as on, without claiming the attention a live
@@ -151,6 +191,9 @@
   --ui_color_vcs_modified: #549BFF;
   --ui_color_vcs_unchanged: #888888;
 
+  /* CSS inspector (Ctrl+I): its hover card and the outline around the inspected element. */
+  --ui_color_css_inspector_card: rgba(26, 26, 26, 0.933);
+  --ui_color_css_inspector_outline: #FFFF00;
   /* Inspector warnings: amber text on an amber wash over the panel (.inspector-warning and the
      inspector notice, controls/InspectorNotice/InspectorNotice.css). */
   --ui_color_warning_text: #e0b050;

@@ -23,6 +23,7 @@
 #include "Engine/Rendering/RenderServices.h"
 #include "Engine/Rendering/SkinPaletteAtlas.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include "Animation/HumanoidImport.h"
 #include "Animation/HumanoidRig.h"
@@ -32,7 +33,6 @@
 #include "Core/Engine.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -282,11 +282,11 @@ void AnimationSystem::Update(ECS::World& world, float32 deltaTime) {
                          ECS::Optional<Components::MeshRenderer>,
                          ECS::Optional<Components::MorphTargetWeights>>();
     q.Each([&](ECS::EntityHandle entity,
-               AnimatorRef& anim,
+               ECS::Writable<AnimatorRef> animRow,
                const SkeletonRef& sref,
                const Components::MeshRenderer* meshRenderer,
                Components::MorphTargetWeights* morph) {
-        if (anim.ClipIndex == 0 || sref.skeletonId == 0 || sref.runtimeId == 0) return;
+        if (animRow->ClipIndex == 0 || sref.skeletonId == 0 || sref.runtimeId == 0) return;
 
         // Skip entities already routed through HumanoidRetargetSystem so we
         // don't double-sample the clip onto the (now-unused) AnimatorRef
@@ -294,12 +294,13 @@ void AnimationSystem::Update(ECS::World& world, float32 deltaTime) {
         // animation wave runs Animation -> HumanoidRetarget sequentially.
         if (world.HasComponent<HumanoidRetargeterComponent>(entity)) return;
 
-        auto clip = clipStore.Get(anim.ClipIndex);
+        auto clip = clipStore.Get(animRow->ClipIndex);
         if (!clip) return;
 
         auto* skel = skStore.Get(sref.skeletonId);
         if (!skel || skel->BoneCount == 0) return;
 
+        AnimatorRef& anim = animRow.Mutable();
         TickAnimatorRef(anim, clipStore, deltaTime, ClaimClipPlaybackEvents(world, entity));
 
         // Morph weights hard-cut to the incoming clip. Dual-sample lerp is
@@ -863,8 +864,7 @@ void AnimationSystem::Update(ECS::World& world, float32 deltaTime) {
     // refuses to upload samples on the CPU as well.
     //
     // GE_FORCE_CPU_ANIM=1 still forces the CPU path globally for debugging.
-    const char* forceCpuEnv = std::getenv("GE_FORCE_CPU_ANIM");
-    const bool forceCpu = forceCpuEnv && forceCpuEnv[0] && forceCpuEnv[0] != '0';
+    const bool forceCpu = Platform::EnvironmentSwitchEnabled("GE_FORCE_CPU_ANIM", false);
     // Without render services (a headless host) every item samples on the CPU.
     const bool gpuReady = !forceCpu && m_RenderServices && m_RenderServices->IsComputeSkinningReady();
 
@@ -1004,10 +1004,7 @@ bool AnimationSystem::IsClipSkeletonGPUSafe(uint32 skeletonId, uint32 clipIndex,
             if (!inRange || boneName != channel.targetNameId)
             {
                 safe = false;
-                static const bool s_Diag = []() {
-                    const char* v = std::getenv("GE_ANIM_GPUSAFE_DIAG");
-                    return v && v[0] && v[0] != '0';
-                }();
+                static const bool s_Diag = Platform::EnvironmentSwitchEnabled("GE_ANIM_GPUSAFE_DIAG", false);
                 if (s_Diag)
                 {
                     Logger::Log::Info(

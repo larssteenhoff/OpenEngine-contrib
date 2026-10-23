@@ -6,6 +6,7 @@
 #include "UI/Controls/ItemSizeSlider.h"
 #include "UI/Interaction/ItemResizeGesture.h"
 #include "UI/UIEvents.h"
+#include "TestTempDir.h"
 
 #include "Input/InputSystem.h"
 #include "Input/KeyCodes.h"
@@ -95,16 +96,13 @@ void SetUserDataRoot(const std::string& root)
 struct ScopedCatalogDefaultBindings
 {
     std::string Previous;
+    TestUtils::ScopedTempDir Root{TestUtils::MakeUniqueTempDirectory("EditorShortcutsTests_default_bindings")};
 
     ScopedCatalogDefaultBindings()
     {
         if (const char* previous = std::getenv("GE_EDITOR_USER_DATA_ROOT"))
             Previous = previous;
-        const std::filesystem::path root =
-            std::filesystem::temp_directory_path() / "EditorShortcutsTests_default_bindings";
-        std::filesystem::remove_all(root);
-        std::filesystem::create_directories(root);
-        SetUserDataRoot(root.string());
+        SetUserDataRoot(Root.Path().string());
         DropCachedBindings();
     }
 

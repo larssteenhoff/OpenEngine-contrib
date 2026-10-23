@@ -91,6 +91,7 @@ if(EXISTS "${_managed_dir}")
       GameEngine.Scripting.ABI
       GameEngine.Scripting.Bindings
       GameEngine.ECS.ABI
+      GameEngine.TileMap.ABI
       GameEngine.Platform.ABI
       GameEngine.Editor.Scripting.ABI
       GameEngine.Scripting.Runtime

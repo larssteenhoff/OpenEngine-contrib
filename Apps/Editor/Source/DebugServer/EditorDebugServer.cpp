@@ -1,4 +1,5 @@
 #include "DebugServer/EditorDebugServer.h"
+#include "Editor/Registries/EditorPluginRegistry.h"
 #include "DebugServer/DebugServerReply.h"
 #include "Editor/Registries/DebugRequestGateRegistry.h"
 #include "Platform/Capabilities.h"
@@ -395,11 +396,6 @@ void EditorDebugServer::DropHeldRequests(const std::vector<uint32_t>& closedClie
 bool EditorDebugServer::Dispatch(PendingRequest& req)
 {
     const auto handler = m_Handlers.find(req.method);
-    if (handler == m_Handlers.end())
-    {
-        SendErrorResponse(req.clientId, req.id, "Unknown method: " + req.method);
-        return false;
-    }
 
     const Editor::DebugRequestGateContext gateContext{req.method, req.clientId, &req.params, req.requestId, m_Undo};
     nlohmann::json result;
@@ -420,7 +416,14 @@ bool EditorDebugServer::Dispatch(PendingRequest& req)
         {
             // A copy: the gates' context still reads the held request's parameters.
             const RequestContext ctx{req.id, req.params};
-            result = handler->second(ctx);
+            // A method no built-in handler registers may be an editor plugin's command.
+            if (handler != m_Handlers.end())
+                result = handler->second(ctx);
+            else if (!Editor::EditorPluginRegistry::Get().TryInvokeCommand(req.method, ctx.params, result))
+            {
+                SendErrorResponse(req.clientId, req.id, "Unknown method: " + req.method);
+                return false;
+            }
         }
     }
     catch (const std::exception& e)

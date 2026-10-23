@@ -13,6 +13,16 @@
 
 namespace GameEngine::Engine::Renderer::Pipeline::Nodes::Detail
 {
+inline bool RequiresPointSampling(Rendering::TextureFormat format,
+                                  const Rendering::RenderingDeviceCapabilities& capabilities)
+{
+    if (Rendering::IsDepthFormat(format))
+        return true;
+    return !capabilities.supportsFilterableFloat32 &&
+        (format == Rendering::TextureFormat::R32_FLOAT ||
+         format == Rendering::TextureFormat::R32G32B32A32_FLOAT);
+}
+
 inline bool TryGetSet0BindingByName(const GameEngine::Rendering::ShaderMeta& meta,
                                    const std::string& name,
                                    uint32_t& outBinding,

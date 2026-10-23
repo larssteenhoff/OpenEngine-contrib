@@ -4,6 +4,7 @@
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "JobSystem/TaskDependencyGraph.h"
 #include "MockHotReloadDependencies.h"
+#include "TestTempDir.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
@@ -24,7 +25,7 @@ protected:
         Logger::Log::SetLogLevel(Logger::LogLevel::Debug);
 
         // Create test directory structure
-        testDir = std::filesystem::temp_directory_path() / "hot_reload_test";
+        testDir = TestUtils::MakeUniqueTempDirectory("hot_reload_test");
         std::filesystem::create_directories(testDir);
 
         // Create mock assembly file

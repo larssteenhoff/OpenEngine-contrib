@@ -224,9 +224,8 @@ TEST(SplineExtrudeRecipe, TheWaterCaseIsAuthorableWithoutANewProfileShape)
 }
 
 // The extrude recipe has no bespoke inspector: its fields reach the author
-// through DefaultComponentInspector, whose FieldTooltip returns
-// FieldInfo::Tooltip before anything else and whose only humanized fallback is
-// gated on the Ocean components. So an unmarked field renders with NO tooltip,
+// through DefaultComponentInspector, whose row tooltip is FieldInfo::Tooltip
+// and nothing else. So an unmarked field renders with NO tooltip,
 // and the only thing standing between ConformTarget and a bare row is the
 // "// @ge-tooltip" marker above it in SplineExtrude.h, which the component
 // scanner turns into a GE_REFLECT_FIELD_TOOLTIP line in the generated

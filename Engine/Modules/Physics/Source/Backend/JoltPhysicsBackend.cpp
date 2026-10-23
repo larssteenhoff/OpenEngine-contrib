@@ -30,6 +30,7 @@
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -209,12 +210,39 @@ struct JoltPhysicsBackend::Impl
         {
         }
 
+        JPH::ValidateResult OnContactValidate(const JPH::Body& inBody1,
+                                              const JPH::Body& inBody2,
+                                              JPH::RVec3Arg inBaseOffset,
+                                              const JPH::CollideShapeResult& inCollisionResult) override
+        {
+            if (!m_Impl.contactModifyCallback)
+                return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+
+            // Validate carries no manifold, so the normal comes from the
+            // penetration axis. Jolt documents both it and ContactManifold::
+            // mWorldSpaceNormal as "the direction to move body 2 out of
+            // collision", so the two sites agree without a sign correction —
+            // asserted by PhysicsOneWay.ValidateAndManifoldReportTheSameNormalDirection.
+            const JPH::Vec3 normal = inCollisionResult.mPenetrationAxis.NormalizedOr(JPH::Vec3::sAxisY());
+            const JPH::RVec3 point = inBaseOffset + JPH::RVec3(inCollisionResult.mContactPointOn1);
+            const ContactModification mod =
+                m_Impl.InvokeContactModify(inBody1, inBody2, normal, point);
+
+            // Per-contact, never the ForThisBodyPair variant: Jolt caches the
+            // pair-wide answer, which would keep rejecting after the body has
+            // started falling back onto the platform.
+            return mod.accept ? JPH::ValidateResult::AcceptContact
+                              : JPH::ValidateResult::RejectContact;
+        }
+
         void OnContactAdded(const JPH::Body& inBody1,
                             const JPH::Body& inBody2,
                             const JPH::ContactManifold& inManifold,
                             JPH::ContactSettings& ioSettings) override
         {
-            m_Impl.OnContact(inBody1, inBody2, inManifold, ioSettings, RawEventType::ContactAdded);
+            const bool accepted = m_Impl.ApplyContactModify(inBody1, inBody2, inManifold, ioSettings);
+            m_Impl.OnContact(inBody1, inBody2, inManifold, ioSettings,
+                             accepted ? RawEventType::ContactAdded : RawEventType::ContactRemoved);
         }
 
         void OnContactPersisted(const JPH::Body& inBody1,
@@ -222,7 +250,9 @@ struct JoltPhysicsBackend::Impl
                                 const JPH::ContactManifold& inManifold,
                                 JPH::ContactSettings& ioSettings) override
         {
-            m_Impl.OnContact(inBody1, inBody2, inManifold, ioSettings, RawEventType::ContactPersisted);
+            const bool accepted = m_Impl.ApplyContactModify(inBody1, inBody2, inManifold, ioSettings);
+            m_Impl.OnContact(inBody1, inBody2, inManifold, ioSettings,
+                             accepted ? RawEventType::ContactPersisted : RawEventType::ContactRemoved);
         }
 
         void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override
@@ -310,6 +340,72 @@ struct JoltPhysicsBackend::Impl
     // Events
     ContactCallback contactCallback{};
     TriggerCallback triggerCallback{};
+
+    // Per-body data the contact-modify callback sees, snapshotted at creation.
+    //
+    // INVARIANT — writes happen in CreateBody/DestroyBody, reads on physics
+    // worker threads during Step. Neither half is synchronized here, so both
+    // rely on the caller: body creation and destruction must be single-writer
+    // and must not overlap a step. The engine's schedule is what delivers that
+    // — the systems that create bodies (PhysicsInit, TileMapCollision) declare
+    // edges that put them in separate waves, ahead of the PhysicsStep wave, and
+    // waves run one after the other. Sized once at Initialize and never
+    // resized, so a worker's read cannot race a reallocation. A second body
+    // creator sharing a wave, a creation mid-step, or growing this table on
+    // demand each break one half of that and must add locking.
+    std::vector<ContactBody> contactBodyData;
+    ContactModifyCallback contactModifyCallback = nullptr;
+    void* contactModifyContext = nullptr;
+
+    const ContactBody& ContactDataFor(const JPH::Body& body) const
+    {
+        static const ContactBody kEmpty{};
+        const uint32_t index = body.GetID().GetIndex();
+        return index < contactBodyData.size() ? contactBodyData[index] : kEmpty;
+    }
+
+    // Relative velocity of body 2 w.r.t. body 1 at the contact point, so a
+    // body landing on a surface yields dot(normal, relativeVelocity) < 0.
+    ContactModification InvokeContactModify(const JPH::Body& inBody1, const JPH::Body& inBody2,
+                                            JPH::Vec3Arg normal, JPH::RVec3Arg worldPoint) const
+    {
+        const JPH::Vec3 v1 = inBody1.GetPointVelocity(worldPoint);
+        const JPH::Vec3 v2 = inBody2.GetPointVelocity(worldPoint);
+        const JPH::Vec3 rel = v2 - v1;
+        return contactModifyCallback(contactModifyContext, ContactDataFor(inBody1),
+                                     ContactDataFor(inBody2),
+                                     Vector3(normal.GetX(), normal.GetY(), normal.GetZ()),
+                                     Vector3(rel.GetX(), rel.GetY(), rel.GetZ()));
+    }
+
+    // OnContactValidate is documented as possibly not running again while a
+    // contact persists, so a rejection decided there would never be revisited
+    // — drop-through would be dead on a platform the body already rests on.
+    // Added/Persisted DO run every step, so the same predicate is re-evaluated
+    // here and a rejected persisting contact is neutralized by making it a
+    // sensor for the solver only. The logical contact ends without a trigger event.
+    bool ApplyContactModify(const JPH::Body& inBody1, const JPH::Body& inBody2,
+                            const JPH::ContactManifold& inManifold, JPH::ContactSettings& ioSettings)
+    {
+        if (!contactModifyCallback)
+            return true;
+
+        const JPH::RVec3 point = inManifold.mRelativeContactPointsOn1.empty()
+                                     ? inManifold.mBaseOffset
+                                     : inManifold.GetWorldSpaceContactPointOn1(0);
+        const ContactModification mod =
+            InvokeContactModify(inBody1, inBody2, inManifold.mWorldSpaceNormal, point);
+        if (!mod.accept)
+        {
+            ioSettings.mIsSensor = true;
+            return false;
+        }
+        if (!mod.overrideSurface)
+            return true;
+        ioSettings.mCombinedFriction = mod.friction;
+        ioSettings.mCombinedRestitution = mod.restitution;
+        return true;
+    }
     moodycamel::ConcurrentQueue<RawEvent> rawEvents;
     std::unordered_map<JPH::SubShapeIDPair, CachedPair> pairCache;
 
@@ -414,6 +510,10 @@ bool JoltPhysicsBackend::Initialize(const PhysicsWorldSettings& settings)
                                m_Impl->broadphaseInterface,
                                m_Impl->objectVsBroadphase,
                                m_Impl->objectLayerPairs);
+
+    // Sized once for the body budget and never resized: workers index it
+    // without synchronization (see the invariant on contactBodyData).
+    m_Impl->contactBodyData.assign(maxBodies, ContactBody{});
 
     // Event hooks
     m_Impl->physicsSystem.SetContactListener(&m_Impl->contactListener);
@@ -1102,6 +1202,20 @@ BodyHandle JoltPhysicsBackend::CreateBody(const BodySettings& settings)
     const uint32_t key = id.GetIndexAndSequenceNumber();
     m_Impl->bodyHandleByBodyIdKey[key] = h.Value();
 
+    // Snapshot what the contact-modify callback is allowed to see. Written
+    // before the body enters the simulation, so no worker can observe a
+    // half-filled entry.
+    if (const uint32_t bodyIndex = id.GetIndex(); bodyIndex < m_Impl->contactBodyData.size())
+    {
+        ContactBody& data = m_Impl->contactBodyData[bodyIndex];
+        data.body = BodyHandle(h.Value());
+        data.userData = settings.userData;
+        data.contactFlags = settings.contactFlags;
+        data.materialIndex = settings.materialIndex;
+        data.friction = settings.friction;
+        data.restitution = settings.restitution;
+    }
+
     const JPH::EActivation act =
         (settings.startAwake && mt != JPH::EMotionType::Static) ? JPH::EActivation::Activate : JPH::EActivation::DontActivate;
     bi.AddBody(id, act);
@@ -1122,6 +1236,11 @@ void JoltPhysicsBackend::DestroyBody(BodyHandle body)
     auto& bi = m_Impl->physicsSystem.GetBodyInterface();
     bi.RemoveBody(*id);
     bi.DestroyBody(*id);
+
+    // Cleared after removal from the simulation: the slot is reused by the
+    // next body Jolt hands out at this index.
+    if (const uint32_t bodyIndex = id->GetIndex(); bodyIndex < m_Impl->contactBodyData.size())
+        m_Impl->contactBodyData[bodyIndex] = ContactBody{};
 
     m_Impl->bodyHandleByBodyIdKey.erase(id->GetIndexAndSequenceNumber());
     m_Impl->bodies.Destroy(h);
@@ -1171,6 +1290,26 @@ void JoltPhysicsBackend::SetBodyTransform(BodyHandle body, const Transform& tran
     auto& bi = m_Impl->physicsSystem.GetBodyInterface();
     const JPH::EActivation act = (activation == ActivationMode::Activate) ? JPH::EActivation::Activate : JPH::EActivation::DontActivate;
     bi.SetPositionAndRotation(*id, pos, rot, act);
+}
+
+void JoltPhysicsBackend::MoveKinematic(BodyHandle body, const Transform& target, float32 deltaTime)
+{
+    if (!m_Impl || !m_Impl->initialized)
+        return;
+
+    const auto h = GenerationalVector::Handle(static_cast<uint64_t>(body.Value()));
+    const JPH::BodyID* id = m_Impl->bodies.Get(h);
+    if (!id)
+        return;
+
+    const auto& qglm = target.rotation.GetGLM();
+    const JPH::Quat rot(static_cast<float>(qglm.x), static_cast<float>(qglm.y), static_cast<float>(qglm.z), static_cast<float>(qglm.w));
+    const JPH::RVec3 pos(static_cast<float>(target.position.x), static_cast<float>(target.position.y), static_cast<float>(target.position.z));
+
+    // BodyInterface (not Body) so a sleeping platform is woken; Body::MoveKinematic
+    // documents that setting a pose on a sleeping body without waking it is illegal.
+    auto& bi = m_Impl->physicsSystem.GetBodyInterface();
+    bi.MoveKinematic(*id, pos, rot, static_cast<float>(deltaTime));
 }
 
 Vector3 JoltPhysicsBackend::GetLinearVelocity(BodyHandle body) const
@@ -1553,6 +1692,30 @@ bool JoltPhysicsBackend::BoxOverlap(const BoxOverlapQuery& query, std::vector<Ov
     return !outResults.empty();
 }
 
+void JoltPhysicsBackend::SetContactModifyCallback(ContactModifyCallback callback, void* context)
+{
+    if (!m_Impl)
+        return;
+    m_Impl->contactModifyCallback = callback;
+    m_Impl->contactModifyContext = context;
+}
+
+void JoltPhysicsBackend::SetBodyContactFlags(BodyHandle body, uint32 contactFlags)
+{
+    if (!m_Impl || !m_Impl->initialized)
+        return;
+
+    const auto h = GenerationalVector::Handle(static_cast<uint64_t>(body.Value()));
+    const JPH::BodyID* id = m_Impl->bodies.Get(h);
+    if (!id)
+        return;
+
+    // Same main-thread-only contract as the creation-time snapshot: this writes
+    // the side table workers read during Step, and the two never overlap.
+    if (const uint32_t bodyIndex = id->GetIndex(); bodyIndex < m_Impl->contactBodyData.size())
+        m_Impl->contactBodyData[bodyIndex].contactFlags = contactFlags;
+}
+
 void JoltPhysicsBackend::SetContactCallback(ContactCallback callback)
 {
     if (!m_Impl)
@@ -1573,7 +1736,8 @@ void JoltPhysicsBackend::ProcessEvents()
         return;
 
     // Drain raw events captured from worker threads.
-    // We do all caching and callback dispatching on the main thread here.
+    // Caching and callback dispatch happen here, single-threaded, on whichever
+    // thread drove the step that produced them.
     Impl::RawEvent re{};
     while (m_Impl->rawEvents.try_dequeue(re))
     {
@@ -1595,6 +1759,7 @@ void JoltPhysicsBackend::ProcessEvents()
             c.body2IsSensor = re.body2IsSensor;
             c.lastPoint = re.point;
             c.lastNormal = re.normal;
+            const bool isNewPair = !m_Impl->pairCache.contains(re.pair);
             m_Impl->pairCache[re.pair] = c;
 
             if (re.isSensor)
@@ -1602,7 +1767,7 @@ void JoltPhysicsBackend::ProcessEvents()
                 // Trigger enter/stay. For now we emit only enter on ContactAdded.
                 if (!m_Impl->triggerCallback)
                     break;
-                if (re.type != Impl::RawEventType::ContactAdded)
+                if (!isNewPair)
                     break;
 
                 const bool body1Trigger = re.body1IsSensor; // if both are sensors, treat body1 as trigger
@@ -1624,7 +1789,7 @@ void JoltPhysicsBackend::ProcessEvents()
                 e.bodyB = c.handle2;
                 e.userDataA = c.userData1;
                 e.userDataB = c.userData2;
-                e.state = (re.type == Impl::RawEventType::ContactAdded) ? ContactState::Begin : ContactState::Persist;
+                e.state = isNewPair ? ContactState::Begin : ContactState::Persist;
                 e.point = re.point;
                 e.normal = re.normal;
                 e.impulse = 0.0f;

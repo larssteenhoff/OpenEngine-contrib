@@ -254,6 +254,15 @@ Material MakeRunMaterial(const char* name, const char* surface,
 }
 } // namespace
 
+TEST(SortedTransparentRuns, CompatibilityKeepsDistinctMaterialBindingsInSeparateRuns)
+{
+    const Material a = MakeRunMaterial("atlasA", "standard_pbr.surface", std::nullopt);
+    const Material b = MakeRunMaterial("atlasB", "standard_pbr.surface", std::nullopt);
+    EXPECT_EQ(MakeSortedTransparentRunMaterialKey(a), MakeSortedTransparentRunMaterialKey(b));
+    EXPECT_NE(MakeSortedTransparentRunMaterialKey(a, true), MakeSortedTransparentRunMaterialKey(b, true));
+    EXPECT_EQ(MakeSortedTransparentRunMaterialKey(a, true), MakeSortedTransparentRunMaterialKey(a, true));
+}
+
 TEST(SortedTransparentRuns, MaterialKeySharesAcrossParamOnlyVariance)
 {
     // Two glass materials that differ only in params/textures (which ride the

@@ -89,9 +89,16 @@ std::string_view ShaderCompileService::CacheKeyTarget()
     // it is bumped whenever any of those changes, and the entries an older engine wrote are
     // orphaned rather than migrated: never addressed again.
     // v8: reflection preserves unsigned sampled-image types for WebGPU layouts.
-    return MaxSupportedSpirv() == SpirvTarget::Spirv_1_6
-        ? "ShaderCompileServiceTarget:v8:backend-max=spv1.6;mesh-floor=spv1.6"
-        : "ShaderCompileServiceTarget:v8:backend-max=spv1.5;mesh-floor=spv1.6";
+    switch (MaxSupportedSpirv())
+    {
+    case SpirvTarget::Spirv_1_6:
+        return "ShaderCompileServiceTarget:v8:backend-max=spv1.6;mesh-floor=spv1.6";
+    case SpirvTarget::Spirv_1_3:
+        return "ShaderCompileServiceTarget:v8:backend-max=spv1.3;mesh-floor=spv1.6";
+    case SpirvTarget::Spirv_1_5:
+        break;
+    }
+    return "ShaderCompileServiceTarget:v8:backend-max=spv1.5;mesh-floor=spv1.6";
 }
 
 namespace {
@@ -288,7 +295,7 @@ static shaderc_shader_kind ToShadercKind(ShaderStageKind k)
 static ShaderCompileService::SpirvTarget StageMinSpirv(ShaderStageKind k)
 {
     return k == ShaderStageKind::Mesh ? ShaderCompileService::SpirvTarget::Spirv_1_6
-                                      : ShaderCompileService::SpirvTarget::Spirv_1_5;
+                                      : ShaderCompileService::SpirvTarget::Spirv_1_3;
 }
 
 // Emit at the backend's max SPIR-V version, raised to the stage's compile floor.
@@ -339,6 +346,11 @@ static bool CompileOneStage(const ShaderStageCompileSpec& spec,
 
     if (isSlang)
     {
+        if (ChooseSpirv(stageKind) == ShaderCompileService::SpirvTarget::Spirv_1_3)
+        {
+            outDiagnostics = "The Slang compiler lane requires Vulkan 1.2; use GLSL or HLSL on Vulkan 1.1 devices.";
+            return false;
+        }
         SlangLane::StageInput si{};
         si.sourcePath = srcPath;
         si.inlineSource = spec.inlineSource;
@@ -393,6 +405,11 @@ static bool CompileOneStage(const ShaderStageCompileSpec& spec,
     {
         options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
         options.SetTargetSpirv(shaderc_spirv_version_1_6);
+    }
+    else if (ChooseSpirv(stageKind) == ShaderCompileService::SpirvTarget::Spirv_1_3)
+    {
+        options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);
+        options.SetTargetSpirv(shaderc_spirv_version_1_3);
     }
     else
     {

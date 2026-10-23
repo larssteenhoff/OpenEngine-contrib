@@ -187,8 +187,9 @@ void ReleaseProvisionedTerrains(GameEngine::ECS::World& world,
                                 TerrainECS::TerrainService& service)
 {
     world.Query<GameEngine::ECS::Write<Components::Terrain>>().Each(
-        [&](Components::Terrain& terrain)
+        [&](GameEngine::ECS::Writable<Components::Terrain> terrainRow)
         {
+            Components::Terrain& terrain = terrainRow.Mutable();
             if (terrain.TerrainDataHandle != 0 || terrain.TerrainDataGeneration != 0)
             {
                 TerrainECS::TerrainHandle h{terrain.TerrainDataHandle,

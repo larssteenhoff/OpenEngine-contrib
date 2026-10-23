@@ -13,6 +13,7 @@
 #include "AssetCore/PathNormalization.h"
 #include "Core/CpuProfiler.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -327,7 +328,7 @@ bool AssetManager::Initialize(JobSystem::WorkStealingThreadPool* jobSystem)
         if (std::shared_ptr<AssetDecodeGate> gate = m_IOService->GetDecodeGate())
             m_TextureCookWorkers = std::make_unique<TextureCookWorkers>(*m_JobSystem, std::move(gate));
 
-        m_BatchCoordinator = std::make_unique<AssetBatchCoordinator>(*this, *m_JobSystem, *m_IOService);
+        m_BatchCoordinator = std::make_unique<AssetBatchCoordinator>(*this, *m_IOService);
         Logger::Log::Info("Unified asset loading coordinator initialized");
     }
 
@@ -344,8 +345,7 @@ namespace
 {
 bool IsPackagedPlayerEnvironment()
 {
-    const char* env = std::getenv("GE_PACKAGED_PLAYER");
-    return env && env[0] != '\0' && !(env[0] == '0' && env[1] == '\0');
+    return Platform::EnvironmentSwitchEnabled("GE_PACKAGED_PLAYER", false);
 }
 
 // One place decides what an inline reload outcome means for the log and for
@@ -2760,22 +2760,6 @@ std::future<SharedPtr<Asset>> AssetManager::LoadAssetSynchronous(const AssetMeta
     return promise.get_future();
 }
 
-std::future<Vector<SharedPtr<Asset>>> AssetManager::LoadAssetsSequential(const Vector<GUID>& guids, AssetLoadPriority priority)
-{
-    std::promise<Vector<SharedPtr<Asset>>> promise;
-    Vector<SharedPtr<Asset>> results;
-    results.reserve(guids.size());
-
-    for (const auto& guid : guids)
-    {
-        auto future = LoadAssetAsync(guid, priority);
-        results.push_back(future.get());
-    }
-
-    promise.set_value(std::move(results));
-    return promise.get_future();
-}
-
 void AssetManager::RegisterLoadedAsset(const GUID& guid, SharedPtr<Asset> asset)
 {
     // E5: a decode pipeline launched before a remap registers with the GUID
@@ -2795,9 +2779,6 @@ void AssetManager::RegisterLoadedAsset(const GUID& guid, SharedPtr<Asset> asset)
         profileLock.OnAcquired();
         m_LoadedAssets.insert_or_assign(key, LoadedAssetEntry{asset, transient});
     }
-
-    // Update memory statistics incrementally (lock-free)
-    UpdateMemoryStatsIncremental(asset, true);
 }
 
 void AssetManager::UnregisterLoadedAsset(const GUID& guid)
@@ -2813,12 +2794,6 @@ void AssetManager::UnregisterLoadedAsset(const GUID& guid)
             removedAsset->Unload();
             m_LoadedAssets.erase(it);
         }
-    }
-
-    // Update memory statistics incrementally (lock-free)
-    if (removedAsset)
-    {
-        UpdateMemoryStatsIncremental(removedAsset, false);
     }
 }
 
@@ -3260,33 +3235,6 @@ bool AssetManager::CancelInFlightLoad(const GUID& guid)
     if (decodeHandle.IsValid())
         decodeHandle.Cancel();
     return true;
-}
-
-JobSystem::TaskHandle AssetManager::UnloadAssetWithDependencies(const GUID& guid)
-{
-    if (!m_Initialized || !m_JobSystem || !m_BatchCoordinator)
-    {
-        Logger::Log::Error("AssetManager not properly initialized for unified asset unloading");
-        return JobSystem::TaskHandle();
-    }
-
-    // An in-flight load of this GUID is moot once the caller decided to
-    // unload: withdraw it before scheduling the unload work.
-    CancelInFlightLoad(guid);
-
-    try
-    {
-        // Use unified batch coordinator for unloading
-        auto handle = m_BatchCoordinator->UnloadAsset(guid);
-
-        Logger::Log::Debug("Started unified asset unloading for asset {}", guid.ToString());
-        return handle;
-    }
-    catch (const std::exception& e)
-    {
-        Logger::Log::Error("Failed to create unified unload task for {}: {}", guid.ToString(), e.what());
-        return JobSystem::TaskHandle();
-    }
 }
 
 } // namespace GameEngine

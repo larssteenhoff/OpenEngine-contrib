@@ -118,6 +118,20 @@ float computeClipAlpha(uint flags, float px)
     return alpha;
 }
 
+// Both triangles sharing an edge must evaluate the identical floating-point
+// expression. Reversing the subtraction origin rounds differently at fractional
+// clip intersections and can make both sides reject the same pixel center.
+float meshEdgeDistance(vec2 point, vec2 first, vec2 second)
+{
+    bool reverse = first.x > second.x || (first.x == second.x && first.y > second.y);
+    vec2 start = reverse ? second : first;
+    vec2 end = reverse ? first : second;
+    vec2 edge = end - start;
+    float distance = ((point.x - start.x) * edge.y - (point.y - start.y) * edge.x) /
+                     max(length(edge), 0.001);
+    return reverse ? -distance : distance;
+}
+
 void main()
 {
     UIPrimitive prim = sb.prims[vSlot];
@@ -409,10 +423,10 @@ void main()
             // stripe centres, ±1/3 pixel horizontally (RGB-stripe panel,
             // R leftmost). The step rides the screen-x derivative of the
             // em-space interpolant, so it is exact at any glyph scale/DPI.
-            // Slug's per-tap footprint (the 1-px pixel box convolved with
-            // the kTextFilterWidthPx reconstruction filter) overlaps
-            // neighbouring taps, which is the low-pass that keeps fringes
-            // bounded.
+            // Each tap's footprint is a full 1-px box and neighbouring taps
+            // overlap by two thirds, so across a straight edge the red and
+            // blue taps differ by at most two thirds of the edge's step: that
+            // is the fringe's bound.
 #if defined(GE_COMPAT_PROFILE)
             vec2 subpixelStepEm = ge_UiDeriv.UvDdx * (1.0 / 3.0);
 #else
@@ -458,12 +472,9 @@ void main()
                 outCoverage = vec4(layerA, layerMean);
             }
 #else
-            // Colour-keyed coverage correction (Skia's SkMaskGamma model, see
-            // UI/text_mask_gamma.glsl). This replaced a ppem-keyed
-            // pow(coverage, e) ramp, which took up to a third of the ink out of
-            // a glyph purely for being asked for at a larger size and thinned
-            // both contrast polarities. The perceptual error that needs
-            // correcting is a property of the text colour, not of its size.
+            // Colour-keyed coverage correction (UI/text_mask_gamma.glsl): the
+            // contrast keyed on the paint's luminance, then the retarget into
+            // the attachment's blend space. Never keyed on size.
             coverage = correctTextCoverage(coverage, glyphColor.rgb,
                                            pc.textContrast, pc.textBlendGamma,
                                            pc.textBlendSpaceEncoded);
@@ -657,6 +668,52 @@ void main()
 
         vec4 triColor = uiPaintColor(prim.colors.x);
         emitPremultiplied(toPremultipliedSdrUi(vec4(triColor.rgb, triColor.a * alpha * clipA * opacity)));
+        return;
+    }
+
+    // ---- MODE: Cooked mesh triangle ----
+    // Uses the same vertex packing as Triangle. radii.x carries silhouette
+    // bits 0..2 plus shared-edge ownership bits 3..5. Tessellation edges use
+    // hard, single-owner coverage so neighboring translucent triangles meet
+    // without gaps or double blending; only the true outline receives AA.
+    if (mode == MODE_MESH_TRIANGLE)
+    {
+        // Adjacent mesh triangles use different bounding quads. Their interpolated
+        // vLocal can round to opposite sides of one edge at the same pixel.
+        // This pass covers the full target from (0,0), so all triangles share
+        // the fragment's exact top-left-origin sample coordinate.
+        vec2 samplePosition = gl_FragCoord.xy;
+        vec2 v0 = prim.uvRect.xy;
+        vec2 v1 = prim.uvRect.zw;
+        vec2 v2 = prim.borderWidths.xy;
+        vec2 e0 = v1 - v0;
+
+        float d0 = meshEdgeDistance(samplePosition, v0, v1);
+        float d1 = meshEdgeDistance(samplePosition, v1, v2);
+        float d2 = meshEdgeDistance(samplePosition, v2, v0);
+
+        float winding = e0.x * (v2.y - v0.y) - e0.y * (v2.x - v0.x);
+        float orientation = winding >= 0.0 ? 1.0 : -1.0;
+        d0 *= orientation;
+        d1 *= orientation;
+        d2 *= orientation;
+
+        uint edgeFlags = uint(prim.radii.x + 0.5);
+        uint boundary = edgeFlags & 7u;
+        uint ownership = (edgeFlags >> 3u) & 7u;
+        float a0 = (boundary & 1u) != 0u ? sdfCoverage(-d0, px) :
+                   ((ownership & 1u) != 0u ? step(d0, 0.0) : 1.0 - step(0.0, d0));
+        float a1 = (boundary & 2u) != 0u ? sdfCoverage(-d1, px) :
+                   ((ownership & 2u) != 0u ? step(d1, 0.0) : 1.0 - step(0.0, d1));
+        float a2 = (boundary & 4u) != 0u ? sdfCoverage(-d2, px) :
+                   ((ownership & 4u) != 0u ? step(d2, 0.0) : 1.0 - step(0.0, d2));
+        float alpha = min(a0, min(a1, a2));
+
+        if (alpha <= 0.0)
+            discard;
+        vec4 meshColor = uiPaintColor(prim.colors.x);
+        emitPremultiplied(toPremultipliedSdrUi(
+            vec4(meshColor.rgb, meshColor.a * alpha * clipA * opacity)));
         return;
     }
 

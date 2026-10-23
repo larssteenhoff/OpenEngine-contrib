@@ -1,6 +1,7 @@
 #include "Terrain/TerrainInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
 
 #include "AssetCore/AssetTypes.h"
 #include "AssetCore/GUID.h"
@@ -28,6 +29,7 @@
 #include "TerrainECS/TerrainSizingPlan.h"
 #include "UndoRedo/UndoRedoService.h"
 
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
 #include "Inspectors/InspectorComponentSection.h"
 #include "Inspectors/InspectorDragHelpers.h"
@@ -56,9 +58,6 @@ namespace GameEngine
 {
 namespace
 {
-
-constexpr float kColorSwatchSize = 20.0f;
-constexpr uint32_t kColorSwatchBorder = 0xFF555555u;
 
 // TerrainGrass::WindDirection, BladeTilt, BladeBend and TuftFan are stored in radians, which is what
 // the shader wants and what nobody authors: the panel drags them in degrees.
@@ -148,23 +147,6 @@ static std::string FormatGrassColor(uint32_t argb)
     return buf;
 }
 
-// Colour chip. The cursor is left to the caller: a swatch that opens a picker sets Pointer,
-// a read-only one (the layer fallback tint) keeps the default arrow.
-static void StyleColorSwatch(UIElement* swatch, uint32_t argb)
-{
-    if (!swatch)
-        return;
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(kColorSwatchSize))
-        .Set(Style::Height, StyleLength::Px(kColorSwatchSize))
-        .Set(Style::MinWidth, StyleLength::Px(kColorSwatchSize))
-        .Set(Style::MinHeight, StyleLength::Px(kColorSwatchSize))
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{3.0f, 3.0f, 3.0f, 3.0f})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{kColorSwatchBorder, kColorSwatchBorder, kColorSwatchBorder, kColorSwatchBorder})
-        .Set(Style::BackgroundColor, OpaqueArgb(argb));
-}
-
 static uint32_t GetGrassColor(const Components::TerrainGrass& grass, int slot)
 {
     switch (slot)
@@ -214,18 +196,16 @@ static void AddGrassColorSwatch(UIElement* field,
         .Set(Style::Gap, StyleLength::Px(4.0f));
     UIElement* groupRaw = group.get();
 
-    auto swatch = std::make_unique<UIElement>();
-    UIElement* swatchRaw = swatch.get();
     const uint32_t initialArgb = GetGrassColor(*comp, slot);
-    StyleColorSwatch(swatchRaw, initialArgb);
-    swatchRaw->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
+    auto swatch = InspectorUI::MakeColorSwatch(OpaqueArgb(initialArgb));
+    UIElement* swatchRaw = swatch.get();
     swatchRaw->SetTooltip(std::string(name) + " " + FormatGrassColor(initialArgb));
     groupRaw->AddChild(std::move(swatch));
 
     auto label = std::make_unique<Label>();
     label->AddClass("inspector-text");
+    label->AddClass("inspector-color-swatch-value");
     label->SetText(name);
-    label->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
     Label* labelRaw = label.get();
     groupRaw->AddChild(std::move(label));
 
@@ -257,7 +237,7 @@ static void AddGrassColorSwatch(UIElement* field,
             else
                 Editor::PreviewComponentUpdate(w, e, n, updated);
             const uint32_t newColor = GetGrassColor(updated, slot);
-            StyleColorSwatch(swatchRaw, newColor);
+            InspectorUI::SetColorSwatchColor(swatchRaw, OpaqueArgb(newColor));
             swatchRaw->SetTooltip(label + " " + FormatGrassColor(newColor));
             if (commit && onCommitted)
                 onCommitted();
@@ -377,8 +357,9 @@ static void AddFallbackTintRow(UIElement* parent, uint32_t layer, const std::str
         .Set(Style::AlignItems, AlignItems::Center)
         .Set(Style::Gap, StyleLength::Px(8.0f));
 
-    auto swatch = std::make_unique<UIElement>();
-    StyleColorSwatch(swatch.get(), TerrainLayers::FallbackTintSwatchArgb(layer));
+    // Read-only: the fallback tint is built in, so the chip keeps the default arrow.
+    auto swatch = InspectorUI::MakeColorSwatch(OpaqueArgb(TerrainLayers::FallbackTintSwatchArgb(layer)));
+    swatch->AddClass("inspector-color-swatch-readonly");
     field->AddChild(std::move(swatch));
 
     auto label = std::make_unique<Label>();
@@ -743,6 +724,38 @@ static void AddMaterialLayersSection(const InspectorContext& ctx, const Componen
 
 void RegisterTerrainInspector()
 {
+    constexpr int kTerrainSortKey = 37;
+    constexpr int kPlanetReliefSortKey = 38;
+    constexpr int kTerrainGrassSortKey = 39;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Terrain";
+        traits.Category = "Terrain";
+        traits.SortKey = kTerrainSortKey;
+        traits.InspectorIconClass = "inspector-section-icon-terrain";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::Terrain>(), std::move(traits));
+    }
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Planet Relief";
+        traits.SortKey = kPlanetReliefSortKey;
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::TerrainPlanetRelief>(), std::move(traits));
+    }
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Terrain Grass";
+        traits.Category = "Terrain";
+        traits.SortKey = kTerrainGrassSortKey;
+        traits.InspectorIconClass = "inspector-section-icon-grass";
+        traits.EnableToggleTooltip = "Switch this component on or off. Off places no grass on this terrain, so it "
+                                     "costs no placement and no draw.";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::TerrainGrass>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())
@@ -1746,12 +1759,6 @@ void RegisterTerrainInspector()
     };
 
     InspectorRegistry::Get().RegisterComponentInspector<Components::TerrainGrass>(std::move(grassFn));
-
-    Editor::EditorComponentTraits traits;
-    traits.EnableToggleTooltip = "Switch this component on or off. Off places no grass on this terrain, so it "
-                                 "costs no placement and no draw.";
-    Editor::EditorComponentTraitsRegistry::Get().Register(
-        ECS::GetComponentTypeId<Components::TerrainGrass>(), std::move(traits));
 }
 
 } // namespace GameEngine

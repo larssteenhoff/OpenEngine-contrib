@@ -82,7 +82,8 @@ void ShowSectionMenu(Platform::Window* window, const std::vector<SectionMenuItem
 } // namespace
 
 Foldout* AddComponentSection(UIElement* parent, std::string_view key, std::string_view title,
-                             bool expandedByDefault)
+                             bool expandedByDefault,
+                             std::function<void(Foldout&, bool expanded)> onExpandedChanged)
 {
     if (!parent)
         return nullptr;
@@ -95,7 +96,13 @@ Foldout* AddComponentSection(UIElement* parent, std::string_view key, std::strin
     raw->AddClass("rp-foldout");
     raw->AddClass("inspector-component-section");
     raw->SetExpanded(expanded);
-    raw->SetOnExpandedChanged([&expanded](Foldout&, bool nowExpanded) { expanded = nowExpanded; });
+    raw->SetOnExpandedChanged(
+        [&expanded, onExpandedChanged = std::move(onExpandedChanged)](Foldout& foldout, bool nowExpanded)
+        {
+            expanded = nowExpanded;
+            if (onExpandedChanged)
+                onExpandedChanged(foldout, nowExpanded);
+        });
 
     parent->AddChild(std::move(section));
     return raw;

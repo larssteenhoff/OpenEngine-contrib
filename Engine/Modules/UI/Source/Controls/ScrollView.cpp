@@ -250,6 +250,13 @@ void ScrollView::UpdateScrollbarVisibility() const
             forceH = true;
         if (rs.GetCustomNumber(HashStringId("--ui_scrollbar_force_vertical")).value_or(0.0f) > 0.0f)
             forceV = true;
+        // The theme's bar thickness (logical px), so a layout beside a scroll view can reserve
+        // the same gutter; without the token the bars keep Scrollbar::kDefaultThicknessPx.
+        if (const auto thickness = rs.GetCustomNumber(HashStringId("--ui_scrollbar_thickness")))
+        {
+            m_VBar->SetThicknessPx(*thickness);
+            m_HBar->SetThicknessPx(*thickness);
+        }
 
         if (rs.Layout.OverflowX == Overflow::Hidden)
             suppressH = true;
@@ -442,26 +449,6 @@ void ScrollView::EnsureYVisible(float contentY, float viewTop, float viewHeight)
 	    UIElement::OnEvent(e);
 	}
 	
-	void ScrollView::OnScrollViewportLayout(UIElement* viewport, float W, float H)
-	{
-	    if (viewport != m_ClipViewport)
-	        return;
-	
-	    SetViewportSize(W, H);
-    // When content size is not driven explicitly, keep extents in sync with layout.
-    // Virtualized controls (GridView/ListView/TreeView) typically call SetContentSize(...)
-    // themselves; in that case, clobbering m_ContentW/H here causes scrollbar flicker
-    // during resize/layout convergence.
-    if (!m_HasExplicitContentSize && m_Viewport)
-    {
-        // NOTE: This will set m_HasExplicitContentSize=true via SetContentSize(),
-        // so prefer to update the cached fields directly in this path.
-        m_ContentW = std::max(0.0f, m_Viewport->GetLayoutWidth());
-        m_ContentH = std::max(0.0f, m_Viewport->GetLayoutHeight());
-    }
-    UpdateScrollbarVisibility();
-	}
-
     void ScrollView::OnPostLayout()
     {
         // The clip viewport is the visible region; the scroll-content root holds
@@ -532,8 +519,10 @@ void ScrollView::EnsureYVisible(float contentY, float viewTop, float viewHeight)
                         if (!el)
                             continue;
 
-                        // Only consider labels; editable fields manage their own scrolling.
-                        if (typeid(*el) == typeid(Label))
+                        // Host-rendered text contributes its intrinsic width, including label
+                        // subclasses. Text controls with their own scrolling keep that responsibility.
+                        const ITextMeasurable* textMeasure = el->GetTextMeasurable();
+                        if (textMeasure && textMeasure->AllowWrapForMeasure() && !textMeasure->HandlesOwnTextRendering())
                         {
                             const ResolvedStyle* st = ui ? ui->TryGetResolvedStyleFor(el) : nullptr;
                             if (st)
@@ -592,5 +581,42 @@ void ScrollView::EnsureYVisible(float contentY, float viewTop, float viewHeight)
         if (m_VBar)
             (void)m_VBar->UpdateThumbLayout();
     }
+
+
+void ScrollView::AutoScrollNearEdge(float mouseX, float mouseY) const
+{
+    if (!m_ClipViewport)
+        return;
+
+    const float vx = m_ClipViewport->GetLayoutX();
+    const float vy = m_ClipViewport->GetLayoutY();
+    const float vw = m_ClipViewport->GetLayoutWidth();
+    const float vh = m_ClipViewport->GetLayoutHeight();
+    if (!(vh > 0.0f) || !(vw > 0.0f))
+        return;
+    if (mouseX < vx || mouseX >= vx + vw || mouseY < vy || mouseY >= vy + vh)
+        return;
+
+    constexpr float kEdgePx = 28.0f;
+    constexpr float kMaxSpeedPxPerFrame = 18.0f;
+
+    const float distTop = mouseY - vy;
+    const float distBot = (vy + vh) - mouseY;
+
+    float dy = 0.0f;
+    if (distTop < kEdgePx)
+    {
+        const float t = std::clamp((kEdgePx - distTop) / kEdgePx, 0.0f, 1.0f);
+        dy = -kMaxSpeedPxPerFrame * t;
+    }
+    else if (distBot < kEdgePx)
+    {
+        const float t = std::clamp((kEdgePx - distBot) / kEdgePx, 0.0f, 1.0f);
+        dy = kMaxSpeedPxPerFrame * t;
+    }
+
+    if (dy != 0.0f)
+        ScrollBy(0.0f, dy);
+}
 
 } // namespace GameEngine

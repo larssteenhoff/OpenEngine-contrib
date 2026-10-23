@@ -323,3 +323,30 @@ TEST_F(SceneResolveServiceTest, AKeptModelIsEvictedWhenItIsReloadedOrUnloaded)
     EXPECT_NE(m_Services.GetMeshGPURegistry().Find(static_cast<Rendering::MeshGPUHandle>(handle)), nullptr)
         << "the spawn after the unload was bound to a released mesh handle";
 }
+
+TEST_F(SceneResolveServiceTest, DisabledStandaloneRendererWaitsUntilEnabled)
+{
+    const GUID materialGuid = RegisterHeldMaterial(/*fails=*/false);
+    ASSERT_FALSE(materialGuid.IsNull());
+    ECS::World* world = EnableRenderingLoop();
+    ASSERT_NE(world, nullptr);
+    Components::MeshRenderer renderer{};
+    renderer.materialAssetGuid.Set(materialGuid);
+    ECS::Entity entity = world->Create<Components::MeshRenderer>(renderer);
+    entity.SetEnabled<Components::MeshRenderer>(false);
+    const SceneResolveBatch batch = EngineResolves().EnqueueWorld(*world, m_Services);
+    StepFrame();
+    EXPECT_TRUE(EngineResolves().IsBatchComplete(batch));
+    EXPECT_EQ(EngineResolves().Counts().PendingMaterials, 0u);
+    EXPECT_EQ(m_Services.Materials().Registry().Find(materialGuid), nullptr);
+
+    entity.SetEnabled<Components::MeshRenderer>(true);
+    StepFrame();
+    EXPECT_EQ(EngineResolves().Counts().PendingMaterials, 1u);
+    m_Gate.Release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!m_Services.Materials().Registry().Find(materialGuid)
+           && std::chrono::steady_clock::now() < deadline)
+        StepFrame();
+    EXPECT_NE(m_Services.Materials().Registry().Find(materialGuid), nullptr);
+}

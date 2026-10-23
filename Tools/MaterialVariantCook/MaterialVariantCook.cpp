@@ -174,7 +174,7 @@ struct Options
 // COLOR_0 stream reaches on a cooked-only runtime, so the only ones that cook
 // the vertex-colour rows. `Prewarmed` marks a material the runtime prewarms on
 // registration (a project's .material and the imported mesh materials): a
-// desktop cook adds every key that prewarm asks for.
+// cook adds every key that prewarm asks for, for desktop and web alike.
 struct CookSource
 {
     std::string Name;
@@ -284,8 +284,9 @@ std::vector<VariantRequest> VariantsFor(const CookTarget& target, const Material
     GameEngine::Tools::MaterialCook::ExpandSceneColorGrabVariants(
         rows, HasKeyword(materialKeywords, MaterialKeyword::Transmission));
     GameEngine::Tools::MaterialCook::AddMaterialKeywords(rows, materialKeywords);
-    // A web cook keeps its declared rows: a browser's cook translates every row to WGSL.
-    if (!web && target.Prewarmed)
+    // Desktop and web alike: a browser registers a material with the same prewarm, and a cooked-only
+    // runtime that lacks a key it asks for reports it as a shader error.
+    if (target.Prewarmed)
         AddPrewarmVariants(rows, target, context, worldPasses);
     // Last, so every colour row gets its vertex-colour twin: the declared rows, the grab and relief rows,
     // and the prewarm's crossfade tails, which a mesh with a COLOR_0 stream draws with it too.

@@ -1345,23 +1345,16 @@ void MonitorsPanel::ShowChartDragGhost(const std::string& name, float x, float y
         auto ghost = std::make_unique<Label>();
         ghost->AddClass("monitors-chart-drag-ghost");
         ghost->SetOverlayLayer(OverlayLayer::DragPreview);
+        // Placement stays in code so the ghost never joins the root's flow,
+        // even before its stylesheet is attached; the look is in the rule.
         ghost->Overrides()
             .Set(Style::Position, PositionType::Absolute)
             .Set(Style::PointerEvents, false)
             .Set(Style::ZIndex, 9400)
-            .Set(Style::Display, DisplayMode::None)
-            .Set(Style::PaddingTop, StyleLength::Px(6.0f))
-            .Set(Style::PaddingRight, StyleLength::Px(10.0f))
-            .Set(Style::PaddingBottom, StyleLength::Px(6.0f))
-            .Set(Style::PaddingLeft, StyleLength::Px(10.0f))
-            .Set(Style::MinWidth, StyleLength::Px(120.0f))
-            .Set(Style::MaxWidth, StyleLength::Px(280.0f))
-            .Set(Style::BackgroundColor, static_cast<uint32_t>(0xF21E242Cu))
-            .Set(Style::Color, static_cast<uint32_t>(0xFFEDEDEDu))
-            .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{4.0f, 4.0f, 4.0f, 4.0f})
-            .Set(Style::FontSize, StyleLength::Px(12.0f));
+            .Set(Style::Display, DisplayMode::None);
         m_ChartDragGhost = ghost.get();
         root->AddChild(std::move(ghost));
+        AttachPanelStyleTo(*m_ChartDragGhost);
     }
 
     if (!m_ChartDragGhost)
@@ -1408,15 +1401,11 @@ void MonitorsPanel::ShowChartDropIndicator(const ChartDropTarget& target)
             .Set(Style::PointerEvents, false)
             .Set(Style::ZIndex, 9390)
             .Set(Style::Display, DisplayMode::None)
-            .Set(Style::BackgroundColor, static_cast<uint32_t>(0x2E3A8FFFu))
             .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-            .Set(Style::BorderTopColor, static_cast<uint32_t>(0xCC3A8FFFu))
-            .Set(Style::BorderRightColor, static_cast<uint32_t>(0xCC3A8FFFu))
-            .Set(Style::BorderBottomColor, static_cast<uint32_t>(0xCC3A8FFFu))
-            .Set(Style::BorderLeftColor, static_cast<uint32_t>(0xCC3A8FFFu))
             .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{4.0f, 4.0f, 4.0f, 4.0f});
         m_ChartDropIndicator = indicator.get();
         root->AddChild(std::move(indicator));
+        AttachPanelStyleTo(*m_ChartDropIndicator);
     }
 
     float left = 0.0f;
@@ -1615,6 +1604,29 @@ void MonitorsPanel::OnPostLayout()
     }
 }
 
+// The panel's stylesheet asset, resolved from the editor mount.
+static GUID ResolvePanelStyleGuid(AssetManager& am)
+{
+    return am.ResolveAssetGuid(std::filesystem::path("UI") / "panels" / "MonitorsPanel.css",
+                               GameEngine::kAssetSourceAliasEditor);
+}
+
+// The panel stylesheet is attached to the panel's own subtree, so drag feedback
+// the panel hangs off the UI root (the drag ghost and the drop indicator, on
+// the drag-preview overlay layer) attaches it itself. The sheet is resident
+// once the panel has styled itself, which it has before any chart can be
+// dragged.
+void MonitorsPanel::AttachPanelStyleTo(UIElement& element)
+{
+    UIManager* ui = GetOwnerManager();
+    if (!ui)
+        return;
+    auto& am = EngineCore::GetInstance().GetAssetManager();
+    auto asset = am.GetAsset(ResolvePanelStyleGuid(am));
+    if (asset && asset->GetType() == AssetType::UIStyle && asset->IsLoaded() && !asset->HasFailed())
+        (void)ui->AttachStyleToSubtreeFromAsset(&element, *static_cast<UIStyleAsset*>(asset.get()));
+}
+
 void MonitorsPanel::LoadAndAttachPanelStyle()
 {
     m_StyleLoadScheduled = false;
@@ -1622,9 +1634,7 @@ void MonitorsPanel::LoadAndAttachPanelStyle()
     if (!ui)
         return;
     auto& am = EngineCore::GetInstance().GetAssetManager();
-    const std::filesystem::path styleAssetPath =
-        std::filesystem::path("UI") / "panels" / "MonitorsPanel.css";
-    const GUID styleGuid = am.ResolveAssetGuid(styleAssetPath, GameEngine::kAssetSourceAliasEditor);
+    const GUID styleGuid = ResolvePanelStyleGuid(am);
     if (styleGuid.IsNull() || m_PanelStyleLoadHandle)
         return;
     m_PanelStyleLoadHandle = std::make_unique<AssetLoadHandle>(

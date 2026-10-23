@@ -177,7 +177,7 @@ struct ClipPathRig
     void SetTime(float seconds)
     {
         world.Query<ECS::Write<Components::AnimatorRef>>().Each(
-            [seconds](Components::AnimatorRef& animatorRef) { animatorRef.Time = seconds; });
+            [seconds](ECS::Writable<Components::AnimatorRef> animatorRef) { animatorRef.Mutable().Time = seconds; });
     }
 };
 
@@ -510,7 +510,9 @@ TEST_F(AnimationEventDispatch, TheOutgoingClipOfACrossfadeFiresUntilTheFadeEnds)
         ClipPathRig rig(outgoing, 0u);
         rig.SetTime(0.55f);
         rig.world.Query<ECS::Write<Components::AnimatorRef>>().Each(
-            [&](Components::AnimatorRef& animatorRef) { animatorRef.SetAnimation(incoming, fadeSeconds); });
+            [&](ECS::Writable<Components::AnimatorRef> animatorRef) {
+                animatorRef.Mutable().SetAnimation(incoming, fadeSeconds);
+            });
         Names fired = rig.Frame(kFrameSeconds);
         const Names second = rig.Frame(kFrameSeconds);
         fired.insert(fired.end(), second.begin(), second.end());
@@ -577,7 +579,8 @@ TEST_F(AnimationEventDispatch, ASectionFrameLongerThanTheSectionLandingBeforeIts
     const uint32 clip = RegisterClip(MakeClip({{10, "early"}, {12, "middle"}, {16, "late"}}));
     ASSERT_NE(clip, 0u);
     ClipPathRig rig(clip, Components::AnimatorRef::kFlag_Loop | Components::AnimatorRef::kFlag_Section);
-    rig.world.Query<ECS::Write<Components::AnimatorRef>>().Each([](Components::AnimatorRef& animatorRef) {
+    rig.world.Query<ECS::Write<Components::AnimatorRef>>().Each([](ECS::Writable<Components::AnimatorRef> row) {
+        Components::AnimatorRef& animatorRef = row.Mutable();
         animatorRef.SectionStart = 0.3f;
         animatorRef.SectionEnd = 0.6f;
         animatorRef.Time = 0.5f;
@@ -614,7 +617,8 @@ TEST_F(AnimationEventDispatch, ASpeedOf0AtTheExactEndOfALoopFiresNothing)
     const uint32 clip = RegisterClip(MakeClip({{0, "zero"}, {30, "end"}}));
     ASSERT_NE(clip, 0u);
     ClipPathRig rig(clip, Components::AnimatorRef::kFlag_Loop);
-    rig.world.Query<ECS::Write<Components::AnimatorRef>>().Each([](Components::AnimatorRef& animatorRef) {
+    rig.world.Query<ECS::Write<Components::AnimatorRef>>().Each([](ECS::Writable<Components::AnimatorRef> row) {
+        Components::AnimatorRef& animatorRef = row.Mutable();
         animatorRef.Time = 1.0f;
         animatorRef.Speed = 0.0f;
     });
@@ -655,7 +659,8 @@ TEST_F(AnimationEventDispatch, ALoopingSectionFiresOnlyItsOwnEventsOncePerLap)
     const uint32 clip = RegisterClip(MakeClip({{3, "before"}, {12, "inside"}, {27, "after"}}));
     ASSERT_NE(clip, 0u);
     ClipPathRig rig(clip, Components::AnimatorRef::kFlag_Loop | Components::AnimatorRef::kFlag_Section);
-    rig.world.Query<ECS::Write<Components::AnimatorRef>>().Each([](Components::AnimatorRef& animatorRef) {
+    rig.world.Query<ECS::Write<Components::AnimatorRef>>().Each([](ECS::Writable<Components::AnimatorRef> row) {
+        Components::AnimatorRef& animatorRef = row.Mutable();
         animatorRef.SectionStart = 0.3f;
         animatorRef.SectionEnd = 0.6f;
         animatorRef.Time = 0.3f;

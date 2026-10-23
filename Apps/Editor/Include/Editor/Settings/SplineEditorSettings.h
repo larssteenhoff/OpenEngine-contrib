@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "Editor/Settings/SettingsStore.h"
+#include "Types/Color.h"
 
 namespace GameEngine
 {
@@ -373,6 +374,16 @@ public:
     void SetCurveType(SplineCurveType value) { m_CurveType = value; Save(); }
     void SetSelectionShape(SplineSelectionShape value) { m_SelectionShape = value; Save(); }
     void SetControlRenderShape(SplineControlRenderShape value) { m_ControlRenderShape = value; Save(); }
+
+    // RGBA in 0..1 from a packed ARGB uint32_t, channel for channel (no
+    // colour-space conversion).
+    static Color UnpackColor(uint32_t argb)
+    {
+        return Color(static_cast<float>((argb >> 16) & 0xFFu) / 255.0f,
+                     static_cast<float>((argb >>  8) & 0xFFu) / 255.0f,
+                     static_cast<float>((argb      ) & 0xFFu) / 255.0f,
+                     static_cast<float>((argb >> 24) & 0xFFu) / 255.0f);
+    }
 
 private:
     SplineEditorSettings() { Load(); }

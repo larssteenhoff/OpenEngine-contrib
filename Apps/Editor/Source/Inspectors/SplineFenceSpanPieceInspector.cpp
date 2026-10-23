@@ -106,9 +106,11 @@ void BuildSpanPieceSection(const InspectorContext& ctx)
     RefreshWhenTheNameChanges(ctx);
 
     InspectorUI::AddLine(ctx.Parent, "Span " + std::to_string(piece->OrdinalInRun) +
-                                         " of the run from point " + std::to_string(piece->Run) +
-                                         ". What it uses is saved on the fence and survives every "
-                                         "rebuild; the rest of this piece is rebuilt from the fence.");
+                                         " of the run from point " + std::to_string(piece->Run));
+    if (ctx.ShowInfoCards)
+        InspectorUI::AddInfoCard(ctx.Parent, "What this span uses is saved on the fence and survives "
+                                             "every rebuild; the rest of this piece is rebuilt from the "
+                                             "fence.");
 
     const SplineSpanOverride* current =
         Editor::FindSpanOverride(*fence, piece->Run, piece->OrdinalInRun);
@@ -185,7 +187,7 @@ void RegisterSplineFenceSpanPieceInspector()
     // The section is the one thing on a generated piece an author edits, so it
     // leads the inspector rather than sitting under the long Material section.
     Editor::EditorComponentTraits traits;
-    traits.LeadsInspector = true;
+    traits.SortKey = Editor::kLeadingInspectorSortKey;
     Editor::EditorComponentTraitsRegistry::Get().Register(ECS::GetComponentTypeId<SplineFenceSpanPiece>(),
                                                           std::move(traits));
     InspectorRegistry::Get().RegisterComponentInspector<SplineFenceSpanPiece>(

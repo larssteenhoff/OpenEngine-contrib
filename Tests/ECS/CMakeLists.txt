@@ -234,6 +234,9 @@ set(ECS_COMPILE_FAIL_CASES
     OptionalAutoDeduced
     ChangedTypeNotInQuery
     SetEnabledOnNotToggleable
+    ChangedOnWriteColumn
+    EachWriteTakenAsReference
+    ParallelWriteTakenAsReference
 )
 
 foreach(case IN LISTS ECS_COMPILE_FAIL_CASES)

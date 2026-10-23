@@ -240,7 +240,7 @@ uint32_t CpuDrawStreamBuilder::EmitLists(ViewLists& view, InstanceSet set,
             if (entries[keyEnd].Instance != entries[keyEnd - 1].Instance)
                 view.Indices.push_back(entries[keyEnd].Instance);
         }
-        index.emplace(key, InstanceList{first, static_cast<uint32_t>(view.Indices.size()) - first});
+        index.push_back(KeyedList{key, InstanceList{first, static_cast<uint32_t>(view.Indices.size()) - first}});
         ++batches;
         keyBegin = keyEnd;
     }
@@ -254,10 +254,12 @@ CpuDrawStreamBuilder::InstanceList CpuDrawStreamBuilder::GetInstances(
     if (itView == m_ByView.end())
         return {};
     const auto& index = itView->second.Index[static_cast<size_t>(set)];
-    auto itKey = index.find(MakeBatchKey(materialIndex, meshIndex));
-    if (itKey == index.end())
+    const uint64_t key = MakeBatchKey(materialIndex, meshIndex);
+    auto itKey = std::lower_bound(index.begin(), index.end(), key,
+                                  [](const KeyedList& entry, uint64_t k) { return entry.Key < k; });
+    if (itKey == index.end() || itKey->Key != key)
         return {};
-    return itKey->second;
+    return itKey->List;
 }
 
 std::span<const uint32_t> CpuDrawStreamBuilder::GetIndexList(Rendering::ViewId viewId) const

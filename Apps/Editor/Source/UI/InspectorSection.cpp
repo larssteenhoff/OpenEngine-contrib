@@ -301,6 +301,16 @@ void InspectorSection::SetShowEnabledToggle(bool show)
     RefreshEnabledDotPresentation();
 }
 
+void InspectorSection::SetShowOptions(bool show)
+{
+    if (!m_Options)
+        return;
+    if (show)
+        m_Options->RemoveClass("hidden");
+    else
+        m_Options->AddClass("hidden");
+}
+
 void InspectorSection::SetEnabledTogglePlaceholder(bool placeholder)
 {
     m_EnabledTogglePlaceholder = placeholder;

@@ -152,9 +152,31 @@ void SunGlareRenderNode::DeclareForView(ViewDeclare& d)
     // Shadow cascades: the array the shadow pass rendered plus the block carrying its
     // per-cascade matrices. Both absent (no directional shadows this frame) simply disables
     // the cascade term — the pass still runs on the screen probe alone.
-    const RenderGraph::RGTexture shadowArray = rs.GetShadowMapArrayRG(d.Frame, d.View.id);
+    RenderGraph::RGTexture shadowArray = rs.GetShadowMapArrayRG(d.Frame, d.View.id);
     const PipelineBufferBindingRG shadowData = d.ResolveBuffer(Names::Res::ShadowData);
     const bool cascadesReady = shadowArray.IsValid() && shadowData.IsValid();
+
+    // Background-only pixelation views have no cascades. Even with that term
+    // disabled, sampler2DArrayShadow requires a depth-array descriptor; the
+    // 2D atmosphere LUT is not a compatible fallback.
+    if (!shadowArray.IsValid())
+    {
+        TextureDesc desc{};
+        desc.width = desc.height = 1;
+        desc.format = static_cast<uint32_t>(TextureFormat::D32_FLOAT);
+        desc.flags = TextureCreateFlags::ForceArrayView;
+        desc.usage = static_cast<uint32_t>(TextureUsage::DepthStencil | TextureUsage::ShaderResource);
+        shadowArray = d.Frame.ImportPersistentTexture(d.PassName("EmptyShadowArray").c_str(), desc);
+        d.Frame.AddPass(d.PassName("ClearEmptyShadowArray").c_str(), PassPhase::kEarlySetup,
+            [shadowArray](RenderGraph::RGPassBuilder& p)
+            {
+                RenderGraph::RGAttachmentOps ops{};
+                ops.Load = RenderGraph::RGLoadOp::Clear;
+                ops.Store = RenderGraph::RGStoreOp::Store;
+                ops.Clear.Depth = 0.0f;
+                p.AttachDepth(shadowArray, ops);
+            }, [](RenderGraph::RGContext&) {});
+    }
 
     SunGlarePushConstants pc{};
     pc.SunDirRadius[0] = sunDir[0];
@@ -291,6 +313,7 @@ void SunGlareRenderNode::DeclareForView(ViewDeclare& d)
         return;
     const DescriptorSetLayoutDesc layout = feature.GetLayout(depthSamples);
     const SamplerHandle sampler = feature.GetSampler();
+    const SamplerHandle depthSampler = feature.GetDepthSampler();
     const uint32_t transBinding = feature.GetTransmittanceBinding();
     const uint32_t depthBinding = feature.GetDepthBinding();
     const uint32_t viewParamsBinding = feature.GetViewParamsBinding();
@@ -329,7 +352,7 @@ void SunGlareRenderNode::DeclareForView(ViewDeclare& d)
                 p.Read(shadowData.Graph, RenderGraph::RGBufferRead::Uniform);
             p.Read(exposure.Graph, RenderGraph::RGBufferRead::Storage);
         },
-        [pipe, layout, sampler, shadowSampler, shadowFallback, pc, trans, depth, viewParams,
+        [pipe, layout, sampler, depthSampler, shadowSampler, shadowFallback, pc, trans, depth, viewParams,
          shadowArray, shadowData, vpX, vpY, vpW, vpH, transBinding, depthBinding,
          viewParamsBinding, shadowArrayBinding, shadowDataBinding, exposureBinding,
          exposure](RenderGraph::RGContext& ctx)
@@ -358,7 +381,7 @@ void SunGlareRenderNode::DeclareForView(ViewDeclare& d)
             auto ds = dev->CreateDescriptorSet(dsDesc);
             dev->UpdateCombinedImageSamplerBinding(ds, transBinding, transPhys, sampler);
             dev->UpdateCombinedImageSamplerBinding(
-                ds, depthBinding, depthPhys.IsValid() ? depthPhys : transPhys, sampler);
+                ds, depthBinding, depthPhys.IsValid() ? depthPhys : transPhys, depthSampler);
             dev->UpdateBufferBinding(ds, viewParamsBinding, viewParams.Buffer,
                                      static_cast<size_t>(viewParams.Offset),
                                      static_cast<size_t>(viewParams.Size));

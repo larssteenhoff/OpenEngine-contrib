@@ -4,22 +4,21 @@ namespace GameEngine
 {
 
 class SceneViewController;
-class SettingsPanel;
 
 namespace Editor
 {
 namespace SceneTools
 {
 
-// Helper to wire SettingsPanel gizmo callbacks to TransformTool.
-// This keeps feature-specific wiring out of EditorApplication.cpp.
+// Connects the Gizmo and Grid & Snapping settings to the scene view that uses
+// them, keeping feature-specific wiring out of EditorApplication.cpp.
 namespace GizmoSettingsWiring
 {
-    // Wire all gizmo-related callbacks from SettingsPanel to the TransformTool
-    // owned by the given SceneViewController.
-    // Both parameters must be non-null.
-    void WireGizmoSettings(SettingsPanel* settingsPanel,
-                           SceneViewController* sceneController);
+    // Registers the Gizmo and Grid & Snapping settings pages against the
+    // TransformTool and grid of the given SceneViewController, and applies the
+    // saved gizmo and grid preferences to them. sceneController must be
+    // non-null and outlive the Settings panel's pages.
+    void WireGizmoSettings(SceneViewController* sceneController);
 
 } // namespace GizmoSettingsWiring
 

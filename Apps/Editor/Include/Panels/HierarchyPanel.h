@@ -8,6 +8,7 @@
 #include "ECS/ChangeFilter.h"
 #include "ECS/ECS.h"
 #include "Editor/Hierarchy/HierarchyRowActivity.h"
+#include "Editor/Hierarchy/HierarchyLayerControls.h"
 #include "EditorChangeNotifications.h"
 #include "Scene/SceneIO.h"
 #include "VersionControl/SceneDiff.h"
@@ -26,11 +27,22 @@ namespace GameEngine {
 
 struct Bookmark;
 struct EditorContext;
+class GUID;
 class INativeContextMenu;
 class TextField;
 class UIElement;
+namespace Mathematics { struct Vector3; }
 namespace Platform { class Window; }
-namespace Editor { class HierarchyNavigationBar; class HierarchyVcsController; class UndoRedoService; }
+namespace Components { enum class LightType : uint32; }
+namespace Editor {
+class HierarchyNavigationBar;
+class HierarchyVcsController;
+class IEditorCommand;
+class UndoRedoService;
+struct HierarchyEntityDragPayload;
+struct OnlineAssetDragPayload;
+struct OnlineAssetEntry;
+}
 
 enum class HierarchySortMode : uint8_t {
     Custom = 0,       // HierarchyOrder component (scene-authored order)
@@ -87,17 +99,19 @@ public:
 
     void Refresh(bool restoreHierarchyUiFromSceneAfterCommit = false);
 
-    /// Per-frame poll (wired via EditorPanelManager::RegisterUpdateCallback). Catches world
+    /// Per-frame poll (the HierarchyPanel panel type's Update hook, Panels/BuiltInPanelTypes). Catches world
     /// structural mutations that arrive from paths which don't emit EditorChangeNotifications —
     /// e.g. the debug-server IPC bulk spawn, C# scripts, gameplay systems. Compares the World's
     /// structural-change version against the last-observed value and rebuilds only when it moved,
     /// so an idle hierarchy costs a single atomic load per frame.
     void Update();
 
-    // Deterministic command invocation (used by UI replay automation).
-    // Handles built-in Hierarchy commands (e.g. create entity primitives).
-    // Returns true if the command was handled.
-    bool HandleCommand(std::uint32_t cmd);
+    // Registers the Hierarchy's built-in commands (create entity, sort, recent
+    // scenes, ...) with EditorMenuRegistry under their context-menu ids, so UI
+    // replay and execute_command run them by id. The registry keeps `this` for
+    // the process lifetime: call once, on the editor's Hierarchy panel. Defined in
+    // HierarchyPanelCommands.cpp.
+    void RegisterCommands();
 
     // UI tweak: control the TreeView row height (pixels).
     void SetTreeRowHeight(float px);
@@ -169,7 +183,10 @@ public:
     void ApplySearchFilter(const std::string& searchText);
     void ClearSearchHighlights();
 
-    // IDropTarget: accept bookmark drops anywhere on the panel (fallback when not over tree).
+    // IDropTarget: the one drop path of the panel. The tree's drop callbacks run
+    // CanDrop and PerformDrop; the panel itself is the target around the tree
+    // (the navigation bar), where drops land at the root. Entity drags are the
+    // tree's alone, so releasing one outside the rows moves nothing.
     bool AcceptsPayload(UI::Interaction::PayloadTypeId typeId) const override;
     bool HitTestDropTarget(float x, float y, UI::Interaction::DropHit& out) const override;
     UI::Interaction::DropFeedback CanDrop(const UI::Interaction::DropRequest& request) const override;
@@ -199,6 +216,44 @@ private:
     // Private provider implementation
     class HierarchyDataProvider;
 
+    // Runs a built-in Hierarchy command (the context menu and the registered
+    // commands); plugin commands fall through to EditorPluginRegistry. Returns
+    // true if the command was handled.
+    bool HandleCommand(std::uint32_t cmd);
+    // Registers one command id that runs HandleCommand (HierarchyPanelCommands.cpp).
+    void RegisterCommand(std::uint32_t commandId);
+
+    // HandleCommand's per-command handlers.
+    enum class PhysicsSpawn : uint8_t
+    {
+        None = 0,
+        DynamicBox,
+        DynamicSphere,
+        DynamicCapsule,
+        StaticPlaneBox,
+    };
+    void CreateEntityFromMenu(const std::string& undoName,
+                              const std::string& displayName,
+                              bool withRenderer,
+                              uint32_t meshId,
+                              bool withCamera,
+                              bool withLight,
+                              Components::LightType lightType,
+                              PhysicsSpawn physics);
+    void CreateEmptyParentForContextTarget();
+    void CreateParticleEmitterEntity();
+    void CreateReflectionProbeEntity();
+    void CreateOceanEntity();
+    void CreateTerrainEntity(std::uint32_t cmd);
+    void CreateDDGIVolumeEntity();
+    void CreatePostProcessVolumeEntity();
+    void CreateWindVolumeEntity();
+    void ShowContextTargetMeshLocation();
+    void AddSelectionToBookmarks();
+    // Selects a freshly created entity once the structure refresh it triggers has run.
+    void ScheduleSelectCreatedEntity(ECS::EntityHandle entity);
+    bool TryHandlePluginCommand(std::uint32_t cmd);
+
     // Expand every ancestor of `entity` so its row exists in the flattened
     // tree (callers must RefreshFromProvider afterwards).
     void ExpandAncestors(ECS::EntityHandle entity);
@@ -208,6 +263,46 @@ private:
     // Drop onto the tree: bookmarks, asset paths, online assets and entity
     // reparenting, parented or ordered by where the drop landed.
     void HandleTreeDrop(const UI::Interaction::DropRequest& req);
+
+    // Where a drop landed: the row it targets, and the parent a drop at that
+    // spot places under (the row itself when dropped onto it, the row's parent
+    // between rows, {} for the root).
+    struct DropPlacement
+    {
+        ECS::EntityHandle Target{};
+        ECS::EntityHandle Parent{};
+    };
+    DropPlacement ResolveDropPlacement(const UI::Interaction::DropHit& hit) const;
+    UI::Interaction::DropFeedback CanDropEntities(const UI::Interaction::DropHit& hit,
+                                                  const Editor::HierarchyEntityDragPayload& payload) const;
+
+    // One handler per payload type.
+    void DropBookmark(const UI::Interaction::DropRequest& request, const Bookmark& bookmark);
+    void DropAssetPaths(const UI::Interaction::DropRequest& request, const std::vector<std::filesystem::path>& paths);
+    void DropOnlineAssets(const UI::Interaction::DropRequest& request, const Editor::OnlineAssetDragPayload& payload);
+    void DropEntities(const UI::Interaction::DropRequest& request, const Editor::HierarchyEntityDragPayload& payload);
+
+    // A single HDRI, texture or material dropped alone: a skybox, an assignment
+    // to the mesh it lands on, or a sprite. Returns false when the generic
+    // per-file spawn applies instead.
+    bool DropSingleAsset(const std::filesystem::path& path, ECS::EntityHandle parent);
+    void SpawnModelWhenLoaded(const std::filesystem::path& modelPath,
+                              const GUID& modelGuid,
+                              ECS::EntityHandle parent,
+                              const Mathematics::Vector3& parentInvScale);
+    // Spawns an online asset already downloaded to the project or the download
+    // cache; invalid when it is not on disk yet.
+    ECS::EntityHandle SpawnDownloadedOnlineAsset(const Editor::OnlineAssetEntry& item);
+    // A hidden placeholder the download replaces when it lands.
+    ECS::EntityHandle CreateOnlineAssetPlaceholder(const Editor::OnlineAssetEntry& item,
+                                                   const std::string& assetType,
+                                                   ECS::EntityHandle parent);
+
+    void MarkSceneStructureChanged();
+    std::function<void()> SceneDirtyCallback() const;
+    void RebuildTreeAndSelect(ECS::EntityHandle entity);
+    // Executes through the undo service, or applies directly without one.
+    void RunDropCommand(std::unique_ptr<Editor::IEditorCommand> command);
 
     std::unique_ptr<HierarchyDataProvider> m_Provider; // owns provider
     std::unique_ptr<UI::Interaction::SelectionModel> m_Selection; // owns selection model
@@ -297,6 +392,16 @@ private:
     static void ApplyModelThumbColorOverride(UIElement* titleEl);
     /** Rebinds, through the tree's provider, every row the tree holds now. */
     void RePresentHeldRows();
+    /**
+     * Shows a generated thumbnail in a row's preview icon. `request` asks the
+     * thumbnail service and returns the path when it is already generated;
+     * otherwise the ready callback applies it later, if the row still shows
+     * the same entity by then. Shared by every row kind whose preview is
+     * generated rather than read from an asset file.
+     */
+    void ApplyGeneratedRowPreview(
+        UIElement* row, TreeId id, UIElement* previewIconEl,
+        const std::function<std::string(std::function<void(const std::string&)>)>& request);
 
 public:
     /** Push the "Colored Hierarchy Icons" state to every live HierarchyPanel so all open hierarchies update without needing focus. */
@@ -361,10 +466,9 @@ private:
 
     HierarchySortMode m_SortMode = HierarchySortMode::Custom;
     HierarchySortDirection m_SortDirection = HierarchySortDirection::Ascending;
-    bool m_ShowRenderLayer = false;
+    Editor::HierarchyLayerControls m_LayerControls;
 
     void ApplySortSettings();
-    void ApplyRenderLayerVisibility();
     void SetHorizontalBarPresent(bool present);
 
     std::function<void(TreeId, float, float)> m_ShowContextMenu;

@@ -1,0 +1,24 @@
+---
+title: Moving platforms
+description: Drive a kinematic physics body along an authored spline path.
+---
+
+A moving platform follows a spline at a speed measured in world units per second. Its kinematic body transfers motion to dynamic riders through contact friction.
+
+## Set up a platform
+
+1. Create a stationary entity with a `SplineComponent` and author its path.
+2. Create a separate platform entity with a `PhysicsBody` set to **Kinematic** and a `PhysicsCollider`.
+3. Add a `MovingPlatform` component to the platform.
+4. Assign the spline entity to **Path** and set **Speed**.
+5. Choose **Once**, **Loop**, or **Ping Pong** for **Path Mode**.
+
+Keep the path outside the platform's moving hierarchy. Spline control points are local to the path entity. The path entity's world transform places them in the scene. Uniform scale stretches the path and preserves the requested world speed. Nonuniform scale makes that speed approximate along curves.
+
+**Once** stops at the far end. **Loop** returns to the start after each traversal. **Ping Pong** reverses direction at each end. **Endpoint Pause** sets the wait at a loop seam or reversal. The platform keeps its authored orientation. Disabling the `MovingPlatform` component stops its motion. Enabling it resumes traversal from its saved distance. A missing, disabled, invalid, or unbaked path stops the platform until the path is usable again. Only kinematic bodies are driven. Nonfinite traversal inputs stop motion without advancing traversal state.
+
+## Native body motion
+
+For custom native platform behavior, call `PhysicsWorld::MoveKinematic(body, target, deltaTime)` before the physics step. Use the duration that the simulation will advance. This computes velocity toward the target and lets the solver resolve rider contacts. Assigning a transform directly does not provide that surface velocity.
+
+A dynamic rider receives motion through friction. A controller that performs its own sweeps can call `PhysicsWorld::GetPointVelocity(body, worldPoint)` at its support contact and incorporate that velocity into its motion. The result includes both linear and angular velocity at that world-space point. Static and invalid bodies return zero.

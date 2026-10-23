@@ -192,20 +192,20 @@
 }
 
 .monitors-chart-strip.swap-target {
-    background-color: rgba(58, 143, 255, 0.14);
+    background-color: var(--ui_color_accent_tint);
     border-color: var(--ui_color_accent_blue);
 }
 
 .monitors-chart-strip.drop-before {
-    background-color: rgba(58, 143, 255, 0.14);
+    background-color: var(--ui_color_accent_tint);
 }
 
 .monitors-chart-strip.drop-after {
-    background-color: rgba(58, 143, 255, 0.14);
+    background-color: var(--ui_color_accent_tint);
 }
 
 .monitors-chart-strip.drop-new-row {
-    background-color: rgba(58, 143, 255, 0.18);
+    background-color: var(--ui_color_accent_translucent);
 }
 
 .monitors-chart-row-start {
@@ -246,25 +246,30 @@
     cursor: grabbing;
 }
 
+/* Hangs off the UI root on the drag-preview overlay layer; the panel attaches
+   this stylesheet to it directly (MonitorsPanel::AttachPanelStyleTo). */
 .monitors-chart-drag-ghost {
     padding: 6px 10px;
     min-width: 120px;
-    max-width: 260px;
+    max-width: 280px;
     border-width: 1px;
     border-color: var(--ui_color_accent_blue);
     border-radius: 4px;
-    background-color: rgba(30, 36, 44, 0.94);
-    color: var(--ui_color_text_primary);
+    background-color: rgba(30, 36, 44, 0.95);
+    color: var(--ui_color_text);
     font-size: 12px;
     box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
     opacity: 0.96;
     pointer-events: none;
 }
 
+/* Hangs off the UI root on the drag-preview overlay layer; the panel attaches
+   this stylesheet to it directly (MonitorsPanel::AttachPanelStyleTo). */
 .monitors-chart-drop-indicator {
     pointer-events: none;
     border-radius: 4px;
-    background-color: rgba(58, 143, 255, 0.18);
+    background-color: var(--ui_color_accent_translucent);
+    border-color: var(--ui_color_accent);
 }
 
 .monitors-chart-name {

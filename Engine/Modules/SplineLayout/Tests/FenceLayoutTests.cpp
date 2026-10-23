@@ -2,6 +2,7 @@
 #include "SplineLayout/FenceLayout.h"
 #include "SplineLayout/PieceEntity.h"
 #include "SplineLayout/SpanMitre.h"
+#include "Types/Fnv1a.h"
 
 #include "FenceLayoutCrestGoldens.h"
 #include "GoldenUlps.h"
@@ -1889,16 +1890,9 @@ namespace
 // about the layouts that came before it.
 struct Fingerprint
 {
-    uint64 Value = 0xCBF29CE484222325ull;
+    uint64 Value = Hashing::kFnv1a64OffsetBasis;
 
-    void MixBits(uint64 v)
-    {
-        for (int shift = 0; shift < 64; shift += 8)
-        {
-            Value ^= (v >> shift) & 0xFFull;
-            Value *= 0x100000001B3ull;
-        }
-    }
+    void MixBits(uint64 v) { Value = Hashing::Fnv1a64Value(Value, v); }
     void MixFloat(float32 v)
     {
         uint32 bits = 0;

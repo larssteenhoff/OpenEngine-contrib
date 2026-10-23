@@ -13,12 +13,20 @@ namespace GameEngine {
  * Colors are ARGB (0xAARRGGBB).
  */
 struct SyntaxHighlightSettings {
-    uint32_t KeywordColor = 0xFFBFBFBF;    // Keywords - light gray
-    uint32_t StringColor = 0xFF7ED321;     // Strings - vibrant green
-    uint32_t CommentColor = 0xFFE5A54B;    // Comments - orange/amber
-    uint32_t NumberColor = 0xFFB87FE8;     // Numbers - vibrant purple
-    uint32_t TypeColor = 0xFF5DADE2;       // Types - vibrant blue
-    uint32_t DefaultColor = 0xFF999999;    // Default text - 60% white (reduced to make syntax colors pop)
+    static constexpr uint32_t kDefaultKeywordColor = 0xFFBFBFBF; // light gray
+    static constexpr uint32_t kDefaultStringColor = 0xFF7ED321;  // vibrant green
+    static constexpr uint32_t kDefaultCommentColor = 0xFFE5A54B; // orange/amber
+    static constexpr uint32_t kDefaultNumberColor = 0xFFB87FE8;  // vibrant purple
+    static constexpr uint32_t kDefaultTypeColor = 0xFF5DADE2;    // vibrant blue
+    // 60% white: plain text stays quieter than the syntax colours.
+    static constexpr uint32_t kDefaultTextColor = 0xFF999999;
+
+    uint32_t KeywordColor = kDefaultKeywordColor;
+    uint32_t StringColor = kDefaultStringColor;
+    uint32_t CommentColor = kDefaultCommentColor;
+    uint32_t NumberColor = kDefaultNumberColor;
+    uint32_t TypeColor = kDefaultTypeColor;
+    uint32_t DefaultColor = kDefaultTextColor;
 
     // Load settings from preferences
     void Load()

@@ -1,6 +1,7 @@
 #include "Inspectors/AudioEmitterInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Components/Audio/AudioListener.h"
 
 #include "Components/Audio/AudioEmitter.h"
 #include "Editor/Entities/EditorComponentTraits.h"
@@ -33,6 +34,26 @@ static constexpr EnumEntry<Components::AudioEmitterAttenuation> kAttenuationMode
 
 void RegisterAudioEmitterInspector()
 {
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Audio Emitter";
+        traits.Category = "Audio";
+        traits.Tooltip = "Plays audio clips from this entity's position";
+        traits.InspectorIconClass = "inspector-section-icon-audio-emitter";
+        traits.EnableToggleTooltip = "Switch this component on or off. Off stops its sound.";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::AudioEmitter>(), std::move(traits));
+    }
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Audio Listener";
+        traits.Category = "Audio";
+        traits.Tooltip = "Marks this entity as the audio listener (usually the camera)";
+        traits.InspectorIconClass = "inspector-section-icon-audio-listener";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::AudioListener>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())
@@ -331,11 +352,6 @@ void RegisterAudioEmitterInspector()
     };
 
     InspectorRegistry::Get().RegisterComponentInspector<Components::AudioEmitter>(std::move(fn));
-
-    Editor::EditorComponentTraits traits;
-    traits.EnableToggleTooltip = "Switch this component on or off. Off stops its sound.";
-    Editor::EditorComponentTraitsRegistry::Get().Register(
-        ECS::GetComponentTypeId<Components::AudioEmitter>(), std::move(traits));
 }
 
 } // namespace GameEngine

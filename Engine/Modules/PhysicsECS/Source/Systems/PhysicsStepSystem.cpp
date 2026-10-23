@@ -1,5 +1,6 @@
 #include "PhysicsECS/Systems/PhysicsStepSystem.h"
 
+#include "PhysicsECS/ContactSurfaceTable.h"
 #include "PhysicsECS/PhysicsWorldService.h"
 
 #include "PhysicsECS/Components/PhysicsBody.h"
@@ -15,6 +16,10 @@ void PhysicsStepSystem::Update(ECS::World& world, float32 deltaTime)
     auto* w = PhysicsWorldService::TryGet();
     if (!w)
         return;
+
+    // Edited .physmat files land here: the main thread, with no step in flight,
+    // which is the window the material table's slots may be rewritten in.
+    ContactSurfaceTable::DrainPendingReloads();
 
     // Time the whole step (all fixed sub-steps + interpolation snapshot) so the
     // editor Monitors panel can chart per-frame physics cost. This is the clean
@@ -51,10 +56,11 @@ void PhysicsStepSystem::Update(ECS::World& world, float32 deltaTime)
             // Snapshot previous transforms for interpolation (prev <- current).
             world.Query<ECS::Write<GameEngine::Components::PhysicsBody>>()
                 .Each(
-                [&](ECS::EntityHandle /*e*/, GameEngine::Components::PhysicsBody& body)
+                [&](ECS::EntityHandle /*e*/, ECS::Writable<GameEngine::Components::PhysicsBody> bodyRow)
                 {
-                    if (!body.initialized || !w->IsBodyValid(body.body))
+                    if (!bodyRow->initialized || !w->IsBodyValid(bodyRow->body))
                         return;
+                    GameEngine::Components::PhysicsBody& body = bodyRow.Mutable();
                     body.prevPhysicsTransform = w->GetBodyTransform(body.body);
                     body.hasPrevPhysicsTransform = true;
                 });

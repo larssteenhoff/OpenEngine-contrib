@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -456,4 +457,37 @@ TEST(EditorPanelRegistry, PanelTypesBuildReplaceForwardAndRejectUnknownKeys)
     registry.RegisterPanelType({"SdkTestNoFactoryType", nullptr});
     EXPECT_EQ(registry.CreatePanelOfType("SdkTestNoFactoryType"), nullptr)
         << "a type without a factory must not enter the registry";
+}
+
+TEST(EditorPanelRegistry, PanelTypeLookupReturnsTheTypeHooks)
+{
+    auto& registry = ed::EditorPanelRegistry::Get();
+
+    // Shared, not a local reference: the process-wide registry outlives this test.
+    const auto updates = std::make_shared<int>(0);
+    ed::EditorPanelTypeDescriptor type;
+    type.TypeKey = "SdkTestUpdatingPanelType";
+    type.Factory = [] { return std::make_unique<GameEngine::DockPanel>("updating"); };
+    type.Update = [updates](GameEngine::UIElement&, const ed::PanelUpdateContext&) { ++*updates; };
+    type.UpdateWhenHidden = true;
+    type.DefaultAnchorPanelId = "sdkTest.anchor";
+    type.DefaultSplitBelowAnchorRatio = 0.75f;
+    const auto shows = std::make_shared<int>(0);
+    type.OnShown = [shows](GameEngine::UIElement&) { ++*shows; };
+    registry.RegisterPanelType(type);
+
+    ed::EditorPanelTypeDescriptor found;
+    ASSERT_TRUE(registry.TryGetPanelType("SdkTestUpdatingPanelType", found));
+    EXPECT_TRUE(found.UpdateWhenHidden);
+    EXPECT_EQ(found.DefaultAnchorPanelId, "sdkTest.anchor");
+    EXPECT_FLOAT_EQ(found.DefaultSplitBelowAnchorRatio, 0.75f);
+    ASSERT_TRUE(found.Update);
+    ASSERT_TRUE(found.OnShown);
+    GameEngine::DockPanel panel("updating");
+    found.Update(panel, ed::PanelUpdateContext{});
+    found.OnShown(panel);
+    EXPECT_EQ(*updates, 1);
+    EXPECT_EQ(*shows, 1);
+
+    EXPECT_FALSE(registry.TryGetPanelType("SdkTestNoSuchPanelType", found));
 }

@@ -8,6 +8,7 @@
 #include "Scene/SceneIOContext.h"
 #include "Scene/SceneValue.h"
 #include "Types/FormatNumber.h"
+#include "Types/StringUtils.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -43,15 +44,6 @@ double AsNumber(const SceneValue& v)
     if (v.Kind == SceneValueKind::Float) return v.FloatValue;
     if (v.Kind == SceneValueKind::Int) return static_cast<double>(v.IntValue);
     return 0.0;
-}
-
-std::string_view TrimSpace(std::string_view s)
-{
-    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r' || s.front() == '\n'))
-        s.remove_prefix(1);
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' || s.back() == '\n'))
-        s.remove_suffix(1);
-    return s;
 }
 
 // FieldTypeIdOf collapsed the enum to its underlying integer's type id, so the enum's signedness
@@ -381,7 +373,7 @@ struct EnumNameSerializer final : IFieldSerializer
     }
     bool Read(std::string_view t, std::byte* f, const FieldInfo& info, const SceneLoadContext&, std::string* e) const override
     {
-        const std::string_view name = TrimSpace(t);
+        const std::string_view name = TrimSceneWhitespace(t);
         for (const ECS::EnumNameValue& entry : info.EnumNames)
             if (entry.Name == name)
             {

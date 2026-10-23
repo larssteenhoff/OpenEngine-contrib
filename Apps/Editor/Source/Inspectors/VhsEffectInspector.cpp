@@ -8,6 +8,7 @@
 #include "Inspectors/InspectorComponentRowHelpers.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorUIHelpers.h"
+#include "Types/ColorUtils.h"
 #include "UndoRedo/UndoRedoService.h"
 #include "UI/Controls/Button.h"
 #include "UI/Controls/TextField.h"
@@ -25,37 +26,6 @@
 
 namespace GameEngine
 {
-
-namespace
-{
-uint32_t ColorToArgb(const float (&color)[3])
-{
-    const auto channel = [](float value)
-    {
-        return static_cast<uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
-    };
-    return 0xFF000000u
-         | (static_cast<uint32_t>(channel(color[0])) << 16)
-         | (static_cast<uint32_t>(channel(color[1])) << 8)
-         | static_cast<uint32_t>(channel(color[2]));
-}
-
-void ArgbToColor(uint32_t argb, float (&color)[3])
-{
-    color[0] = static_cast<float>((argb >> 16) & 0xFFu) / 255.0f;
-    color[1] = static_cast<float>((argb >> 8) & 0xFFu) / 255.0f;
-    color[2] = static_cast<float>(argb & 0xFFu) / 255.0f;
-}
-
-std::string FormatRgb(const float (&color)[3])
-{
-    char text[48];
-    std::snprintf(text, sizeof(text), "(%.2f, %.2f, %.2f)",
-                  color[0], color[1], color[2]);
-    return text;
-}
-
-} // namespace
 
 void RegisterVhsEffectInspector()
 {
@@ -422,37 +392,21 @@ void RegisterVhsEffectInspector()
             "Burn a two-line camcorder clock and date into the image with independent color, size, and position.");
 
         {
-            UIElement* row = InspectorUI::AddRow(ctx.Parent);
-            Label* label = InspectorUI::AddLabel(
-                row, "Date Burn Color",
-                "Independent recorded clock/date color (click to pick).");
-            if (label)
-                label->AddClass("inspector-label-no-drag");
-            UIElement* field = InspectorUI::AddFieldContainer(row);
-            field->Overrides()
-                .Set(Style::FlexDir, FlexDirection::Row)
-                .Set(Style::AlignItems, AlignItems::Center)
-                .Set(Style::Gap, StyleLength::Px(6.0f));
-
-            auto swatch = std::make_unique<UIElement>();
-            UIElement* swatchRaw = swatch.get();
-            InspectorUI::StyleColorSwatch(swatchRaw, ColorToArgb(effect->DateBurnColor));
-            field->AddChild(std::move(swatch));
-
-            auto rgb = std::make_unique<Label>();
-            Label* rgbRaw = rgb.get();
-            rgbRaw->AddClass("inspector-text");
-            rgbRaw->SetText(FormatRgb(effect->DateBurnColor));
-            rgbRaw->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-            field->AddChild(std::move(rgb));
+            const InspectorUI::ColorSwatchRow colorRow = InspectorUI::AddColorSwatchRow(
+                ctx.Parent, "Date Burn Color",
+                "Independent recorded clock/date color (click to pick).",
+                ColorUtils::RgbFloatsToArgb(effect->DateBurnColor),
+                InspectorUI::FormatColorRgb(effect->DateBurnColor[0], effect->DateBurnColor[1], effect->DateBurnColor[2]));
+            UIElement* swatchRaw = colorRow.Swatch;
+            Label* rgbRaw = colorRow.Value;
 
             auto refresh = [swatchRaw, rgbRaw, world, entity]()
             {
                 const auto* current = world->GetComponent<VHS>(entity);
                 if (!current)
                     return;
-                InspectorUI::StyleColorSwatch(swatchRaw, ColorToArgb(current->DateBurnColor));
-                rgbRaw->SetText(FormatRgb(current->DateBurnColor));
+                InspectorUI::SetColorSwatchColor(swatchRaw, ColorUtils::RgbFloatsToArgb(current->DateBurnColor));
+                rgbRaw->SetText(InspectorUI::FormatColorRgb(current->DateBurnColor[0], current->DateBurnColor[1], current->DateBurnColor[2]));
             };
 
             auto click =
@@ -488,7 +442,7 @@ void RegisterVhsEffectInspector()
                             if (auto* writable =
                                     world->GetComponentForWrite<VHS>(entity))
                             {
-                                ArgbToColor(argb, writable->DateBurnColor);
+                                ColorUtils::ArgbToRgbFloats(argb, writable->DateBurnColor);
                             }
                         });
                         edit->Commit();
@@ -497,7 +451,7 @@ void RegisterVhsEffectInspector()
                                  world->GetComponent<VHS>(entity))
                     {
                         VHS updated = *current;
-                        ArgbToColor(argb, updated.DateBurnColor);
+                        ColorUtils::ArgbToRgbFloats(argb, updated.DateBurnColor);
                         Editor::CommitComponentUpdate(
                             world, entity, notifications, updated);
                     }
@@ -520,7 +474,7 @@ void RegisterVhsEffectInspector()
                             if (auto* writable =
                                     world->GetComponentForWrite<VHS>(entity))
                             {
-                                ArgbToColor(argb, writable->DateBurnColor);
+                                ColorUtils::ArgbToRgbFloats(argb, writable->DateBurnColor);
                             }
                         });
                     }
@@ -528,14 +482,14 @@ void RegisterVhsEffectInspector()
                                  world->GetComponent<VHS>(entity))
                     {
                         VHS updated = *current;
-                        ArgbToColor(argb, updated.DateBurnColor);
+                        ColorUtils::ArgbToRgbFloats(argb, updated.DateBurnColor);
                         Editor::PreviewComponentUpdate(
                             world, entity, notifications, updated);
                     }
                     refresh();
                 };
                 openPicker(
-                    ColorToArgb(component->DateBurnColor), 1.0f,
+                    ColorUtils::RgbFloatsToArgb(component->DateBurnColor), 1.0f,
                     std::move(callbacks));
             };
 
@@ -730,37 +684,21 @@ void RegisterVhsEffectInspector()
             {}, 0.0f, 1.0f);
 
         {
-            UIElement* row = InspectorUI::AddRow(ctx.Parent);
-            Label* label = InspectorUI::AddLabel(
-                row, "Transport Color",
-                "Recorded OSD color (click to pick; green and white are typical).");
-            if (label)
-                label->AddClass("inspector-label-no-drag");
-            UIElement* field = InspectorUI::AddFieldContainer(row);
-            field->Overrides()
-                .Set(Style::FlexDir, FlexDirection::Row)
-                .Set(Style::AlignItems, AlignItems::Center)
-                .Set(Style::Gap, StyleLength::Px(6.0f));
-
-            auto swatch = std::make_unique<UIElement>();
-            UIElement* swatchRaw = swatch.get();
-            InspectorUI::StyleColorSwatch(swatchRaw, ColorToArgb(effect->OverlayColor));
-            field->AddChild(std::move(swatch));
-
-            auto rgb = std::make_unique<Label>();
-            Label* rgbRaw = rgb.get();
-            rgbRaw->AddClass("inspector-text");
-            rgbRaw->SetText(FormatRgb(effect->OverlayColor));
-            rgbRaw->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-            field->AddChild(std::move(rgb));
+            const InspectorUI::ColorSwatchRow colorRow = InspectorUI::AddColorSwatchRow(
+                ctx.Parent, "Transport Color",
+                "Recorded OSD color (click to pick; green and white are typical).",
+                ColorUtils::RgbFloatsToArgb(effect->OverlayColor),
+                InspectorUI::FormatColorRgb(effect->OverlayColor[0], effect->OverlayColor[1], effect->OverlayColor[2]));
+            UIElement* swatchRaw = colorRow.Swatch;
+            Label* rgbRaw = colorRow.Value;
 
             auto refresh = [swatchRaw, rgbRaw, world, entity]()
             {
                 const auto* current = world->GetComponent<VHS>(entity);
                 if (!current)
                     return;
-                InspectorUI::StyleColorSwatch(swatchRaw, ColorToArgb(current->OverlayColor));
-                rgbRaw->SetText(FormatRgb(current->OverlayColor));
+                InspectorUI::SetColorSwatchColor(swatchRaw, ColorUtils::RgbFloatsToArgb(current->OverlayColor));
+                rgbRaw->SetText(InspectorUI::FormatColorRgb(current->OverlayColor[0], current->OverlayColor[1], current->OverlayColor[2]));
             };
 
             auto click = [world, entity, notifications, undo, openPicker, refresh](UIEvent& event)
@@ -791,14 +729,14 @@ void RegisterVhsEffectInspector()
                         edit->Preview([&]
                         {
                             if (auto* writable = world->GetComponentForWrite<VHS>(entity))
-                                ArgbToColor(argb, writable->OverlayColor);
+                                ColorUtils::ArgbToRgbFloats(argb, writable->OverlayColor);
                         });
                         edit->Commit();
                     }
                     else if (const auto* current = world->GetComponent<VHS>(entity))
                     {
                         VHS updated = *current;
-                        ArgbToColor(argb, updated.OverlayColor);
+                        ColorUtils::ArgbToRgbFloats(argb, updated.OverlayColor);
                         Editor::CommitComponentUpdate(
                             world, entity, notifications, updated);
                     }
@@ -819,19 +757,19 @@ void RegisterVhsEffectInspector()
                         edit->Preview([&]
                         {
                             if (auto* writable = world->GetComponentForWrite<VHS>(entity))
-                                ArgbToColor(argb, writable->OverlayColor);
+                                ColorUtils::ArgbToRgbFloats(argb, writable->OverlayColor);
                         });
                     }
                     else if (const auto* current = world->GetComponent<VHS>(entity))
                     {
                         VHS updated = *current;
-                        ArgbToColor(argb, updated.OverlayColor);
+                        ColorUtils::ArgbToRgbFloats(argb, updated.OverlayColor);
                         Editor::PreviewComponentUpdate(
                             world, entity, notifications, updated);
                     }
                     refresh();
                 };
-                openPicker(ColorToArgb(component->OverlayColor), 1.0f,
+                openPicker(ColorUtils::RgbFloatsToArgb(component->OverlayColor), 1.0f,
                            std::move(callbacks));
             };
 

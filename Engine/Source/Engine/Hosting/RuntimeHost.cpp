@@ -36,7 +36,9 @@
 #include "UI/UIManager.h"
 #include "UI/UITextureSpace.h"
 
+#if !defined(GE_PLATFORM_MOBILE)
 #include <GLFW/glfw3.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
@@ -109,6 +111,7 @@ void ApplyFullscreenMode(Platform::Window& window, WindowMode mode)
         if (window.IsFullscreen())
             window.SetFullscreen(false);
         window.SetDecorated(false);
+#if !defined(GE_PLATFORM_MOBILE)
         GLFWmonitor* monitor = glfwGetPrimaryMonitor();
         const GLFWvidmode* videoMode = monitor ? glfwGetVideoMode(monitor) : nullptr;
         if (videoMode)
@@ -116,6 +119,7 @@ void ApplyFullscreenMode(Platform::Window& window, WindowMode mode)
             window.SetPosition(0, 0);
             window.SetWindowSize(videoMode->width, videoMode->height);
         }
+#endif
         break;
     }
 
@@ -328,6 +332,9 @@ bool RuntimeHost::InitRendering()
     // Engine-wide AA + render scale, cooked into game.config the same way.
     // Cameras with mode Default inherit these; per-camera overrides still win.
     m_Desc.RenderQuality.ApplyTo(*rs);
+    std::string sortingError;
+    if (!Rendering::SortingLayers::SetCurrent(m_Desc.SortingLayers, sortingError))
+        Logger::Log::Error("Runtime sorting layers: {}", sortingError);
     Logger::Log::Info(
         "Runtime: Applied render quality settings (aaMode={}, msaa={} sample(s), renderScale={})",
         static_cast<uint32_t>(rs->GetDefaultAntiAliasingMode()), rs->GetDefaultMSAASampleCount(),

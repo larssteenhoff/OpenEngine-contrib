@@ -13,7 +13,9 @@
 //   * snapshot ordering is (Priority, Path),
 //   * module-stamped registrations pin the module (C12 unload refusal),
 //   * folder context-menu items dispatch with their folder, in a range of
-//     their own.
+//     their own,
+//   * file context-menu items show on the files they accept and dispatch
+//     with their file, in a range of their own.
 //
 // Links EditorSDK.dll — the same registry Editor.exe and module DLLs share.
 // The registry is process-wide: every test uses its own paths.
@@ -243,4 +245,45 @@ TEST(EditorMenuRegistry, FolderMenuItemsDispatchTheFolderAndKeepTheirId)
     registry.RegisterCommand({id, [](std::string*) { return true; }});
     EXPECT_EQ(registry.InvokeCommand(id, &error), ed::EditorCommandResult::NotFound)
         << "a fixed-id command may not take a folder item's id";
+}
+
+// A file context-menu item shows only on the files its AppliesTo accepts,
+// dispatches with the file the menu was opened on, keeps its command id across
+// a same-Path re-registration, and takes ids no folder item or fixed-id command can.
+TEST(EditorMenuRegistry, FileMenuItemsShowOnTheirFilesAndDispatchTheFile)
+{
+    auto& registry = ed::EditorMenuRegistry::Get();
+    const auto received = std::make_shared<std::filesystem::path>();
+    const auto appliesTo = [](const std::filesystem::path& file) { return file.extension() == ".sdktest"; };
+    registry.RegisterAssetFileMenuItem({"SdkTest File Item", 0, {}, appliesTo,
+                                        [received](const std::filesystem::path& file) { *received = file; }});
+    const auto findItem = [&](const std::filesystem::path& file) {
+        const auto items = registry.AssetFileMenuSnapshot(file);
+        const auto it = std::find_if(items.begin(), items.end(), [](const ed::EditorAssetFileMenuItemSnapshot& i) {
+            return i.Path == "SdkTest File Item";
+        });
+        return it == items.end() ? 0u : it->CommandId;
+    };
+    const uint32_t id = findItem("Assets/map.sdktest");
+    ASSERT_NE(id, 0u);
+    EXPECT_EQ(findItem("Assets/map.png"), 0u);
+    for (const auto& folderItem : registry.DirectoryMenuSnapshot())
+        EXPECT_NE(folderItem.CommandId, id);
+
+    EXPECT_TRUE(registry.TryInvokeAssetFileItem(id, "Assets/map.sdktest"));
+    EXPECT_EQ(*received, std::filesystem::path("Assets/map.sdktest"));
+    EXPECT_FALSE(registry.TryInvokeAssetFileItem(id + 0x100u, "Assets/map.sdktest"));
+    EXPECT_FALSE(registry.TryInvokeDirectoryItem(id, "Assets"));
+
+    const auto replaced = std::make_shared<bool>(false);
+    registry.RegisterAssetFileMenuItem(
+        {"SdkTest File Item", 0, {}, appliesTo, [replaced](const std::filesystem::path&) { *replaced = true; }});
+    EXPECT_EQ(findItem("Assets/map.sdktest"), id);
+    EXPECT_TRUE(registry.TryInvokeAssetFileItem(id, "Assets/map.sdktest"));
+    EXPECT_TRUE(*replaced);
+
+    std::string error;
+    registry.RegisterCommand({id, [](std::string*) { return true; }});
+    EXPECT_EQ(registry.InvokeCommand(id, &error), ed::EditorCommandResult::NotFound)
+        << "a fixed-id command may not take a file item's id";
 }

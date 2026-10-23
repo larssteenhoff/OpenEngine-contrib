@@ -1,11 +1,17 @@
 #pragma once
 
+#include "PhysicsECS/Components/PhysicsWritebackRecord.h"
+
 #include "Types/Types.h"
+
+#include <optional>
 
 namespace GameEngine::ECS
 {
 class World;
 struct EntityHandle;
+template <typename T>
+class Writable;
 } // namespace GameEngine::ECS
 
 namespace GameEngine::Physics
@@ -17,7 +23,6 @@ namespace GameEngine::Components
 {
 struct Transform;
 struct WorldTransform;
-struct PhysicsWritebackRecord;
 } // namespace GameEngine::Components
 
 namespace GameEngine::PhysicsECS
@@ -33,19 +38,23 @@ namespace GameEngine::PhysicsECS
 ///
 /// Otherwise the pose (blended from `interpolateFrom` by `alpha` when given) is composed, each
 /// component whose bytes differ is written (WorldTransform with its Version bump and dirty-feed entry),
-/// and the record is updated. A blend between two different poses moves with alpha, so it leaves the
-/// record invalid and the next frame composes again.
+/// and the updated record is returned. A blend between two different poses moves with alpha, so it
+/// leaves the record invalid and the next frame composes again.
+///
+/// Only a component that is written is write-granted, so a skipped entity grants none of its columns.
+/// The caller owns the record's component and stores the returned record through its own grant.
 ///
 /// @param interpolateFrom The backend pose before the last step to blend from, or null for no blend.
 /// @param alpha Blend weight of `current` in [0, 1]; read only with `interpolateFrom`.
-/// @return true when the pose was composed, false when the entity was skipped as unchanged.
-bool WritePhysicsPose(ECS::World& world,
-                      ECS::EntityHandle entity,
-                      const Physics::Transform& current,
-                      const Physics::Transform* interpolateFrom,
-                      float32 alpha,
-                      Components::Transform& transform,
-                      Components::WorldTransform& worldTransform,
-                      Components::PhysicsWritebackRecord& record);
+/// @return The record to store when the pose was composed, nullopt when the entity was skipped as
+///         unchanged.
+std::optional<Components::PhysicsWritebackRecord> WritePhysicsPose(ECS::World& world,
+                                                                   ECS::EntityHandle entity,
+                                                                   const Physics::Transform& current,
+                                                                   const Physics::Transform* interpolateFrom,
+                                                                   float32 alpha,
+                                                                   ECS::Writable<Components::Transform> transform,
+                                                                   ECS::Writable<Components::WorldTransform> worldTransform,
+                                                                   const Components::PhysicsWritebackRecord& record);
 
 } // namespace GameEngine::PhysicsECS

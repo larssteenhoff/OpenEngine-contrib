@@ -3,6 +3,7 @@
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Scripting/CoreCLRHost.h"
 #include "Logger/Logger.h"
+#include "TestTempDir.h"
 #include <filesystem>
 #include <fstream>
 #include <chrono>
@@ -17,7 +18,7 @@ protected:
     void SetUp() override {
         Logger::Log::SetLogLevel(Logger::LogLevel::Info);
 
-        testProjectDir = std::filesystem::temp_directory_path() / "HybridCompilationBenchmark";
+        testProjectDir = TestUtils::MakeUniqueTempDirectory("HybridCompilationBenchmark");
         std::filesystem::create_directories(testProjectDir);
 
         createBenchmarkProject();

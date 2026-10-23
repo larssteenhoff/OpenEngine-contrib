@@ -1,0 +1,51 @@
+---
+title: Sorting layers and groups
+description: Set shared draw order for mesh artwork, sprites, and tiles with named layers and parent groups.
+---
+
+Sorting layers control one shared draw order for sprites, tile-map layers, and mesh artwork with an alpha Blend material. Disable depth writes on that material for painter order. A depth-writing material can still hide later draws. Mesh artwork uses Mesh Renderer or Skinned Mesh Renderer components. The mesh can be a plane, a thin box, or another shape. Its name and source asset do not affect sorting.
+
+Opaque and alpha-tested materials still use depth. Additive and multiply materials retain their order-independent batching. A sorting layer does not make an opaque object draw over geometry in front of it. Use an alpha-blended material when the artwork needs authored painter order.
+
+## Set an object's order
+
+1. Select the object in the Hierarchy.
+2. Add **Render Sorting** from **Add Component > Rendering**.
+3. Choose a **Sorting Layer**.
+4. Set **Order in Layer**. Lower values draw first.
+
+The renderer compares layer priority first, then order within the layer, then camera depth. Equal authored orders retain back-to-front depth sorting. Objects without Render Sorting use the Default layer and order zero. Draws with equal keys keep a fixed order. Do not rely on it for an overlap: give them different order values.
+
+The Inspector shows the effective layer, order, and outermost group beneath the fields.
+
+Sprites and tiles test the same opaque scene depth as mesh artwork and do not write depth. All three share the world color target, anti-aliasing, and camera transform.
+
+The component does not move the object. Its transform, collider, and visibility mask stay independent of its draw order.
+
+## Edit layers in the Hierarchy
+
+Open the Hierarchy context menu and enable **Hierarchy Options > Show Sorting Layer**. The picker appears on renderer entities and entities that already have Render Sorting.
+
+Changing the picker on a selected row applies that layer to all supported entities in the selection. Undo restores the whole selection in one step. If an assignment added Render Sorting, undo removes that component.
+
+**Show Render Layer** is a separate control. Render layers filter visibility through camera masks. Sorting layers choose draw order. Both controls can be shown together.
+
+## Name and reorder layers
+
+Open **Settings > Project Settings > Sorting Layers**. Each layer has a persistent ID, a name, and a priority. Lower priorities draw first. Use **Move Back** or **Move Forward** to swap a layer with its neighbor without changing scene references.
+
+Use **Add Sorting Layer** to create another layer. Change its name and priority in the same page. **Remove Layer** removes a custom layer definition. The Default layer cannot be removed. Removed IDs stay reserved so a later layer cannot take over existing scene references. Names and priorities must be unique. Names must contain text and cannot exceed 80 characters. Priorities are signed whole numbers.
+
+Changing a name or priority keeps the layer ID. Scene references therefore continue to select the same layer. Project settings are saved in `.Editor/ProjectSettings.json` and included in a built player's `game.config`.
+
+## Keep children together
+
+Add Render Sorting to a parent and enable **Group Children**. The outermost enabled group places its descendants together at the parent's layer, order, and camera depth. Descendants use their authored order within that group.
+
+Use a group for artwork made from several renderers that should remain together when it overlaps another object. The group does not change hierarchy order or parent transforms.
+
+If a scene references a layer that is not in the project settings, the picker shows **Missing layer**. Rendering uses the Default layer's priority until a valid layer is assigned.
+
+## Custom render pipelines
+
+Include the **SortedTransparent** node after the opaque recovery pass and before post-processing. The built-in ForwardPlus, ForwardPlus Debug Overlay, and Sample Post Stack pipelines include it. Sprite and tile artwork uses this shared node. Give it the same keywords as the WorldRender node.

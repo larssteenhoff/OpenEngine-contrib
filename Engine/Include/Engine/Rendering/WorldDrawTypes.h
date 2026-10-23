@@ -12,6 +12,7 @@
 #include "Rendering/CameraTypes.h"
 #include "Rendering/Materials/MaterialAlphaMode.h"
 #include "Types/Types.h"
+#include "Engine/Rendering/RenderSortKey.h"
 
 #include <cstdint>
 
@@ -44,6 +45,8 @@ struct WorldSubmissionRecord
     uint32 instanceIndex{0};                 // Index into GPUScene instance buffer
     Rendering::RenderLayerMask renderLayerMask = Rendering::RenderLayerMask::None();
     uint32 flags{0};                         // e.g., opaque/transparent, castsShadows
+    RenderSortingData Sorting{};
+    ECS::EntityHandle SortingOwner{};
 };
 
 } // namespace Engine::Renderer

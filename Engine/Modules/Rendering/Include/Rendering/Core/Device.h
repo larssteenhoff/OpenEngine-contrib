@@ -379,6 +379,8 @@ struct DeviceDesc
     // machine-global file that reaches tens of MB, which only an application's
     // long-lived device earns; a device that lives for a test keeps its cache in memory.
     bool persistPipelineCache = false;
+    // Optional application-owned directory for the persistent cache. Empty uses the platform default.
+    std::string pipelineCacheDirectory;
     std::string applicationName = "GameEngine Application";
     uint32_t applicationVersion = 1;
     // Policy & features

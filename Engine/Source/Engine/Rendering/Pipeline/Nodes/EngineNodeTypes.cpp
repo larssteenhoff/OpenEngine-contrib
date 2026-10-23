@@ -16,7 +16,9 @@
 #include "Engine/Rendering/Pipeline/Nodes/LensFlareRenderNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/LightUploadNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/OcclusionCullP2Node.h"
+#include "Engine/Rendering/Pipeline/Nodes/PlanarReflectionNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/RenderScaleUpscaleNode.h"
+#include "Engine/Rendering/Pipeline/Nodes/PixelPerfectUpscaleNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/ScatterBNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/ScreenSpaceReflectionsNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/ShadowMapNode.h"
@@ -94,6 +96,12 @@ void RegisterEngineNodeTypes(RenderPipelineNodeRegistry& registry)
         RenderPipelineNodeResourceFields{.RefKeys = {"output"}, .PublishKeys = {{"output", Names::View::GTAO}}});
 
     (void)registry.Register(
+        "PlanarReflection",
+        []() -> std::unique_ptr<IRenderPipelineNode>
+        { return std::make_unique<PlanarReflectionNode>(); },
+        /*perView*/ true);
+
+    (void)registry.Register(
         "ScreenSpaceReflections",
         []() -> std::unique_ptr<IRenderPipelineNode>
         { return std::make_unique<ScreenSpaceReflectionsNode>(); },
@@ -136,6 +144,13 @@ void RegisterEngineNodeTypes(RenderPipelineNodeRegistry& registry)
         { return std::make_unique<SmaaNode>(); },
         /*perView*/ true,
         RenderPipelineNodeResourceFields{.RefKeys = {"input", "output"}, .PublishKeys = {{"output", "LDRSmaa"}}});
+
+    (void)registry.Register(
+        "PixelPerfectUpscale",
+        []() -> std::unique_ptr<IRenderPipelineNode>
+        { return std::make_unique<PixelPerfectUpscaleNode>(); },
+        true,
+        RenderPipelineNodeResourceFields{.RefKeys = {"input", "output"}, .PublishKeys = {{"output", "HDRPixelPerfect"}}});
 
     (void)registry.Register(
         "RenderScaleUpscale",
@@ -194,6 +209,13 @@ void RegisterEngineNodeTypes(RenderPipelineNodeRegistry& registry)
         FullscreenShaderResourceFields());
 
     (void)registry.Register(
+        "DepthPixelation",
+        []() -> std::unique_ptr<IRenderPipelineNode>
+        { return std::make_unique<DepthPixelationNode>(); },
+        /*perView*/ true,
+        FullscreenShaderResourceFields());
+
+    (void)registry.Register(
         "TemporalFullscreenShader",
         []() -> std::unique_ptr<IRenderPipelineNode>
         { return std::make_unique<TemporalFullscreenShaderNode>(); },
@@ -221,16 +243,6 @@ void RegisterEngineNodeTypes(RenderPipelineNodeRegistry& registry)
 
     (void)registry.Register(
         "ShadowMap",
-        []() -> std::unique_ptr<IRenderPipelineNode>
-        { return std::make_unique<ShadowMapNode>(); },
-        /*perView*/ true,
-        ShadowMapResourceFields());
-
-    // Legacy alias: pre-Q4 projects serialize the type as "CascadedShadowMap".
-    // Registered identically so those blueprints still compile; ValidateBlueprint
-    // emits a deprecation warning nudging authors to the "ShadowMap" key.
-    (void)registry.Register(
-        "CascadedShadowMap",
         []() -> std::unique_ptr<IRenderPipelineNode>
         { return std::make_unique<ShadowMapNode>(); },
         /*perView*/ true,

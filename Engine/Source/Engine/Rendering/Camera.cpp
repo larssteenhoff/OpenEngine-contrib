@@ -3,6 +3,7 @@
 #include "Components/Transform.h"
 #include "Engine/Rendering/ViewRegistry.h"
 #include "ECS/ECSTemplates.h"
+#include "Engine/Rendering/TileMapCameraPixelGrid.h"
 #include "Mathematics/MatrixOps.h"
 #include "Rendering/Common/Math.h"
 
@@ -114,6 +115,16 @@ std::optional<Camera> FindActiveCamera(ECS::World& world)
 
     if (!found)
         return std::nullopt;
+
+    // Resolve the pixel grid against the scene the camera is about to render, the
+    // same way the far clip is resolved against an enabled planet: the authored
+    // component holds intent, the snapshot holds what this frame actually renders
+    // at. Gated on PixelPerfect so a normal camera never pays for the tilemap query.
+    if (result.params.PixelPerfect && !result.params.Perspective)
+    {
+        result.params.PixelPerfectPixelsPerUnit =
+            static_cast<uint32>(ResolvePixelPerfectPixelsPerUnit(world, result.params));
+    }
     return result;
 }
 

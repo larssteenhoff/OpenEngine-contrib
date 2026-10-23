@@ -50,7 +50,7 @@ public:
     void SetAssetRegistry(AssetRegistry* registry);
 
     /// Optional thumbnail provider for image previews in the search dropdown.
-    void SetThumbnailProvider(IThumbnailProvider* provider) { m_Thumbnails = provider; }
+    void SetThumbnailProvider(IThumbnailProvider* provider) { m_Thumbnails = provider; UpdateDisplay(); }
 
     /// Set the current value. Updates the display (icon + name).
     void SetValue(const GUID& guid);
@@ -76,7 +76,8 @@ protected:
 
 private:
     void UpdateDisplay();
-    void ClearModelPreviewStrip();
+    void ClearPreviewStrip();
+    void ApplyThumbnail(uint32_t generation, AssetType assetType, const std::string& path);
     void ApplyValue(const GUID& guid);
     bool IsAcceptedExtension(const std::string& ext) const;
 
@@ -94,7 +95,9 @@ private:
     // Current icon CSS class applied to m_Icon (empty when hidden).
     std::string m_CurrentIconClass;
 
-    uint32_t m_ModelPreviewRequestGen = 0;
+    uint32_t m_PreviewRequestGen = 0;
+
+
 };
 
 } // namespace GameEngine

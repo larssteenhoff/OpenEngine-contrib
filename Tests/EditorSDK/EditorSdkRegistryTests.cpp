@@ -14,6 +14,8 @@
 #include "ECS/ECSTemplates.h"
 #include "ECS/Entity.h"
 #include "Editor/Entities/EditorComponentTraits.h"
+#include "Editor/Entities/PlanarReflectionComponentTraits.h"
+#include "Components/Rendering/PlanarReflection.h"
 #include "Editor/Registries/EditorPluginRegistry.h"
 #include "InspectorRegistry.h"
 #include "Picking/EditorPickProviders.h"
@@ -23,6 +25,7 @@
 #include <algorithm>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ed = GameEngine::Editor;
@@ -105,6 +108,18 @@ TEST(EditorPluginRegistry, LateRegistrationReplaysInspectorPass)
     EXPECT_NE(GameEngine::InspectorRegistry::Get().TryGetComponentInspector(0xE002), nullptr);
 }
 
+TEST(EditorComponentTraits, PlanarReflectionRegistersItsPresentation)
+{
+    ed::RegisterPlanarReflectionComponentTraits();
+    ed::EditorComponentTraits traits;
+    ASSERT_TRUE(ed::EditorComponentTraitsRegistry::Get().TryGet(
+        GameEngine::ECS::GetComponentTypeId<GameEngine::Components::PlanarReflection>(), traits));
+    EXPECT_EQ(traits.DisplayName, "Planar Reflection");
+    EXPECT_EQ(traits.InspectorIconClass, "inspector-section-icon-reflection-probe");
+    EXPECT_EQ(traits.InspectorCategory, "Rendering");
+    EXPECT_EQ(traits.InspectorSortOrder, 141);
+}
+
 TEST(EditorComponentTraits, RegistrationReplacesByTypeId)
 {
     auto& registry = ed::EditorComponentTraitsRegistry::Get();
@@ -116,6 +131,8 @@ TEST(EditorComponentTraits, RegistrationReplacesByTypeId)
 
     ed::EditorComponentTraits second;
     second.DisplayName = "Second";
+    second.InspectorCategory = "Rendering";
+    second.InspectorSortOrder = 141;
     second.HierarchyRowClass = "hierarchy-entity-test";
     second.IsPickInstanceRoot = true;
     registry.Register(typeId, second);
@@ -123,10 +140,44 @@ TEST(EditorComponentTraits, RegistrationReplacesByTypeId)
     ed::EditorComponentTraits out;
     ASSERT_TRUE(registry.TryGet(typeId, out));
     EXPECT_EQ(out.DisplayName, "Second");
+    EXPECT_EQ(out.InspectorCategory, "Rendering");
+    EXPECT_EQ(out.InspectorSortOrder, 141);
     EXPECT_EQ(out.HierarchyRowClass, "hierarchy-entity-test");
     EXPECT_TRUE(out.IsPickInstanceRoot);
 
     EXPECT_FALSE(registry.TryGet(0xDEAD, out));
+}
+
+// The inspector and hierarchy scan the registry per row and per rebuild, so each
+// query returns only the types that set the trait it asks about.
+TEST(EditorComponentTraits, PresenceQueriesReturnOnlyTheTypesThatSetTheTrait)
+{
+    auto& registry = ed::EditorComponentTraitsRegistry::Get();
+    const GameEngine::ECS::ComponentTypeId hiddenId = 0xE00A;
+    const GameEngine::ECS::ComponentTypeId shownId = 0xE00B;
+
+    ed::EditorComponentTraits hidden;
+    hidden.HiddenInInspector = true;
+    registry.Register(hiddenId, hidden);
+
+    ed::EditorComponentTraits shown;
+    shown.DisplayName = "Presence Query Shown";
+    shown.HierarchyRowClass = "hierarchy-entity-presence-query";
+    shown.GizmoPivotAtEntityOrigin = true;
+    registry.Register(shownId, shown);
+
+    EXPECT_TRUE(registry.IsHiddenInInspector(hiddenId));
+    EXPECT_FALSE(registry.IsHiddenInInspector(shownId));
+    EXPECT_FALSE(registry.IsHiddenInInspector(0xDEAD));
+    EXPECT_EQ(registry.FindByDisplayName("Presence Query Shown"), shownId);
+
+    const auto rowClasses = registry.HierarchyRowClasses();
+    EXPECT_NE(std::find(rowClasses.begin(), rowClasses.end(),
+                        std::make_pair(shownId, std::string("hierarchy-entity-presence-query"))),
+              rowClasses.end());
+    const auto pivotTypes = registry.GizmoPivotAtEntityOriginTypes();
+    EXPECT_NE(std::find(pivotTypes.begin(), pivotTypes.end(), shownId), pivotTypes.end());
+    EXPECT_EQ(std::find(pivotTypes.begin(), pivotTypes.end(), hiddenId), pivotTypes.end());
 }
 
 TEST(EditorComponentTraits, SectionHostIsFoundByTheSectionsItHosts)
@@ -137,7 +188,12 @@ TEST(EditorComponentTraits, SectionHostIsFoundByTheSectionsItHosts)
 
     ed::EditorComponentTraits host;
     host.HostsInspectorSection = [](GameEngine::ECS::ComponentTypeId typeId)
-    { return typeId == hostedTypeId; };
+    {
+        // A claim may consult registries, this one included: re-entering it must
+        // not deadlock.
+        (void)ed::EditorComponentTraitsRegistry::Get().IsHiddenInInspector(typeId);
+        return typeId == hostedTypeId;
+    };
     host.MissingHostBadge = "No Host";
     registry.Register(hostTypeId, host);
 
@@ -175,6 +231,35 @@ TEST(EditorComponentTraits, SecondHostOfARegisteredSectionIsRefused)
 
     registry.Register(firstHostTypeId, ed::EditorComponentTraits{});
     ecs::ComponentRegistry::UnregisterComponentForTests(hostedTypeId);
+}
+
+namespace
+{
+constexpr GameEngine::ECS::ComponentTypeId kStackEffectTestEffectId = 0xE0C1;
+} // namespace
+
+// A stack effect's section nests under the volume that claims it; the claim is
+// the volume's own predicate, which may consult registries (this one included).
+TEST(EditorComponentTraits, FindStackEffectOwnerAsksEachVolumesPredicate)
+{
+    auto& registry = ed::EditorComponentTraitsRegistry::Get();
+    const GameEngine::ECS::ComponentTypeId volumeId = 0xE0C0;
+    const GameEngine::ECS::ComponentTypeId effectId = kStackEffectTestEffectId;
+    const GameEngine::ECS::ComponentTypeId otherId = 0xE0C2;
+
+    ed::EditorComponentTraits volume;
+    volume.OwnsStackEffect = [](GameEngine::ECS::ComponentTypeId typeId)
+    {
+        // Re-entering the registry must not deadlock.
+        (void)ed::EditorComponentTraitsRegistry::Get().IsHiddenInInspector(typeId);
+        return typeId == kStackEffectTestEffectId;
+    };
+    registry.Register(volumeId, volume);
+
+    EXPECT_EQ(registry.FindStackEffectOwner(effectId), volumeId);
+    EXPECT_EQ(registry.FindStackEffectOwner(otherId), GameEngine::ECS::ComponentTypeId{});
+    EXPECT_EQ(registry.FindStackEffectOwner(volumeId), GameEngine::ECS::ComponentTypeId{})
+        << "a volume is not its own stack effect";
 }
 
 TEST(EditorPickProviders, RegistrationReplacesAndSnapshotIterates)

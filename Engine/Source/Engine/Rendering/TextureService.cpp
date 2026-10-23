@@ -79,6 +79,7 @@
 #include "Rendering/Utils/CubeLutFileParser.h"
 #include "Rendering/Utils/CubeLutGpuUpload.h"
 #include "Rendering/Core/NamedPushConstantWriter.h"
+#include "Types/Fnv1a.h"
 #include "Types/StringId.h"
 #include "Mathematics/Matrix4x4.h"
 #include "Mathematics/MatrixOps.h"
@@ -1081,23 +1082,6 @@ Rendering::DescriptorSetLayoutDesc TextureService::GetBindlessTextureSetLayout(u
     layout.debugName = "BindlessTextureSetLayout";
     return layout;
 }
-
-namespace
-{
-uint64_t HashBytesFnv1a64(const uint8_t* data, size_t size)
-{
-    constexpr uint64_t kFnvOffset = 14695981039346656037ull;
-    constexpr uint64_t kFnvPrime = 1099511628211ull;
-    uint64_t hash = kFnvOffset;
-    for (size_t i = 0; i < size; ++i)
-    {
-        hash ^= data[i];
-        hash *= kFnvPrime;
-    }
-    return hash;
-}
-
-} // namespace
 
 bool TextureService::TryGetCubeLutGpuBinding(const PostProcessSettings& pp, CubeLutGpuBindingState& out) const
 {
@@ -2557,7 +2541,7 @@ Rendering::TextureHandle TextureService::UploadEmbeddedImage(
     // GPU textures + decoded-pixel cache entries — enough to exhaust VRAM and
     // device-lose on a large scene load. Hashing the compressed bytes costs a
     // few ms; a duplicate decode+upload costs ~400ms and ~85MB of VRAM.
-    const uint64_t contentHash = HashBytesFnv1a64(image.Data.data(), image.Data.size());
+    const uint64_t contentHash = Hashing::Fnv1a64(image.Data.data(), image.Data.size());
     const GUID contentBase = GUID::Derive(
         GUID{}, "embedded/" + std::to_string(contentHash) + "/" + std::to_string(image.Data.size()));
 

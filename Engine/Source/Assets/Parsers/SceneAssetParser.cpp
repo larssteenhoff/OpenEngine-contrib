@@ -1,4 +1,5 @@
 #include "Assets/Parsers/SceneAssetParser.h"
+#include "Scene/SceneValue.h"
 #include "Assets/Parsers/ParserExtractionHelpers.h"
 
 #include "AssetCore/DepEdge.h"
@@ -23,17 +24,6 @@ namespace
 
 constexpr std::string_view kNullGuid = "00000000-0000-0000-0000-000000000000";
 
-std::string_view Trim(std::string_view s) noexcept
-{
-    size_t b = 0;
-    size_t e = s.size();
-    while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r'))
-        ++b;
-    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r'))
-        --e;
-    return s.substr(b, e - b);
-}
-
 // Strip surrounding double-quotes, if any.
 std::string_view UnquoteIfPresent(std::string_view s) noexcept
 {
@@ -46,11 +36,11 @@ std::string_view UnquoteIfPresent(std::string_view s) noexcept
 // returns empty string_view.
 std::string_view TryParseEntityHeader(std::string_view line)
 {
-    const std::string_view trimmed = Trim(line);
+    const std::string_view trimmed = Scene::TrimSceneWhitespace(line);
     if (trimmed.size() < 4 || trimmed.front() != '[' || trimmed.back() != ']')
         return {};
     constexpr std::string_view kPrefix = "entity";
-    const std::string_view body = Trim(trimmed.substr(1, trimmed.size() - 2));
+    const std::string_view body = Scene::TrimSceneWhitespace(trimmed.substr(1, trimmed.size() - 2));
     if (body.size() < kPrefix.size() ||
         body.substr(0, kPrefix.size()) != kPrefix)
     {
@@ -103,11 +93,11 @@ std::string_view FindBracketAttr(std::string_view body, std::string_view key)
 // header body between the brackets; on failure, returns empty string_view.
 std::string_view TryParseResourceHeader(std::string_view line)
 {
-    const std::string_view trimmed = Trim(line);
+    const std::string_view trimmed = Scene::TrimSceneWhitespace(line);
     if (trimmed.size() < 2 || trimmed.front() != '[' || trimmed.back() != ']')
         return {};
     constexpr std::string_view kPrefix = "resource";
-    const std::string_view body = Trim(trimmed.substr(1, trimmed.size() - 2));
+    const std::string_view body = Scene::TrimSceneWhitespace(trimmed.substr(1, trimmed.size() - 2));
     if (body.size() <= kPrefix.size() || body.substr(0, kPrefix.size()) != kPrefix ||
         (body[kPrefix.size()] != ' ' && body[kPrefix.size()] != '\t'))
     {
@@ -151,7 +141,7 @@ void EmitAssetRefEdges(const DepEdge& base, std::string_view guidStr, std::strin
 // fields. A section header is a trimmed line in brackets, as the scene reader reads it.
 bool TryParseSectionLocator(std::string_view line, std::string& outLocator)
 {
-    const std::string_view trimmed = Trim(line);
+    const std::string_view trimmed = Scene::TrimSceneWhitespace(line);
     if (trimmed.size() < 2 || trimmed.front() != '[' || trimmed.back() != ']')
         return false;
     outLocator.clear();
@@ -161,7 +151,7 @@ bool TryParseSectionLocator(std::string_view line, std::string& outLocator)
         return true;
     }
     constexpr std::string_view kBlueprint = "blueprint";
-    const std::string_view body = Trim(trimmed.substr(1, trimmed.size() - 2));
+    const std::string_view body = Scene::TrimSceneWhitespace(trimmed.substr(1, trimmed.size() - 2));
     if (body.size() > kBlueprint.size() && body.substr(0, kBlueprint.size()) == kBlueprint &&
         (body[kBlueprint.size()] == ' ' || body[kBlueprint.size()] == '\t'))
     {
@@ -176,15 +166,15 @@ bool TryParseSectionLocator(std::string_view line, std::string& outLocator)
 // (locatorPart, valuePart) or empty pair if not a field-assignment line.
 std::pair<std::string_view, std::string_view> TryParseFieldAssignment(std::string_view line)
 {
-    const std::string_view trimmed = Trim(line);
+    const std::string_view trimmed = Scene::TrimSceneWhitespace(line);
     // Skip section headers, comments, empty lines.
     if (trimmed.empty() || trimmed.front() == ';' || trimmed.front() == '[')
         return {};
     const auto eq = trimmed.find('=');
     if (eq == std::string_view::npos)
         return {};
-    const std::string_view lhs = Trim(trimmed.substr(0, eq));
-    std::string_view rhs = Trim(trimmed.substr(eq + 1));
+    const std::string_view lhs = Scene::TrimSceneWhitespace(trimmed.substr(0, eq));
+    std::string_view rhs = Scene::TrimSceneWhitespace(trimmed.substr(eq + 1));
 
     // Strip a trailing `; ...` inline comment, but only if the `;` is OUTSIDE
     // a quoted value. INI-style comments are well-defined as starting at
@@ -198,7 +188,7 @@ std::pair<std::string_view, std::string_view> TryParseFieldAssignment(std::strin
             inQuotes = !inQuotes;
         else if (c == ';' && !inQuotes)
         {
-            rhs = Trim(rhs.substr(0, i));
+            rhs = Scene::TrimSceneWhitespace(rhs.substr(0, i));
             break;
         }
     }
@@ -222,11 +212,11 @@ constexpr std::array<std::string_view, 2> kMarkupOwnedComponents = {"Name", "Spl
 // comment, a blank line, or anything else.
 std::string_view LineComponent(std::string_view line)
 {
-    std::string_view trimmed = Trim(line);
+    std::string_view trimmed = Scene::TrimSceneWhitespace(line);
     if (trimmed.empty() || trimmed.front() == ';' || trimmed.front() == '[')
         return {};
     if (trimmed.front() == '-' || trimmed.front() == '+')
-        return Trim(trimmed.substr(1));
+        return Scene::TrimSceneWhitespace(trimmed.substr(1));
     if (trimmed.find('=') == std::string_view::npos && trimmed.find('.') == std::string_view::npos)
         return trimmed;
     const std::string_view lhs = TryParseFieldAssignment(line).first;

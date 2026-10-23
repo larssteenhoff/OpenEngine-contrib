@@ -79,6 +79,7 @@ target_link_libraries(AnimationSystemTests
     GTest::gtest
     GTest::gtest_main
 )
+target_include_directories(AnimationSystemTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 target_include_directories(AnimationSystemTests
     PRIVATE
     # StagedTestPaths.h — exe-anchored resolution of the staged Assets/ root.
@@ -149,3 +150,8 @@ set_tests_properties(TransformMathTests_ChangeFilterOff PROPERTIES ENVIRONMENT "
 set_tests_properties(AnimationSystemTests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+
+# Keep the metric checks independent of host font installation and platform.
+ge_stage_test_asset(TextCoreMetricsTests
+    "${CMAKE_SOURCE_DIR}/Apps/Editor/Assets/Fonts/Roboto-Regular.ttf"
+    "Assets/Fonts/Roboto-Regular.ttf")

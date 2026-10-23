@@ -2,6 +2,8 @@
 #include "Rendering/Text/FontAtlas.h"
 #include "UI/Controls/Label.h"
 #include "UI/Controls/ScrollView.h"
+#include "DropFeedbackClasses.h"
+#include "UI/OverlayZIndex.h"
 #include "UI/Controls/VirtualWindowCore.h"
 #include "UI/Layout/ElementOverrideHelpers.h"
 #include "UI/ResolvedStyle.h"
@@ -524,8 +526,7 @@ void TreeView::EnsureAttachedRows(int desired)
                     ui->ClearHoverForSubtree(slot.row);
             }
             slot.row->RemoveClass("selected");
-            slot.row->RemoveClass("drop-onto-valid");
-            slot.row->RemoveClass("drop-onto-invalid");
+            UI::SetDropFeedbackClasses(*slot.row, false, false);
             slot.boundId = 0;
             slot.boundIndex = -1;
             UI::Layout::SetElementInvisible(*slot.row, true);
@@ -1060,8 +1061,7 @@ void TreeView::UnbindRow(int slot)
             ui->ClearHoverForSubtree(s.row);
     }
     s.row->RemoveClass("selected");
-    s.row->RemoveClass("drop-onto-valid");
-    s.row->RemoveClass("drop-onto-invalid");
+    UI::SetDropFeedbackClasses(*s.row, false, false);
     s.boundId = 0;
     s.boundIndex = -1;
     s.boundDepth = 0;
@@ -1198,15 +1198,11 @@ bool TreeView::BindRow(int slotIndex, int itemIndex)
     else
         slot.row->RemoveClass("selected");
 
-    slot.row->RemoveClass("drop-onto-valid");
-    slot.row->RemoveClass("drop-onto-invalid");
-    if (m_DropPreview.Visible &&
-        m_DropPreview.Hit.Location == UI::Interaction::DropLocation::OnItem &&
-        fi.id != 0 &&
-        fi.id == static_cast<TreeId>(m_DropPreview.Hit.TargetId))
-    {
-        slot.row->AddClass(m_DropPreview.Allowed ? "drop-onto-valid" : "drop-onto-invalid");
-    }
+    const bool dropHovered = m_DropPreview.Visible &&
+                             m_DropPreview.Hit.Location == UI::Interaction::DropLocation::OnItem &&
+                             fi.id != 0 &&
+                             fi.id == static_cast<TreeId>(m_DropPreview.Hit.TargetId);
+    UI::SetDropFeedbackClasses(*slot.row, dropHovered, m_DropPreview.Allowed);
 
     // Update lock icon active state
     if (slot.lock && m_OnLockStateCheck)
@@ -1492,7 +1488,7 @@ void TreeView::UpdateVirtualization(VirtualizationCoordinator::Reason reason)
     }
     if (changes.Version != m_LastProviderChangeVersion)
         m_LastProviderChangeVersion = changes.Version;
-    // C-7: a structural provider mutation (MarkStructureChanged) means the flat
+    // A structural provider mutation (MarkStructureChanged) means the flat
     // row set is stale (items added/removed/reordered, expandability changed).
     // Setting m_FlatDirty rebuilds it on the next pass; the generation bump below
     // (gated on m_FlatDirty) breaks the guard so this pass can't ring-scroll a
@@ -1506,7 +1502,7 @@ void TreeView::UpdateVirtualization(VirtualizationCoordinator::Reason reason)
 
     // Normalize the typed changeset for the core, which never sees id types:
     // All -> full rebind; Subset -> the flat pool slots currently bound to a
-    // changed id (the old Subset fast-path scan, reused).
+    // changed id.
     m_ChangedSlotScratch.clear();
     UI::VirtualWindowCore::ChangeSetView changesView{};
     if (changes.Kind == ChangeSetKind::All)
@@ -1527,11 +1523,11 @@ void TreeView::UpdateVirtualization(VirtualizationCoordinator::Reason reason)
         changesView.AffectedSlots = m_ChangedSlotScratch;
     }
 
-    // A pending m_FlatDirty that was set WITHOUT a rebuild this pass (the C-7 hook
-    // above) must still break the guard so the core doesn't ring-scroll a window
+    // A pending m_FlatDirty that was set WITHOUT a rebuild this pass (the
+    // structure-version check above) must still break the guard so the core doesn't ring-scroll a window
     // whose flat set is about to change — RebuildFlatList already moved the
     // generation in the rebuilt case, this covers the "set but not yet rebuilt"
-    // one. Mirrors the old `!m_FlatDirty` guard on the early-out and ring paths.
+    // one.
     if (m_FlatDirty)
         ++m_FlatGeneration;
 
@@ -1647,7 +1643,7 @@ void TreeView::RefreshFromProvider()
         m_Provider->ConsumeChanges(m_LastProviderChangeVersion, changes);
         if (changes.Version != m_LastProviderChangeVersion)
             m_LastProviderChangeVersion = changes.Version;
-        // C-7: a structural provider mutation (MarkStructureChanged) means the flat
+        // A structural provider mutation (MarkStructureChanged) means the flat
         // row set is stale even if the reported changeset is a row Subset — force a
         // flat rebuild so the Subset stash below reflects the new item set.
         if (changes.StructureVersion != m_LastProviderStructureVersion)
@@ -2358,6 +2354,12 @@ void TreeView::OnEvent(UIEvent& e)
     UIElement::OnEvent(e);
 }
 
+void TreeView::AutoScrollDuringDrag(float mouseX, float mouseY)
+{
+    if (m_Scroll)
+        m_Scroll->AutoScrollNearEdge(mouseX, mouseY);
+}
+
 bool TreeView::AcceptsPayload(UI::Interaction::PayloadTypeId typeId) const
 {
     return m_DropAccepts ? m_DropAccepts(typeId) : false;
@@ -2569,16 +2571,17 @@ void TreeView::SetDropPreview(const UI::Interaction::DropPreviewState& state)
             break;
         }
 
-        const uint32_t color = state.Allowed ? 0xE600C8FFu : 0xE6FF5050u; // rgba(0,200,255,0.9) / rgba(255,80,80,0.9)
+        if (state.Allowed)
+            m_DropIndicator->RemoveClass("denied");
+        else
+            m_DropIndicator->AddClass("denied");
         m_DropIndicator->Overrides()
             .Set(Style::Position, PositionType::Absolute)
             .Set(Style::PointerEvents, false)
-            .Set(Style::ZIndex, 9000)
+            .Set(Style::ZIndex, OverlayZIndex::kDropIndicator)
             .Set(Style::PositionLeft, StyleLength::Px(x0))
             .Set(Style::PositionTop, StyleLength::Px(yLine))
             .Set(Style::Width, StyleLength::Px(w))
-            .Set(Style::Height, StyleLength::Px(2.0f))
-            .Set(Style::BackgroundColor, color)
             .Set(Style::Display, DisplayMode::Block);
     }
     else
@@ -2598,12 +2601,8 @@ void TreeView::UpdateDropPreviewClasses()
     {
         if (!slot.row || slot.boundId == 0)
             continue;
-        slot.row->RemoveClass("drop-onto-valid");
-        slot.row->RemoveClass("drop-onto-invalid");
-        if (showOnto && slot.boundId == static_cast<TreeId>(m_DropPreview.Hit.TargetId))
-        {
-            slot.row->AddClass(m_DropPreview.Allowed ? "drop-onto-valid" : "drop-onto-invalid");
-        }
+        const bool hovered = showOnto && slot.boundId == static_cast<TreeId>(m_DropPreview.Hit.TargetId);
+        UI::SetDropFeedbackClasses(*slot.row, hovered, m_DropPreview.Allowed);
     }
 }
 

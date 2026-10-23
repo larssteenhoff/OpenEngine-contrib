@@ -42,12 +42,6 @@ public:
         return *this;
     }
 
-    // Optional convenience toggles
-    WorldBuilder& EnableBulkOperations(bool enable = true) {
-        config.EnableBulkOperations = enable;
-        return *this;
-    }
-
     // Pre-register component types to reduce first-use work
     template<Component... Ts>
     WorldBuilder& PreRegister() {

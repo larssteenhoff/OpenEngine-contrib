@@ -5,9 +5,11 @@
 #include "Components/Rendering/PostProcessEffects/VignetteEffect.h"
 #include "Editor/Entities/EditorECSHelpers.h"
 
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorUIHelpers.h"
+#include "Types/ColorUtils.h"
 #include "UndoRedo/UndoRedoService.h"
 #include "UI/StyleProperties.h"
 
@@ -22,47 +24,8 @@ namespace GameEngine
 
 namespace
 {
-constexpr float kSwatchSize = 20.0f;
-constexpr float kSwatchBorderRadius = 3.0f;
-constexpr uint32_t kSwatchBorderColor = 0xFF555555u;
 constexpr Components::VignetteEffect kDefaults{};
 
-uint32_t ColorToArgb(const float (&c)[3])
-{
-    auto clamp01 = [](float v) { return std::max(0.0f, std::min(1.0f, v)); };
-    uint8_t r = static_cast<uint8_t>(clamp01(c[0]) * 255.0f + 0.5f);
-    uint8_t g = static_cast<uint8_t>(clamp01(c[1]) * 255.0f + 0.5f);
-    uint8_t b = static_cast<uint8_t>(clamp01(c[2]) * 255.0f + 0.5f);
-    return (0xFFu << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
-}
-
-void ArgbToColor(uint32_t argb, float (&out)[3])
-{
-    out[0] = ((argb >> 16) & 0xFF) / 255.0f;
-    out[1] = ((argb >> 8) & 0xFF) / 255.0f;
-    out[2] = (argb & 0xFF) / 255.0f;
-}
-
-std::string FormatRgb(const float (&c)[3])
-{
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "(%.2f, %.2f, %.2f)", c[0], c[1], c[2]);
-    return buf;
-}
-
-void StyleSwatch(UIElement* swatch, uint32_t argb)
-{
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(kSwatchSize))
-        .Set(Style::Height, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinWidth, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinHeight, StyleLength::Px(kSwatchSize))
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{kSwatchBorderRadius, kSwatchBorderRadius, kSwatchBorderRadius, kSwatchBorderRadius})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor})
-        .Set(Style::BackgroundColor, argb)
-        .Set(Style::Cursor, CursorStyle::Pointer);
-}
 } // namespace
 
 void RegisterVignetteEffectInspector()
@@ -110,32 +73,18 @@ void RegisterVignetteEffectInspector()
 
         // Color swatch + RGB label; click opens the color picker.
         {
-            UIElement* row = InspectorUI::AddRow(ctx.Parent);
-            Label* colorLabel = InspectorUI::AddLabel(row, "Color", "Tint the corners fade toward (click to pick; double-click to reset to black)");
-            if (colorLabel) colorLabel->AddClass("inspector-label-no-drag");
-            UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-            fieldContainer->Overrides()
-                .Set(Style::FlexDir, FlexDirection::Row)
-                .Set(Style::AlignItems, AlignItems::Center)
-                .Set(Style::Gap, StyleLength::Px(6.0f));
-
-            auto swatch = std::make_unique<UIElement>();
-            UIElement* swatchRaw = swatch.get();
-            StyleSwatch(swatchRaw, ColorToArgb(effect->Color));
-            fieldContainer->AddChild(std::move(swatch));
-
-            auto rgbLabel = std::make_unique<Label>();
-            rgbLabel->AddClass("inspector-text");
-            rgbLabel->SetText(FormatRgb(effect->Color));
-            rgbLabel->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-            Label* rgbLabelRaw = rgbLabel.get();
-            fieldContainer->AddChild(std::move(rgbLabel));
+            const InspectorUI::ColorSwatchRow swatchRow = InspectorUI::AddColorSwatchRow(
+                ctx.Parent, "Color", "Tint the corners fade toward (click to pick; double-click to reset to black)",
+                ColorUtils::RgbFloatsToArgb(effect->Color),
+                InspectorUI::FormatColorRgb(effect->Color[0], effect->Color[1], effect->Color[2]));
+            UIElement* swatchRaw = swatchRow.Swatch;
+            Label* rgbLabelRaw = swatchRow.Value;
 
             auto updateUI = [swatchRaw, rgbLabelRaw, w, e]() {
                 auto* c = w->GetComponent<V>(e);
                 if (!c) return;
-                StyleSwatch(swatchRaw, ColorToArgb(c->Color));
-                rgbLabelRaw->SetText(FormatRgb(c->Color));
+                InspectorUI::SetColorSwatchColor(swatchRaw, ColorUtils::RgbFloatsToArgb(c->Color));
+                rgbLabelRaw->SetText(InspectorUI::FormatColorRgb(c->Color[0], c->Color[1], c->Color[2]));
             };
 
             auto clickHandler = [w, e, n, undo, openPicker, updateUI](UIEvent& ev) {
@@ -162,7 +111,7 @@ void RegisterVignetteEffectInspector()
                     {
                         edit->Preview([&] {
                             auto* c = w->GetComponentForWrite<V>(e);
-                            if (c) ArgbToColor(newArgb, c->Color);
+                            if (c) ColorUtils::ArgbToRgbFloats(newArgb, c->Color);
                         });
                         edit->Commit();
                     }
@@ -171,7 +120,7 @@ void RegisterVignetteEffectInspector()
                         auto* c = w->GetComponent<V>(e);
                         if (!c) return;
                         V updated = *c;
-                        ArgbToColor(newArgb, updated.Color);
+                        ColorUtils::ArgbToRgbFloats(newArgb, updated.Color);
                         Editor::CommitComponentUpdate(w, e, n, updated);
                     }
                     updateUI();
@@ -185,7 +134,7 @@ void RegisterVignetteEffectInspector()
                     {
                         edit->Preview([&] {
                             auto* c = w->GetComponentForWrite<V>(e);
-                            if (c) ArgbToColor(newArgb, c->Color);
+                            if (c) ColorUtils::ArgbToRgbFloats(newArgb, c->Color);
                         });
                     }
                     else
@@ -193,12 +142,12 @@ void RegisterVignetteEffectInspector()
                         auto* c = w->GetComponent<V>(e);
                         if (!c) return;
                         V updated = *c;
-                        ArgbToColor(newArgb, updated.Color);
+                        ColorUtils::ArgbToRgbFloats(newArgb, updated.Color);
                         Editor::PreviewComponentUpdate(w, e, n, updated);
                     }
                     updateUI();
                 };
-                openPicker(ColorToArgb(comp->Color), 1.0f, std::move(cbs));
+                openPicker(ColorUtils::RgbFloatsToArgb(comp->Color), 1.0f, std::move(cbs));
             };
 
             swatchRaw->RegisterEventHandler(kEventMouseDown, clickHandler);

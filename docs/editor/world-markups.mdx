@@ -48,6 +48,8 @@ Each mark-up draws as a translucent volume in its status color with an outline. 
 - **Many mark-ups**: the 64 nearest the camera (and the selected ones) draw a body (the glow or the fill); the rest draw their outline only.
 - Hidden mark-ups draw nothing, and nothing draws in play mode. The Scene View's gizmo toggle hides them with the other gizmos. An agent hides only them with `set_gizmos_visibility` and `markups: false`.
 
+**The Activity tab's stripes.** In the Mark-ups panel's Activity tab every second row sits on a darker plate, so a row that wraps over several lines keeps its edges. The theme decides the plates: `--ui_color_list_stripe_primary` (the first row's, transparent by default) and `--ui_color_list_stripe_secondary` (the second row's) in `theme/tokens.css`. A theme that sets both to the same value turns the stripes off.
+
 :::caution[Limits]
 
 - A mark-up belongs to a scene. One inside a blueprint or a subscene is refused when the scene loads, with a message that says to move it into the scene that places the instance.

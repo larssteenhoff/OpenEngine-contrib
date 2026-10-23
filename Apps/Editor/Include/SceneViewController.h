@@ -20,6 +20,7 @@
 #include "SceneView/CameraFrameGizmo.h"
 #include "SceneView/MeasureSceneGizmo.h"
 #include "Markups/MarkupGizmo.h"
+#include "SceneView/MeasureTool.h"
 #include "SceneView/SceneViewGridRenderer.h"
 #include "SceneView/SplineSceneGizmo.h"
 #include "UI/UITextureSpace.h"
@@ -91,7 +92,8 @@ class SceneViewController
         NavGridBrush,
         // A tool another module registered with the tool strip
         // (SceneView/SceneViewToolStripRegistry.h); GetActiveRegisteredToolId names it.
-        Registered
+        Registered,
+        Measure
     };
 
     /// What last updated the hovered entity: the Scene View's ray, or a panel's row or link
@@ -306,6 +308,19 @@ class SceneViewController
     void SetGridVisible(bool visible) { m_ShowGrid = visible; }
     bool IsGridVisible() const { return m_ShowGrid; }
 
+    /// Optional authored world XY cell grid; an unset grid follows zoom-based decades.
+    struct Grid2DCells
+    {
+        float OriginX = 0.0f;
+        float OriginY = 0.0f;
+        float Width = 0.0f;
+        float Height = 0.0f;
+        bool Valid = false;
+    };
+    void SetGrid2DCells(const Grid2DCells& cells) { m_Grid2DCells = cells; }
+    void ClearGrid2DCells() { m_Grid2DCells = {}; }
+
+
     // Post-processing master toggle for the Scene View (LDR stack + tonemap curve).
     // When disabled, a per-view PostProcessSettings override strips bloom, color filter,
     // CAS, CRT, and uses Neutral tonemap; gameplay views are unaffected.
@@ -429,6 +444,7 @@ class SceneViewController
     // Scene Tools UI layer is implemented.
     void SetActiveTool(ToolKind kind);
     ToolKind GetActiveToolKind() const { return m_ActiveToolKind; }
+    std::string_view ActiveToolStatusText() const;
     // Activates the tool the tool strip entry `id` registered, built on first use and
     // owned by this view. False, changing nothing, when no entry has the id or the entry
     // is not available (RegisteredToolRefusal says why).
@@ -446,6 +462,8 @@ class SceneViewController
 
     Editor::SceneTools::NavGridBrushTool* GetNavGridBrushTool() { return m_NavGridBrushTool.get(); }
     const Editor::SceneTools::NavGridBrushTool* GetNavGridBrushTool() const { return m_NavGridBrushTool.get(); }
+
+    Editor::SceneTools::MeasureTool* GetMeasureTool() { return m_MeasureTool.get(); }
 
     // Optional editor change notifications service used to keep gizmo pivots
     // and other editor-only state in sync when components change (inspector edits,
@@ -502,7 +520,6 @@ class SceneViewController
     void SilentlyClearSelection();
     void SilentlySetSelection(const std::vector<ECS::EntityHandle>& entities);
     void RebuildSelectionDescendants();
-    bool HasMeasureEndpointAtPointer(const Editor::SceneTools::ScenePointerEvent& event);
 
     // Marquee drag-select result: replace the current selection with this
     // entity list (or, when additive is true, toggle entries into the existing
@@ -631,9 +648,17 @@ class SceneViewController
     void Sync2DModeToTransformTool();
 
     // When 2D mode and pixel-perfect are both active, force the orthographic
-    // visible height to match an integer world-unit-per-pixel ratio derived
-    // from the current viewport pixel height and the configured pixel scale.
+    // visible height so one source texel covers exactly `pixelScale` render
+    // pixels, and cache the texel size the per-frame camera snap needs.
     void ApplyPixelPerfectIfActive();
+
+    // Tile pixels per world unit for the scene's tilemap content, falling back
+    // to one texel per unit when the scene declares no pixel grid.
+    float ResolvePixelPerfectPixelsPerUnit() const;
+
+    // Snap a published camera position so the ortho window's minimum edge lands
+    // on a texel boundary. No-op outside 2D pixel-perfect mode.
+    void SnapPixelPerfectCamera(double* camPos, float halfWidth, float halfHeight) const;
 
     CameraBookmarksWidget* m_BookmarksWidget = nullptr;
 
@@ -725,6 +750,7 @@ class SceneViewController
     bool m_ShowMarkupGizmos = true;
     bool m_ShowCameraFrameGuide = false;
     bool m_ShowGrid = false;
+    Grid2DCells m_Grid2DCells;
     bool m_PostProcessingEnabled = true;
     bool m_GridSnapEnabled = false;
     bool m_FrameGraphBuildEnabled = true;
@@ -756,6 +782,7 @@ class SceneViewController
     // Tools registered with the tool strip, by entry id, built on first activation.
     std::unordered_map<std::string, std::unique_ptr<Editor::SceneTools::ISceneTool>> m_RegisteredTools;
     std::string m_ActiveRegisteredToolId;
+    std::unique_ptr<Editor::SceneTools::MeasureTool> m_MeasureTool;
 
     // Game UI overlay: previews the world's UIDocument HUDs over the editing
     // viewport. Lazy-created on first overlay declaration; visibility is the
@@ -809,6 +836,10 @@ class SceneViewController
 
     uint32_t m_LastW = 0;
     uint32_t m_LastH = 0;
+
+    // Resolved by ApplyPixelPerfectIfActive; read per frame by the camera snap.
+    float m_PixelPerfectPixelsPerUnit = 1.0f;
+    float m_PixelPerfectWorldUnitsPerTexel = 1.0f;
 
     SceneViewGridRenderer m_GridRenderer;
 

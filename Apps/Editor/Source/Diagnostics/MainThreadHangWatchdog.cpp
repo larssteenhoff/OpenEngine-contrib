@@ -4,6 +4,7 @@
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Logger/Backtrace.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <atomic>
@@ -121,14 +122,6 @@ int ThresholdFromEnv(const char* name, int fallback)
 }
 
 #ifdef _WIN32
-// Opt-in flags share one shape: exactly "1" arms, anything else leaves the
-// flag disarmed.
-bool FlagFromEnv(const char* name)
-{
-    const char* env = std::getenv(name);
-    return env && env[0] == '1' && env[1] == '\0';
-}
-
 // Whether a stall report may suspend the main thread and walk it. True for the
 // frame window; teardown decides separately — see BeginShutdownWatch.
 //
@@ -373,8 +366,7 @@ void MainThreadHangWatchdog::Start(const JobSystem::WorkStealingThreadPool* jobS
     if (g_Running.load(std::memory_order_relaxed))
         return;
 
-    if (const char* env = std::getenv("GE_HANG_WATCHDOG");
-        env && env[0] == '0' && env[1] == '\0')
+    if (!Platform::EnvironmentSwitchEnabled("GE_HANG_WATCHDOG", true))
         return;
 
     const int thresholdMs = ThresholdFromEnv("GE_HANG_WATCHDOG_MS", kDefaultThresholdMs);
@@ -387,7 +379,7 @@ void MainThreadHangWatchdog::Start(const JobSystem::WorkStealingThreadPool* jobS
         std::lock_guard<std::mutex> modeLock(g_CaptureModeMutex);
         g_StackCaptureArmed = true;
     }
-    g_ShutdownStacksArmed.store(FlagFromEnv("GE_HANG_WATCHDOG_SHUTDOWN_STACKS"),
+    g_ShutdownStacksArmed.store(Platform::EnvironmentSwitchEnabled("GE_HANG_WATCHDOG_SHUTDOWN_STACKS", false),
                                 std::memory_order_relaxed);
 
     if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),

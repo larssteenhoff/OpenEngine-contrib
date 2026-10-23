@@ -134,22 +134,6 @@
 	background-image-tint: var(--ui_icon_tint_active);
 }
 
-/* The audio toggle right of Play (PlayMode/AudioToggleButton.h): Editor::ApplyAudioToggleState
-   sets exactly one of the two icon classes; tint and hover come from the section's rules above. */
-.audio-on-speaker-icon {
-	background-image: url("editor:Icons/audio-on-speaker.svg");
-	background-size: contain;
-	background-repeat: no-repeat;
-	background-position: center;
-}
-
-.audio-muted-speaker-icon {
-	background-image: url("editor:Icons/audio-muted-speaker.svg");
-	background-size: contain;
-	background-repeat: no-repeat;
-	background-position: center;
-}
-
 .top-toolbar-help-icon {
 	background-image: url("editor:Icons/help.svg");
 	background-size: contain;
@@ -209,4 +193,10 @@
 	background-color: transparent !important;
 	border-color: transparent !important;
 	background-image: url("editor:Icons/recording_on_button.svg");
+}
+
+/* Toolbar outline size, weight, and optical alignment are authored in each SVG. */
+.toolbar-outline-icon {
+	background-size: 24px 24px;
+	background-position: center;
 }

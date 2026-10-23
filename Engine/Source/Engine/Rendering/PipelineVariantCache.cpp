@@ -771,14 +771,17 @@ void PipelineVariantCache::SubmitPendingVariantCompiles()
             job.Key = req.Key;
             job.IsDepth = req.IsDepth;
             job.MaterialVersion = material->GetVersion();
+            job.MaterialGuid = material->GetGuid();
+            job.RegistrationGeneration =
+                m_Materials->Registry().GetRegistrationGeneration(job.MaterialGuid);
             job.Name = material->GetName();
             job.Spec = material->GetCompileSpec();
             job.BaseGraphicsPipelineId = baseId;
             job.BuildContext = buildContext;
-            // Reconstruct the SPIR-V cache key exactly as ShaderCompilationCache::
-            // GetOrCompileVariant would (color: entity keywords; depth: GE_INSTANCED),
-            // ORed into the material keywords, so the worker's GetOrCompile hits/
-            // produces the same entry the record path would have.
+            // The SPIR-V cache key: the pass keywords (color: entity keywords;
+            // depth: GE_INSTANCED) ORed into the material keywords, the mesh's
+            // vertex flags, and the custom-vertex-shader clamp, so every request
+            // for one variant resolves to one global-cache entry.
             Rendering::ShaderVariantKey mergedKey = material->GetVariantKey();
             mergedKey.materialKeywords |= req.Key.PassKeywords;
             if (req.Key.VertexFlags != Rendering::VertexAttributeFlags::None)
@@ -901,16 +904,29 @@ void PipelineVariantCache::ApplyPendingVariantPublishes()
     }
     for (auto& rec : pending)
     {
-        // Look up by GUID, never the captured Material* in the key. A compile
-        // still running on a worker when its material unregisters queues this
-        // publish AFTER the pre-unregister purge, and this apply runs AFTER the
-        // eviction drain — inserting would resurrect a row keyed on the freed
-        // address (unreachable leak; wrong-pipeline stale-serve if the address
-        // is reused). Drop the record whole: the purge already cleared the
-        // key's in-flight marker, so any marker present now belongs to a newer
-        // compile at a reused address and must not be erased, and the material
-        // is gone, so no VariantPublished fires.
-        if (!m_Materials->Registry().Find(rec.MaterialGuid))
+        // Check the registry binding, never the captured Material* in the key: a
+        // freed Material's address can be reused by the next one allocated. A
+        // compile still running on a worker when its material unregisters
+        // queues this publish AFTER the pre-unregister purge, and this apply runs
+        // AFTER the eviction drain — inserting would resurrect a row keyed on the
+        // freed address (unreachable leak; wrong-pipeline stale-serve if the
+        // address is reused). The record carries the registration generation its
+        // compile was submitted under, and anything but that generation is a
+        // binding the compile was not built for: 0 when the GUID is now unbound,
+        // a newer one when the GUID was re-registered to a new Material while the
+        // compile ran — at whatever address that Material landed. Drop the
+        // record whole: the purge already cleared the key's in-flight marker, so
+        // any marker present now belongs to a newer compile at a reused address
+        // and must not be erased, and the binding is gone, so no VariantPublished
+        // fires. An in-place re-Register keeps the binding and its generation;
+        // whether the unit still matches the edited material is the job of the
+        // MaterialVersion the entry is stamped with, compared at serve time.
+        // Every registered material has a generation of at least 1; the zero
+        // test is what drops a record whose material was never registered,
+        // which carries 0 and would otherwise match an unbound GUID.
+        const uint64_t currentGeneration =
+            m_Materials->Registry().GetRegistrationGeneration(rec.MaterialGuid);
+        if (currentGeneration == 0 || currentGeneration != rec.RegistrationGeneration)
             continue;
         InsertVariantEntry(rec.IsDepth ? m_DepthInstancedVariantCache : m_InstancedVariantCache,
                            rec.Key, rec.PipelineId, rec.MaterialVersion,
@@ -1046,7 +1062,7 @@ void PipelineVariantCache::RunColorVariantCompile(const VariantCompileRequest& r
     // phase-separated from record exactly like the eviction drain.
     QueueVariantPublish({req.Key, pipelineId, req.MaterialVersion,
                          std::move(setLayouts), variant->meta,
-                         req.Key.material->GetGuid(), /*IsDepth=*/false});
+                         req.MaterialGuid, req.RegistrationGeneration, /*IsDepth=*/false});
     releaseScope.PublishQueued = true;
 
     m_AsyncVariantCompilesTotal.fetch_add(1, std::memory_order_relaxed);
@@ -1114,7 +1130,7 @@ void PipelineVariantCache::RunDepthVariantCompile(const VariantCompileRequest& r
     // Hand the compiled unit to the serial apply (see RunColorVariantCompile).
     QueueVariantPublish({req.Key, pipelineId, req.MaterialVersion,
                          std::move(setLayouts), compatMeta ? std::move(compatMeta) : variant->meta,
-                         req.Key.material->GetGuid(), /*IsDepth=*/true});
+                         req.MaterialGuid, req.RegistrationGeneration, /*IsDepth=*/true});
     releaseScope.PublishQueued = true;
 
     m_AsyncVariantCompilesTotal.fetch_add(1, std::memory_order_relaxed);
@@ -1151,13 +1167,14 @@ bool PipelineVariantCache::HasColorVariantForTesting(const InstancedVariantKey& 
 
 void PipelineVariantCache::EnqueueColorVariantPublishForTesting(
     const InstancedVariantKey& key, Rendering::GraphicsPipelineId pipelineId,
-    uint32_t materialVersion, const GUID& materialGuid)
+    uint32_t materialVersion, const GUID& materialGuid, uint64_t registrationGeneration)
 {
     PendingVariantPublish publish{};
     publish.Key = key;
     publish.PipelineId = pipelineId;
     publish.MaterialVersion = materialVersion;
     publish.MaterialGuid = materialGuid;
+    publish.RegistrationGeneration = registrationGeneration;
     publish.IsDepth = false;
     QueueVariantPublish(std::move(publish));
 }

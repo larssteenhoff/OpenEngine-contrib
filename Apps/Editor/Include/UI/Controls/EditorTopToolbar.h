@@ -50,6 +50,7 @@ class EditorTopToolbar final : public UIElement
         std::function<void()> onUniversalSearchClicked;
         std::function<void()> onSettingsClicked;
         std::function<void()> onNodeGraphClicked;
+        std::function<void()> onTilePaletteClicked;
         std::function<void()> onBookmarksClicked;
         std::function<void()> onWebClicked;
         std::function<void()> onScriptEditorClicked;
@@ -109,8 +110,7 @@ class EditorTopToolbar final : public UIElement
     /// Highlight or de-highlight the fullscreen toggle button.
     void SetFullscreenActive(bool active);
 
-    /// Show the audio state on the audio toggle right of Play and name the muted state in
-    /// the Play button's tooltip while audio is not enabled.
+    /// Name the muted state in the Play button's tooltip while audio is not enabled.
     void SetAudioEnabled(bool enabled);
 
     /// Highlight or de-highlight the movie recording toolbar button.
@@ -136,7 +136,6 @@ class EditorTopToolbar final : public UIElement
     Button* m_SaveButton = nullptr;
     Button* m_RecordButton = nullptr;
     Button* m_PlayButton = nullptr;
-    Button* m_AudioToggleButton = nullptr;
     Button* m_PauseButton = nullptr;
     Button* m_StopButton = nullptr;
     std::unique_ptr<INativeContextMenu> m_PanelMenu;

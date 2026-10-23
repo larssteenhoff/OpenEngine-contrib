@@ -18,6 +18,7 @@
 #include "Engine/Rendering/RenderServices.h"
 #include "Logger/Logger.h"
 #include "Assets/AnimationClip.h"
+#include "Platform/Environment.h"
 
 #include "Rendering/Core/Device.h"
 #include "Rendering/Core/GPUScene.h"
@@ -1602,10 +1603,7 @@ bool ModelThumbnailHandler::RegisterReadyThumbnailsRG(uint64_t windowId, UIManag
     bool changed = false;
 
     // GE_UI_REBIND_DIAG=1: same census as the old arm.
-    static const bool sDiag = []() {
-        const char* e = std::getenv("GE_UI_REBIND_DIAG");
-        return e && e[0] == '1';
-    }();
+    static const bool sDiag = Platform::EnvironmentSwitchEnabled("GE_UI_REBIND_DIAG", false);
     if (sDiag)
     {
         static uint64_t sCounter = 0;

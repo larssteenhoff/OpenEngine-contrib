@@ -2,6 +2,7 @@
 
 #include "Assets/AssetManager.h"
 #include "Assets/AssetRegistry.h"
+#include "Assets/AssetGridDragState.h"
 #include "Editor/Settings/SettingsStore.h"
 #include "AssetCore/AssetTypes.h"
 #include "Core/Engine.h"
@@ -51,17 +52,6 @@ bool IsNativeDragAssetSupported(const std::filesystem::path& path)
 
 namespace GameEngine
 {
-
-// Same as AssetsBrowserController / BookmarksPanel / SettingsPanel: asset grid drag state
-// (defined in BookmarksPanel.cpp).
-struct DragState
-{
-    bool active = false;
-    std::filesystem::path assetPath;
-    std::string scenePath;
-    std::string entityId;
-};
-extern DragState g_DragState;
 
 WebPanel::WebPanel()
     : DockPanel("Web")
@@ -302,16 +292,14 @@ void WebPanel::RefreshElementPointers()
             if (e.Button != 0)
                 return;
 
-            if (!g_DragState.active || g_DragState.assetPath.empty())
+            if (!g_DragState.Active || g_DragState.AssetPath.empty())
                 return;
 
-            std::filesystem::path droppedPath = g_DragState.assetPath;
+            std::filesystem::path droppedPath = g_DragState.AssetPath;
 
             // Clear drag state so other panels don't try to consume it again.
-            g_DragState.active = false;
-            g_DragState.assetPath.clear();
-            g_DragState.scenePath.clear();
-            g_DragState.entityId.clear();
+            g_DragState.Active = false;
+            g_DragState.AssetPath.clear();
 
             if (!std::filesystem::exists(droppedPath))
                 return;
@@ -944,8 +932,7 @@ void WebPanel::SetWindow(Platform::Window* window)
         return;
     m_ParentWindow = window;
     // The bind that runs when the panel is first shown may already have looked
-    // for a window and found none — ShowOrActivateWebPanel shows the panel and
-    // only afterwards hands it one. Nothing else calls SetupWebView a second
+    // for a window and found none. Nothing else calls SetupWebView a second
     // time, so without this the panel stays empty for the rest of the session.
     if (m_ParentWindow)
         SetupWebView();

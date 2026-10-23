@@ -1,4 +1,9 @@
 #include "ECSModules/Rendering/Systems/RenderExtractionSystem.h"
+#include "Components/Rendering/Ocean.h"
+#include "Components/Rendering/RenderSorting.h"
+#include "Components/Hierarchy.h"
+#include "Engine/Rendering/RenderSorting.h"
+#include "Engine/Rendering/SortingLayers.h"
 #include "ECS/Components.h"
 #include "ECS/Entity.h"
 #include "ECS/OrderedHandleSet.h"
@@ -34,12 +39,11 @@
 #include "Components/Rendering/MorphTargetWeights.h"
 #include "Components/Rendering/SkinnedMeshRenderer.h"
 #include "Components/Rendering/SkyEnvironment.h"
-#include "Components/Rendering/Ocean.h"
 #include "ECSModules/Rendering/SkeletonStore.h"
 #include "GPUFogParticles/GPUFogParticlesMaterial.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Logger/Logger.h"
-#include "Ocean/OceanRenderFeature.h"
+#include "Platform/Environment.h"
 #include "Rendering/Core/GPUScene.h"
 #include "Rendering/Core/GPUInstanceWorldKey.h"
 #include "Rendering/Core/HashUtils.h"
@@ -69,60 +73,30 @@ namespace
 
 inline bool IsFrameTraceEnabled()
 {
-    static bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_FRAME_TRACE");
-        if (!env || !*env)
-        {
-            return false;
-        }
-
-        // Treat "0" as explicit off; anything else enables tracing.
-        return !(env[0] == '0' && env[1] == '\0');
-    }();
+    static bool s_Enabled = GameEngine::Platform::EnvironmentSwitchEnabled("GE_FRAME_TRACE", false);
     return s_Enabled;
 }
 
 inline bool IsLightDiagEnabled()
 {
-    static bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_RENDER_DIAG_LIGHTS");
-        if (!env || !*env)
-        {
-            return false;
-        }
-        return !(env[0] == '0' && env[1] == '\0');
-    }();
+    static bool s_Enabled = GameEngine::Platform::EnvironmentSwitchEnabled("GE_RENDER_DIAG_LIGHTS", false);
     return s_Enabled;
 }
 
 inline bool IsExtractionDiagEnabled()
 {
-    static bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_RENDER_DIAG_WORLD_DRAW_VALUES");
-        if (!env || !*env)
-            return false;
-        return !(env[0] == '0' && env[1] == '\0');
-    }();
+    static bool s_Enabled = GameEngine::Platform::EnvironmentSwitchEnabled("GE_RENDER_DIAG_WORLD_DRAW_VALUES", false);
     return s_Enabled;
 }
 
 // Fusion S3 lane selector: the dirty-feed fast path is the default;
-// GE_EXTRACTION_FEED=0 pins the full lane (ON-unless-"0", the standard
-// flag idiom — unset/empty/non-"0" all mean ON). Process-static latch —
+// GE_EXTRACTION_FEED=0 pins the full lane (unset or empty means ON).
+// Process-static latch —
 // unit tests select the lane through the constructor bool seam instead of
 // per-fixture env pins (the flip arc's G1 lesson).
 inline bool IsExtractionFeedEnabled()
 {
-    static bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_EXTRACTION_FEED");
-        if (!env || !*env)
-            return true;
-        return !(env[0] == '0' && env[1] == '\0');
-    }();
+    static bool s_Enabled = GameEngine::Platform::EnvironmentSwitchEnabled("GE_EXTRACTION_FEED", true);
     return s_Enabled;
 }
 
@@ -246,6 +220,7 @@ struct RenderExtractionParallelState
         const Material* material = nullptr;
         uint32 flags = 0u;
         RenderLayerMask renderLayerMask = RenderLayerMask::None();
+        RenderSortingData Sorting{};
         uint32 stableInstanceIndex = 0xFFFFFFFFu;    // Update/Skip emission index
         // Mover qualification needs both palette endpoints, and Skip carries no
         // payload to read the current one from.
@@ -290,12 +265,14 @@ struct RenderExtractionParallelState
     std::vector<Prepared> prepared;   // index-aligned with m_Records
     std::vector<ChunkResult> chunks;  // one per chunk
 
-    // Fast-frame reads are resolved under one world lock. No structural writes
+    // Fast-frame reads, and the MeshGPUData grants of the rows the lane
+    // patches, are each resolved under one world lock. No structural writes
     // occur on this lane, so these pointers remain valid through serial apply.
     using DirtyRead = std::tuple<const Components::WorldTransform*,
                                  const Components::MeshGPUData*,
                                  const Components::MeshRenderer*>;
     std::vector<DirtyRead> dirtyReads;
+    std::vector<Components::MeshGPUData*> dirtyGrants; // index-aligned with dirtyReads
     // Patch-lane scratch, index-aligned with dirtyReads after compaction: each
     // write's GPUScene row, whether it is a frame mover (its prevTransform
     // differs) and its mover record, built where the row is.
@@ -331,15 +308,11 @@ using WorldRenderableRecord = RenderExtractionSystem::WorldRenderableRecord;
 constexpr std::size_t kMaxChangedCasterSpheres = 64u;
 
 // GE_SHADOW_PROXIMITY=0 forces every caster bump unattributed — the pre-L1b
-// world-scoped invalidation (A/B lane and kill switch, standard GE_ flag
-// idiom: ON unless explicitly "0"). Read once; stable for the process.
+// world-scoped invalidation (A/B lane and kill switch, on unless switched
+// off). Read once; stable for the process.
 bool IsShadowProximityKeyingEnabled()
 {
-    static const bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_SHADOW_PROXIMITY");
-        return !env || std::strcmp(env, "0") != 0;
-    }();
+    static const bool s_Enabled = GameEngine::Platform::EnvironmentSwitchEnabled("GE_SHADOW_PROXIMITY", true);
     return s_Enabled;
 }
 
@@ -517,7 +490,8 @@ void BuildGpuInstancePayload(GPUInstance& instance, const float* matrix,
 void EmitSubmissions(std::vector<WorldSubmissionRecord>& subs,
                      const std::vector<const ViewDesc*>& matchingViews,
                      MeshGPUHandle meshHandle, const Material* material,
-                     uint32 instanceIndex, uint32 flags, RenderLayerMask renderLayers)
+                     uint32 instanceIndex, uint32 flags, RenderLayerMask renderLayers,
+                     const RenderSortingData& sorting, ECS::EntityHandle sortingOwner)
 {
     for (const ViewDesc* view : matchingViews)
     {
@@ -530,6 +504,8 @@ void EmitSubmissions(std::vector<WorldSubmissionRecord>& subs,
         sub.instanceIndex = instanceIndex;
         sub.renderLayerMask = renderLayers;
         sub.flags = flags;
+        sub.Sorting = sorting;
+        sub.SortingOwner = sortingOwner;
         subs.push_back(sub);
     }
 }
@@ -539,14 +515,23 @@ void EmitSubmissions(std::vector<WorldSubmissionRecord>& subs,
 uint64 RecordDigestTerm(const WorldRenderableRecord& rec)
 {
     using ::GameEngine::Rendering::HashUtils::HashValue;
-    constexpr uint64 kFnvOffsetBasis = 14695981039346656037ull;
-    uint64 recDigest = HashValue(kFnvOffsetBasis, rec.meshRenderer.meshGpuHandleId);
+    uint64 recDigest = HashValue(Hashing::kFnv1a64OffsetBasis, rec.meshRenderer.meshGpuHandleId);
     recDigest = HashValue(recDigest, rec.meshRenderer.materialAssetGuid);
     recDigest = HashValue(recDigest, rec.meshRenderer.castShadows);
     recDigest = HashValue(recDigest, rec.meshRenderer.RenderLayers.Bits);
     // In the digest or a live toggle does nothing until an unrelated field
     // happens to re-arm extraction.
     recDigest = HashValue(recDigest, rec.giEmitter);
+    if (rec.Sorting.Authored)
+    {
+        recDigest = HashValue(recDigest, rec.Sorting.Layer);
+        recDigest = HashValue(recDigest, rec.Sorting.Order);
+        recDigest = HashValue(recDigest, rec.Sorting.Group.id);
+        recDigest = HashValue(recDigest, rec.Sorting.MemberOrder);
+        if (rec.Sorting.Grouped)
+            for (const float coordinate : rec.Sorting.GroupPosition)
+                recDigest = HashValue(recDigest, coordinate);
+    }
     return recDigest;
 }
 
@@ -580,9 +565,16 @@ auto RenderableQuery(ECS::World& world)
 // it now would draw it at the origin and give its next frame a motion vector
 // from there; the pending count (E8) brings it in next frame.
 template <typename QueryT>
-void AppendRenderableRecords(QueryT& query, std::vector<WorldRenderableRecord>& out, uint32& hlodSkipped,
-                             uint32& pendingUnresolved)
+void AppendRenderableRecords(ECS::World& world, QueryT& query,
+                             const Rendering::SortingLayers& sortingLayers,
+                             std::vector<WorldRenderableRecord>& out, uint32& hlodSkipped, uint32& pendingUnresolved)
 {
+    const bool hasSorting = world.Query<ECS::Read<Components::RenderSorting>>().Count() != 0;
+    bool hasSortingGroups = false;
+    if (hasSorting)
+        world.Query<ECS::Read<Components::RenderSorting>>().Each(
+            [&](const Components::RenderSorting& sorting) { hasSortingGroups |= sorting.GroupChildren; });
+    const int32 defaultSortingPriority = sortingLayers.Priority(0);
     query.Each([&](ECS::EntityHandle e, const Components::WorldTransform& xf,
                    const Components::MeshRenderer& mr, const Components::LocalBounds* wb,
                    const Components::WorldSectorCoord* sc, const Components::SkinnedMeshRenderer* smr,
@@ -602,6 +594,9 @@ void AppendRenderableRecords(QueryT& query, std::vector<WorldRenderableRecord>& 
                    }
                    WorldRenderableRecord rec{};
                    rec.entity = e;
+                   rec.Sorting.Layer = defaultSortingPriority;
+                   if (hasSorting)
+                       rec.Sorting = ResolveRenderSorting(world, e, sortingLayers, hasSortingGroups);
                    rec.worldTransform = xf;
                    rec.meshRenderer = mr;
                    rec.giEmitter = giEmitter != nullptr;
@@ -800,6 +795,7 @@ void PrepareRecord(const WorldRenderableRecord& rec,
     out.material = material;
     out.flags = flags;
     out.renderLayerMask = rec.meshRenderer.RenderLayers;
+    out.Sorting = rec.Sorting;
     out.skinPaletteOffset = paletteOffsets.Current;
     out.prevSkinPaletteOffset = paletteOffsets.Previous;
 
@@ -810,7 +806,7 @@ void PrepareRecord(const WorldRenderableRecord& rec,
         out.stableInstanceIndex = meshGpu->instanceIndex;
         const std::size_t emittedBefore = cr.subs.size();
         EmitSubmissions(cr.subs, matchingViews, meshHandle, material,
-                        meshGpu->instanceIndex, flags, rec.meshRenderer.RenderLayers);
+                        meshGpu->instanceIndex, flags, rec.meshRenderer.RenderLayers, rec.Sorting, rec.entity);
         out.subCount = static_cast<uint32>(cr.subs.size() - emittedBefore);
         return;
     }
@@ -857,7 +853,7 @@ void PrepareRecord(const WorldRenderableRecord& rec,
                     boundsRadius, secX, secY, secZ, prevDiffers);
     const std::size_t emittedBefore = cr.subs.size();
     EmitSubmissions(cr.subs, matchingViews, meshHandle, material,
-                    meshGpu->instanceIndex, flags, rec.meshRenderer.RenderLayers);
+                    meshGpu->instanceIndex, flags, rec.meshRenderer.RenderLayers, rec.Sorting, rec.entity);
     out.subCount = static_cast<uint32>(cr.subs.size() - emittedBefore);
 }
 
@@ -932,7 +928,8 @@ void ResolveDirtyReads(const ECS::World& world, std::span<const ECS::EntityHandl
 // writes only the writes' own slots and their entities' MeshGPUData, so
 // disjoint ranges run concurrently; GPUScene is not written here.
 void BuildPatchedInstances(std::span<const RenderExtractionParallelState::DirtyRead> reads,
-                           const GPUScene& scene, std::span<GPUScene::InstanceWrite> writes,
+                           std::span<Components::MeshGPUData* const> grants, const GPUScene& scene,
+                           std::span<GPUScene::InstanceWrite> writes,
                            std::span<uint8_t> isMover,
                            std::span<RenderServices::FrameMoverRecord> moverRecords,
                            std::size_t begin, std::size_t end)
@@ -940,9 +937,10 @@ void BuildPatchedInstances(std::span<const RenderExtractionParallelState::DirtyR
     const std::vector<GPUInstance>& rows = scene.GetInstances();
     for (std::size_t i = begin; i < end; ++i)
     {
-        const auto& [wt, mgRead, mr] = reads[i];
-        // Granted before the build (StampComponentWriteBatch); see PatchDirtyInstances.
-        auto* meshGpu = const_cast<Components::MeshGPUData*>(mgRead);
+        const Components::WorldTransform* wt = std::get<0>(reads[i]);
+        const Components::MeshRenderer* mr = std::get<2>(reads[i]);
+        // Granted before the build (GetComponentsBatchForWrite); see PatchDirtyInstances.
+        Components::MeshGPUData* meshGpu = grants[i];
         // Every non-transform GPUInstance input lives in the Last* caches
         // (D2); their inputs either escalate (E5/E6/E7) or live in the
         // always-refresh subset, so on a fast frame they are current.
@@ -1138,7 +1136,7 @@ void ProcessRecordsParallel(
         case Op::Add:
             prep.meshGpu->instanceIndex = scene.AddInstance(prep.payload);
             EmitSubmissions(submissions, matchingViews, prep.meshHandle, prep.material,
-                            prep.meshGpu->instanceIndex, prep.flags, prep.renderLayerMask);
+                            prep.meshGpu->instanceIndex, prep.flags, prep.renderLayerMask, prep.Sorting, prep.entity);
             break;
         }
     }
@@ -1374,6 +1372,7 @@ SettingsBlendGroupMask SpatialBlendGroups(const PostProcessExtractedVolume& volu
     groups.Set(SettingsBlendGroup::VolumetricFog, volume.HasVolumetricFog);
     groups.Set(SettingsBlendGroup::AtmosphericCloud, volume.HasAtmosphericCloud);
     groups.Set(SettingsBlendGroup::VolumetricClouds, volume.HasVolumetricClouds);
+    groups.Set(SettingsBlendGroup::Rain, volume.Settings.RainSettingsActive != 0);
     return groups;
 }
 
@@ -1515,6 +1514,212 @@ void ExtractNightTint(const Components::PostProcessVolume& volume, PostProcessSe
     settings.NightTintG = color[1] / luminance;
     settings.NightTintB = color[2] / luminance;
 }
+
+// Unit axes and half extents of the volume's oriented box from its world
+// matrix; a zero-length axis marks the volume spatially invalid.
+void SetVolumeOrientedBounds(PostProcessExtractedVolume& ev, const float* mtx)
+{
+    const float ax[3] = {mtx[0], mtx[1], mtx[2]};
+    const float ay[3] = {mtx[4], mtx[5], mtx[6]};
+    const float az[3] = {mtx[8], mtx[9], mtx[10]};
+    const float sx = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+    const float sy = std::sqrt(ay[0] * ay[0] + ay[1] * ay[1] + ay[2] * ay[2]);
+    const float sz = std::sqrt(az[0] * az[0] + az[1] * az[1] + az[2] * az[2]);
+    if (sx <= 0.0f || sy <= 0.0f || sz <= 0.0f)
+    {
+        ev.ValidSpatial = false;
+    }
+    else
+    {
+        const float invSx = 1.0f / sx;
+        const float invSy = 1.0f / sy;
+        const float invSz = 1.0f / sz;
+
+        ev.AxisX[0] = ax[0] * invSx; ev.AxisX[1] = ax[1] * invSx; ev.AxisX[2] = ax[2] * invSx;
+        ev.AxisY[0] = ay[0] * invSy; ev.AxisY[1] = ay[1] * invSy; ev.AxisY[2] = ay[2] * invSy;
+        ev.AxisZ[0] = az[0] * invSz; ev.AxisZ[1] = az[1] * invSz; ev.AxisZ[2] = az[2] * invSz;
+        ev.HalfExtents[0] = sx * 0.5f;
+        ev.HalfExtents[1] = sy * 0.5f;
+        ev.HalfExtents[2] = sz * 0.5f;
+    }
+}
+
+PostProcessExtractedVolume ExtractVolumeFromEntity(
+    ECS::World& world, GameEngine::ECS::EntityHandle eHandle,
+    const GameEngine::Components::PostProcessVolume& vol,
+    const GameEngine::Components::WorldTransform& xf,
+    std::span<const GameEngine::Rendering::PostProcessEffectDescriptor* const> effectHooks,
+    const PostProcessExtractContext& extractCtx)
+{
+    PostProcessExtractedVolume ev{};
+    ev.Priority = vol.Priority;
+    ev.BaseWeight = vol.Weight;
+    ev.VolumeLayers = vol.VolumeLayers;
+    ev.IsGlobal = vol.IsGlobal;
+    ev.Shape = static_cast<int32>(vol.Shape);
+    ev.BlendDistance = vol.BlendDistance;
+    ev.Center[0] = xf.matrix[12];
+    ev.Center[1] = xf.matrix[13];
+    ev.Center[2] = xf.matrix[14];
+    // Exposure is not a volume property — it belongs to the camera (the sensor), applied
+    // per-view below, or to the world default for camera-less views. Volumes contribute
+    // only grading / tonemap / bloom / fog.
+    ev.Settings.Look           = static_cast<int32>(vol.Look);
+    ExtractNightTint(vol, ev.Settings);
+    ev.ValidSpatial = true;
+
+    SetVolumeOrientedBounds(ev, xf.matrix);
+
+    // Per-effect folds live on the effect registrations
+    // (PostProcessEffectDescriptors.cpp). NeutralizeSettings runs
+    // for every volume (baselines effects whose struct defaults
+    // are not authored-off); Extract folds the component when
+    // present + enabled. Hook order = registration order — the
+    // shared fog-glow merge depends on it.
+    for (const auto* effectDesc : effectHooks)
+    {
+        if (effectDesc->NeutralizeSettings)
+            effectDesc->NeutralizeSettings(ev.Settings);
+        if (effectDesc->Extract)
+            effectDesc->Extract(world, eHandle, extractCtx, ev);
+    }
+    return ev;
+}
+
+// Sorts the volumes by priority and publishes the world-level blend, as seen
+// from the first camera registered for this world.
+void PublishWorldPostProcessSettings(std::vector<PostProcessExtractedVolume>& volumes, uint64 worldId,
+                                     RenderServices* rs)
+{
+    if (volumes.empty())
+    {
+        // No active volumes: ensure defaults are applied (clears any stale settings from prior frames).
+        // Still stamp the default Auto sensor so camera-less views (the editor Scene View) auto-meter
+        // even with zero volumes, matching the resolved-volumes path below.
+        PostProcessSettings worldSettings{};
+        ApplyCameraExposure(worldSettings, ViewRegistry::CameraExposure{});
+        rs->SetWorldPostProcessSettings(worldId, worldSettings);
+        rs->SetWorldVolumetricFogVolumes(worldId, {});
+        return;
+    }
+
+    std::stable_sort(volumes.begin(), volumes.end(),
+                     [](const PostProcessExtractedVolume& a, const PostProcessExtractedVolume& b)
+                     { return a.Priority < b.Priority; });
+
+    bool hasWorldCameraPos = false;
+    float worldCameraPos[3] = {0.0f, 0.0f, 0.0f};
+    const auto& views = rs->Views().GetViews();
+    for (const auto& view : views)
+    {
+        if (view.worldId != 0 && view.worldId != worldId)
+            continue;
+        const auto* cam = rs->Views().FindCameraData(view.cameraId);
+        if (!cam)
+            continue;
+        worldCameraPos[0] = cam->cameraPos[0];
+        worldCameraPos[1] = cam->cameraPos[1];
+        worldCameraPos[2] = cam->cameraPos[2];
+        hasWorldCameraPos = true;
+        break;
+    }
+
+    ResolvedVolumeStack worldStack =
+        ResolveVolumeStack(volumes, worldCameraPos, hasWorldCameraPos, std::nullopt);
+    // Directional shadows are world-global, so the dominant spatially
+    // contributing volume carrying a ShadowSettingsEffect wins.
+    if (worldStack.ShadowVolume)
+        rs->SetWorldShadowSettings(worldId, worldStack.ShadowVolume->ShadowSettings);
+    // Exposure is not a volume property; camera-less views (the editor Scene View, which re-derives
+    // from the world settings) expose from the world default. Stamp the default Auto sensor onto
+    // the blended world settings so a scene with post-processing auto-meters even though no volume
+    // carries exposure. Camera-driven views override this per-view from their own sensor below.
+    PostProcessSettings worldSettings = worldStack.Any ? worldStack.Settings : PostProcessSettings{};
+    ApplyCameraExposure(worldSettings, ViewRegistry::CameraExposure{});
+    rs->SetWorldPostProcessSettings(worldId, worldSettings);
+    rs->SetWorldVolumetricFogVolumes(worldId, std::move(worldStack.FogVolumes));
+}
+
+// Per-view filtering: views whose camera registered volume layers via
+// CameraSystem get a filtered blend that only includes volumes whose
+// VolumeLayers intersect the camera's. Views without registered
+// volume layers (e.g. the editor Scene View, which manages its own override) are
+// left untouched and fall back to the world-level settings.
+void PublishViewPostProcessOverrides(std::span<const PostProcessExtractedVolume> volumes, uint64 worldId,
+                                     RenderServices* rs)
+{
+    const auto& views = rs->Views().GetViews();
+    for (const auto& view : views)
+    {
+        if (view.worldId != 0 && view.worldId != worldId)
+            continue;
+        if (view.cameraId == 0)
+            continue;
+        if (!rs->Views().HasCameraVolumeLayers(view.cameraId))
+            continue;
+
+        const RenderLayerMask cameraMask = rs->Views().GetCameraVolumeLayers(view.cameraId);
+        const auto* cam = rs->Views().FindCameraData(view.cameraId);
+        const bool hasViewCameraPos = (cam != nullptr);
+        float viewCameraPos[3] = {0.0f, 0.0f, 0.0f};
+        if (cam)
+        {
+            viewCameraPos[0] = cam->cameraPos[0];
+            viewCameraPos[1] = cam->cameraPos[1];
+            viewCameraPos[2] = cam->cameraPos[2];
+        }
+
+        ResolvedVolumeStack viewStack =
+            ResolveVolumeStack(volumes, viewCameraPos, hasViewCameraPos, cameraMask);
+        PostProcessSettings perView = viewStack.Settings;
+        const bool any = viewStack.Any;
+
+        // The camera owns its exposure: if this view's camera registered one, it sets the view's
+        // exposure (volumes no longer carry exposure). With no contributing volume we still publish
+        // an override so the camera exposure applies, starting from the world grade so global
+        // post-fx is kept.
+        const ViewRegistry::CameraExposure* camExp = rs->Views().FindCameraExposure(view.cameraId);
+        if (camExp)
+        {
+            if (!any)
+            {
+                perView = rs->GetWorldPostProcessSettings(worldId);
+                // The world grade stays as the baseline, but exposure modifiers are
+                // per-volume contributions: a camera whose mask matched no volume must
+                // not inherit them from the mask-ignoring world blend.
+                perView.ExposureCompensationEv = 0.0f;
+                perView.ExposureClampMinEv = kExposureClampNoOpMinEv;
+                perView.ExposureClampMaxEv = kExposureClampNoOpMaxEv;
+                perView.ExposureClampMinWeight = 0.0f;
+                perView.ExposureClampMaxWeight = 0.0f;
+            }
+            ApplyCameraExposure(perView, *camExp);
+        }
+        else if (any)
+        {
+            // Masked but camera-less view (e.g. the bookmark preview): the contributing volume
+            // carries only grading, so stamp the world-default Auto sensor instead of leaving the
+            // static Exposure=1.0 default, which would blow the preview out under physical lighting.
+            ApplyCameraExposure(perView, ViewRegistry::CameraExposure{});
+        }
+
+        if (any)
+        {
+            rs->Views().SetViewPostProcessOverride(view.id, perView);
+            rs->Views().SetViewVolumetricFogVolumesOverride(view.id, std::move(viewStack.FogVolumes));
+        }
+        else if (camExp)
+        {
+            rs->Views().SetViewPostProcessOverride(view.id, perView);
+            rs->Views().ClearViewVolumetricFogVolumesOverride(view.id);
+        }
+        else
+        {
+            rs->Views().ClearViewPostProcessOverride(view.id);
+            rs->Views().ClearViewVolumetricFogVolumesOverride(view.id);
+        }
+    }
+}
 } // namespace
 
 void RenderExtractionSystem::ExtractPostProcessVolumes(ECS::World& world, uint64 worldId, RenderServices* rs)
@@ -1544,193 +1749,11 @@ void RenderExtractionSystem::ExtractPostProcessVolumes(ECS::World& world, uint64
                   const GameEngine::Components::PostProcessVolume& vol,
                   const GameEngine::Components::WorldTransform& xf)
               {
-                  PostProcessExtractedVolume ev{};
-                  ev.Priority = vol.Priority;
-                  ev.BaseWeight = vol.Weight;
-                  ev.VolumeLayers = vol.VolumeLayers;
-                  ev.IsGlobal = vol.IsGlobal;
-                  ev.Shape = static_cast<int32>(vol.Shape);
-                  ev.BlendDistance = vol.BlendDistance;
-                  ev.Center[0] = xf.matrix[12];
-                  ev.Center[1] = xf.matrix[13];
-                  ev.Center[2] = xf.matrix[14];
-                  // Exposure is not a volume property — it belongs to the camera (the sensor), applied
-                  // per-view below, or to the world default for camera-less views. Volumes contribute
-                  // only grading / tonemap / bloom / fog.
-                  ev.Settings.Look           = static_cast<int32>(vol.Look);
-                  ExtractNightTint(vol, ev.Settings);
-                  ev.ValidSpatial = true;
+                  m_Volumes.push_back(ExtractVolumeFromEntity(world, eHandle, vol, xf, effectHooks, extractCtx));
+              });
 
-                  const float* mtx = xf.matrix;
-                  const float ax[3] = {mtx[0], mtx[1], mtx[2]};
-                  const float ay[3] = {mtx[4], mtx[5], mtx[6]};
-                  const float az[3] = {mtx[8], mtx[9], mtx[10]};
-                  const float sx = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
-                  const float sy = std::sqrt(ay[0] * ay[0] + ay[1] * ay[1] + ay[2] * ay[2]);
-                  const float sz = std::sqrt(az[0] * az[0] + az[1] * az[1] + az[2] * az[2]);
-                  if (sx <= 0.0f || sy <= 0.0f || sz <= 0.0f)
-                  {
-                      ev.ValidSpatial = false;
-                  }
-                  else
-                  {
-                      const float invSx = 1.0f / sx;
-                      const float invSy = 1.0f / sy;
-                      const float invSz = 1.0f / sz;
-
-                      ev.AxisX[0] = ax[0] * invSx; ev.AxisX[1] = ax[1] * invSx; ev.AxisX[2] = ax[2] * invSx;
-                      ev.AxisY[0] = ay[0] * invSy; ev.AxisY[1] = ay[1] * invSy; ev.AxisY[2] = ay[2] * invSy;
-                      ev.AxisZ[0] = az[0] * invSz; ev.AxisZ[1] = az[1] * invSz; ev.AxisZ[2] = az[2] * invSz;
-                      ev.HalfExtents[0] = sx * 0.5f;
-                      ev.HalfExtents[1] = sy * 0.5f;
-                      ev.HalfExtents[2] = sz * 0.5f;
-                  }
-
-                  // Per-effect folds live on the effect registrations
-                  // (PostProcessEffectDescriptors.cpp). NeutralizeSettings runs
-                  // for every volume (baselines effects whose struct defaults
-                  // are not authored-off); Extract folds the component when
-                  // present + enabled. Hook order = registration order — the
-                  // shared fog-glow merge depends on it.
-                  for (const auto* effectDesc : effectHooks)
-                  {
-                      if (effectDesc->NeutralizeSettings)
-                          effectDesc->NeutralizeSettings(ev.Settings);
-                      if (effectDesc->Extract)
-                          effectDesc->Extract(world, eHandle, extractCtx, ev);
-                  }
-
-                  m_Volumes.push_back(ev); });
-
-    if (m_Volumes.empty())
-    {
-        // No active volumes: ensure defaults are applied (clears any stale settings from prior frames).
-        // Still stamp the default Auto sensor so camera-less views (the editor Scene View) auto-meter
-        // even with zero volumes, matching the resolved-volumes path below.
-        PostProcessSettings worldSettings{};
-        ApplyCameraExposure(worldSettings, ViewRegistry::CameraExposure{});
-        rs->SetWorldPostProcessSettings(worldId, worldSettings);
-        rs->SetWorldVolumetricFogVolumes(worldId, {});
-    }
-    else
-    {
-        std::stable_sort(m_Volumes.begin(), m_Volumes.end(),
-                         [](const PostProcessExtractedVolume& a, const PostProcessExtractedVolume& b)
-                         { return a.Priority < b.Priority; });
-
-        bool hasWorldCameraPos = false;
-        float worldCameraPos[3] = {0.0f, 0.0f, 0.0f};
-        const Rendering::CameraData* worldCamData = nullptr;
-        const auto& views = rs->Views().GetViews();
-        for (const auto& view : views)
-        {
-            if (view.worldId != 0 && view.worldId != worldId)
-                continue;
-            const auto* cam = rs->Views().FindCameraData(view.cameraId);
-            if (!cam)
-                continue;
-            worldCameraPos[0] = cam->cameraPos[0];
-            worldCameraPos[1] = cam->cameraPos[1];
-            worldCameraPos[2] = cam->cameraPos[2];
-            worldCamData = cam;
-            hasWorldCameraPos = true;
-            break;
-        }
-
-        ResolvedVolumeStack worldStack =
-            ResolveVolumeStack(m_Volumes, worldCameraPos, hasWorldCameraPos, std::nullopt);
-        // Directional shadows are world-global, so the dominant spatially
-        // contributing volume carrying a ShadowSettingsEffect wins.
-        if (worldStack.ShadowVolume)
-            rs->SetWorldShadowSettings(worldId, worldStack.ShadowVolume->ShadowSettings);
-        // Exposure is not a volume property; camera-less views (the editor Scene View, which re-derives
-        // from the world settings) expose from the world default. Stamp the default Auto sensor onto
-        // the blended world settings so a scene with post-processing auto-meters even though no volume
-        // carries exposure. Camera-driven views override this per-view from their own sensor below.
-        PostProcessSettings worldSettings = worldStack.Any ? worldStack.Settings : PostProcessSettings{};
-        ApplyCameraExposure(worldSettings, ViewRegistry::CameraExposure{});
-        rs->SetWorldPostProcessSettings(worldId, worldSettings);
-        rs->SetWorldVolumetricFogVolumes(worldId, std::move(worldStack.FogVolumes));
-    }
-
-    // Per-view filtering: views whose camera registered volume layers via
-    // CameraSystem get a filtered blend that only includes volumes whose
-    // VolumeLayers intersect the camera's. Views without registered
-    // volume layers (e.g. the editor Scene View, which manages its own override) are
-    // left untouched and fall back to the world-level settings.
-    {
-        const auto& views = rs->Views().GetViews();
-        for (const auto& view : views)
-        {
-            if (view.worldId != 0 && view.worldId != worldId)
-                continue;
-            if (view.cameraId == 0)
-                continue;
-            if (!rs->Views().HasCameraVolumeLayers(view.cameraId))
-                continue;
-
-            const RenderLayerMask cameraMask = rs->Views().GetCameraVolumeLayers(view.cameraId);
-            const auto* cam = rs->Views().FindCameraData(view.cameraId);
-            const bool hasViewCameraPos = (cam != nullptr);
-            float viewCameraPos[3] = {0.0f, 0.0f, 0.0f};
-            if (cam)
-            {
-                viewCameraPos[0] = cam->cameraPos[0];
-                viewCameraPos[1] = cam->cameraPos[1];
-                viewCameraPos[2] = cam->cameraPos[2];
-            }
-
-            ResolvedVolumeStack viewStack =
-                ResolveVolumeStack(m_Volumes, viewCameraPos, hasViewCameraPos, cameraMask);
-            PostProcessSettings perView = viewStack.Settings;
-            const bool any = viewStack.Any;
-
-            // The camera owns its exposure: if this view's camera registered one, it sets the view's
-            // exposure (volumes no longer carry exposure). With no contributing volume we still publish
-            // an override so the camera exposure applies, starting from the world grade so global
-            // post-fx is kept.
-            const ViewRegistry::CameraExposure* camExp = rs->Views().FindCameraExposure(view.cameraId);
-            if (camExp)
-            {
-                if (!any)
-                {
-                    perView = rs->GetWorldPostProcessSettings(worldId);
-                    // The world grade stays as the baseline, but exposure modifiers are
-                    // per-volume contributions: a camera whose mask matched no volume must
-                    // not inherit them from the mask-ignoring world blend.
-                    perView.ExposureCompensationEv = 0.0f;
-                    perView.ExposureClampMinEv = kExposureClampNoOpMinEv;
-                    perView.ExposureClampMaxEv = kExposureClampNoOpMaxEv;
-                    perView.ExposureClampMinWeight = 0.0f;
-                    perView.ExposureClampMaxWeight = 0.0f;
-                }
-                ApplyCameraExposure(perView, *camExp);
-            }
-            else if (any)
-            {
-                // Masked but camera-less view (e.g. the bookmark preview): the contributing volume
-                // carries only grading, so stamp the world-default Auto sensor instead of leaving the
-                // static Exposure=1.0 default, which would blow the preview out under physical lighting.
-                ApplyCameraExposure(perView, ViewRegistry::CameraExposure{});
-            }
-
-            if (any)
-            {
-                rs->Views().SetViewPostProcessOverride(view.id, perView);
-                rs->Views().SetViewVolumetricFogVolumesOverride(view.id, std::move(viewStack.FogVolumes));
-            }
-            else if (camExp)
-            {
-                rs->Views().SetViewPostProcessOverride(view.id, perView);
-                rs->Views().ClearViewVolumetricFogVolumesOverride(view.id);
-            }
-            else
-            {
-                rs->Views().ClearViewPostProcessOverride(view.id);
-                rs->Views().ClearViewVolumetricFogVolumesOverride(view.id);
-            }
-        }
-    }
+    PublishWorldPostProcessSettings(m_Volumes, worldId, rs);
+    PublishViewPostProcessOverrides(m_Volumes, worldId, rs);
 }
 
 
@@ -1772,10 +1795,30 @@ bool RenderExtractionSystem::EvaluateFastPathPreconditions(ECS::World& world, ui
         reasons |= kEscalationProbeMeshRenderer;
     if (ProbeColumnChanged<Components::LocalBounds>(world, m_ProbeGateLocalBounds, probeVersion))
         reasons |= kEscalationProbeLocalBounds;
-    if (ProbeColumnChanged<Components::WorldSectorCoord>(world, m_ProbeGateSectorCoord, probeVersion))
+    const bool sectorChanged = ProbeColumnChanged<Components::WorldSectorCoord>(world, m_ProbeGateSectorCoord, probeVersion);
+    if (sectorChanged)
         reasons |= kEscalationProbeSectorCoord;
     if (ProbeColumnChanged<Components::LODGroup>(world, m_ProbeGateLodGroup, probeVersion))
         reasons |= kEscalationProbeLodGroup;
+
+    // Authored order changes invalidate cached stationary submissions. Parent and group
+    // transform changes may affect descendants that have no sorting component of their own.
+    const bool sortingChanged = ProbeColumnChanged<Components::RenderSorting>(world, m_ProbeGateSorting, probeVersion);
+    const bool parentsChanged = ProbeColumnChanged<Components::Parent>(world, m_ProbeGateSortingParents, probeVersion);
+    bool groupTransformChanged = false;
+    auto sortingTransforms = world.Query<ECS::Read<Components::RenderSorting>, ECS::Read<Components::WorldTransform>>();
+    sortingTransforms.Changed<Components::WorldTransform>(m_ProbeGateSortingTransforms);
+    sortingTransforms.Each([&](const Components::RenderSorting& sorting, const Components::WorldTransform&)
+                          { groupTransformChanged = groupTransformChanged || sorting.GroupChildren; });
+    m_ProbeGateSortingTransforms.LastRunVersion = probeVersion;
+    const uint64 sortingRevision = m_SortingSnapshotRevision;
+    const bool hasSorting = world.Query<ECS::Read<Components::RenderSorting>>().Count() != 0;
+    if (sortingChanged || groupTransformChanged || ((hasSorting || m_HadSorting) && (parentsChanged || sectorChanged ||
+        m_FrameStructuralVersion != m_FullPassStructuralVersion)) ||
+        sortingRevision != m_SortingRevision)
+        reasons |= kEscalationSorting;
+    m_SortingRevision = sortingRevision;
+    m_HadSorting = hasSorting;
 
     // E6 — mesh registry reload/unregister event since the last consume.
     if (m_MeshReloadPending.exchange(false, std::memory_order_relaxed))
@@ -1851,9 +1894,8 @@ uint64 RenderExtractionSystem::ComputeMaterialDigest() const
     // soak ever shows it mattering.
     using GameEngine::Rendering::HashUtils::Fnv1a64;
     using GameEngine::Rendering::HashUtils::HashValue;
-    constexpr uint64 kFnvOffsetBasis = 14695981039346656037ull;
     auto& materials = m_RenderServices->Materials();
-    uint64 digest = HashValue(kFnvOffsetBasis, materials.MaterialSSBOGeneration());
+    uint64 digest = HashValue(Hashing::kFnv1a64OffsetBasis, materials.MaterialSSBOGeneration());
     const auto depthClasses = materials.MaterialDepthClassSpan();
     digest = HashValue(digest, static_cast<uint64>(depthClasses.size()));
     if (!depthClasses.empty())
@@ -1877,8 +1919,7 @@ RenderExtractionSystem::ComputeViewFingerprints(uint64 worldId) const
     // the OnDemand views out, so that churn is distinguishable from a change
     // to what the Always views draw (IsOnDemandViewChurnOnly).
     using GameEngine::Rendering::HashUtils::HashValue;
-    constexpr uint64 kFnvOffsetBasis = 14695981039346656037ull;
-    ViewFingerprints fingerprints{kFnvOffsetBasis, kFnvOffsetBasis};
+    ViewFingerprints fingerprints{Hashing::kFnv1a64OffsetBasis, Hashing::kFnv1a64OffsetBasis};
     uint32 matchingCount = 0;
     uint32 persistentCount = 0;
     for (const auto& view : m_RenderServices->Views().GetViews())
@@ -2022,11 +2063,11 @@ uint32 RenderExtractionSystem::PatchDirtyInstances(ECS::World& world, GPUScene& 
     }
     m_FeedScratch.resize(writeCount);
     reads.resize(writeCount);
-    // This is the same write-grant contract as GetComponentForWrite, batched
-    // once for the selected entities. The owning World is mutable and the fast
-    // lane performs no structural changes; only these granted pointers are cast.
-    world.StampComponentWriteBatch(m_FeedScratch.data(), writeCount,
-                                   ECS::GetComponentTypeId<Components::MeshGPUData>());
+    // Grant MeshGPUData only for the selected entities, batched: one lock and
+    // one version for the pass. The build below writes through these grants.
+    auto& grants = m_ParallelState->dirtyGrants;
+    grants.resize(writeCount);
+    world.GetComponentsBatchForWrite<Components::MeshGPUData>(std::span{m_FeedScratch}, std::span{grants});
 
     // Build every write's row on the world's pool (inline when it has none),
     // then attribute changed casters against the rows still holding the
@@ -2041,7 +2082,7 @@ uint32 RenderExtractionSystem::PatchDirtyInstances(ECS::World& world, GPUScene& 
     isMover.resize(writeCount);
     moverRecords.resize(writeCount);
     ForkJoinRanges(js, writeCount, [&](std::size_t begin, std::size_t end)
-                   { BuildPatchedInstances(reads, scene, writes, isMover, moverRecords, begin, end); });
+                   { BuildPatchedInstances(reads, grants, scene, writes, isMover, moverRecords, begin, end); });
     for (std::size_t i = 0; i < writeCount && !m_ChangedCasterOverflow; ++i)
         TrackChangedCasterSphere(scene.GetInstances()[writes[i].InstanceIndex], writes[i].Instance);
     scene.UpdateInstances(writes, [js](std::size_t count,
@@ -2276,7 +2317,7 @@ void RenderExtractionSystem::ReleaseUngatheredInstances(ECS::World& world, GPUSc
              GameEngine::ECS::Optional<
                  GameEngine::ECS::ComponentDisabled<GameEngine::Components::MeshRenderer>>>()
         .IncludeDisabled()
-        .Each([&](GameEngine::Components::MeshGPUData& meshGpu,
+        .Each([&](GameEngine::ECS::Writable<GameEngine::Components::MeshGPUData> meshGpu,
                   const GameEngine::Components::MeshRenderer* mr,
                   const GameEngine::ECS::Disabled* disabled,
                   const GameEngine::ECS::DisabledInHierarchy* inactive,
@@ -2284,9 +2325,9 @@ void RenderExtractionSystem::ReleaseUngatheredInstances(ECS::World& world, GPUSc
                       GameEngine::Components::MeshRenderer>* rendererOff)
               {
                   if (!mr)
-                      ReleaseMeshGpuInstance(scene, meshGpu);
+                      ReleaseMeshGpuInstance(scene, meshGpu.Mutable());
                   else if (disabled || inactive || rendererOff)
-                      ClearMeshGpuInstance(scene, meshGpu); });
+                      ClearMeshGpuInstance(scene, meshGpu.Mutable()); });
 }
 
 bool RenderExtractionSystem::IsStructuralDeltaEligible(uint32 reasons) const
@@ -2309,7 +2350,7 @@ bool RenderExtractionSystem::GatherStructuralDeltaRecords(ECS::World& world,
     auto changed = RenderableQuery(world);
     changed.Changed<Components::MeshRenderer, Components::LocalBounds, Components::WorldSectorCoord,
                     Components::LODGroup>(m_ProbeSince);
-    AppendRenderableRecords(changed, out, hlodSkipped, pendingUnresolved);
+    AppendRenderableRecords(world, changed, m_SortingLayers, out, hlodSkipped, pendingUnresolved);
     // An unresolved pose waits for the full lane's pending count (E8).
     if (hlodSkipped != 0 || pendingUnresolved != 0)
         return false;
@@ -2483,6 +2524,16 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
         return;
 
     const uint64 worldId = world.GetWorldId();
+    const uint64 sortingRevision = Rendering::SortingLayers::Revision();
+    if (sortingRevision != m_SortingSnapshotRevision)
+    {
+        m_SortingLayers = Rendering::SortingLayers::Current();
+        m_SortingSnapshotRevision = sortingRevision;
+    }
+    ExtractPostProcessVolumes(world, worldId, rs);
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.AfterWorldExtraction)
+            hooks.AfterWorldExtraction(*rs, worldId);
 
     // prevTransform settle discipline: the LastPrevDiffers settle rebuild may
     // fire only on the FIRST extraction run of a feed swap window — a
@@ -2510,7 +2561,6 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
     uint32_t skippedCount = 0;
     uint32_t recordCountOut = 0;
     uint32_t submissionCountOut = 0;
-    uint32_t oceanCountOut = 0;
     const auto elapsedMs = [](ExtractionClock::time_point a, ExtractionClock::time_point b)
     { return std::chrono::duration<double, std::milli>(b - a).count(); };
 
@@ -2562,7 +2612,7 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
     // Fast and delta frames skip CLEANUP: disable/removal transitions are E4/E5
     // triggers the fast lane escalates on and the delta lane's count check
     // sends to the full lane, so tombstoning happens on the full-lane frame
-    // (Q3) — and the O(N) Write<MeshGPUData> grant stops stamping idle chunks.
+    // (Q3) — and the O(N) MeshGPUData cleanup scan stays off those frames.
     if (!fastFrame && !deltaFrame)
         ReleaseUngatheredInstances(world, *scene);
 
@@ -2631,7 +2681,8 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
     }
     lightsMs = elapsedMs(lightsStart, ExtractionClock::now());
 
-    ExtractPostProcessVolumes(world, worldId, rs);
+    if (rs)
+        rs->SetWorldWeatherWind(worldId, WindVolumeResolver::ExtractForGpu(world));
     m_Particles.Extract(world, worldId, rs, deltaTime);
     // Single source of truth: order the world's lights strongest-first after
     // every SubmitLight, the particle lights included, and before any consumer
@@ -2693,8 +2744,7 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
             // renderable still registers as a change. Visibility toggles count
             // as membership by design (a hidden object should leave probe
             // captures); transforms and transient particles are excluded.
-            constexpr uint64 kFnvOffsetBasis = 14695981039346656037ull;
-            uint64 contentDigest = kFnvOffsetBasis;
+            uint64 contentDigest = Hashing::kFnv1a64OffsetBasis;
 
             if (deltaFrame)
             {
@@ -2760,9 +2810,8 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                     submitMs = elapsedMs(submitStart, ExtractionClock::now());
                 }
 
-                // Mesh-membership digest replays from the cache; the ocean
-                // term is genuinely per-frame and re-added below on both
-                // lanes.
+                // Mesh-membership digest replays from the cache; feature
+                // content is added at the publish below, on both lanes.
                 contentDigest = m_CachedMeshDigest;
 
 #if GE_DEBUG_INSTRUMENTATION
@@ -2818,7 +2867,7 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
             uint32_t pendingUnresolvedTransform = 0;
             const auto gatherStart = ExtractionClock::now();
             auto renderables = RenderableQuery(world);
-            AppendRenderableRecords(renderables, records, hlodSkipped, pendingUnresolvedTransform);
+            AppendRenderableRecords(world, renderables, m_SortingLayers, records, hlodSkipped, pendingUnresolvedTransform);
             gatherMs = elapsedMs(gatherStart, ExtractionClock::now());
             recordCountOut = static_cast<uint32_t>(records.size());
 
@@ -2909,8 +2958,8 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
             // rebuilt here, unconditionally, whatever the escalation reason.
             if (m_FeedFastPath)
             {
-                // Mesh-only digest (the per-frame ocean term is re-added on
-                // both lanes below, before the publish).
+                // Mesh-only digest (feature content is added at the publish
+                // below, on both lanes).
                 m_CachedMeshDigest = contentDigest;
                 RebuildAlwaysRefreshSubset(world);
                 m_LastPendingMeshEntry = skipNoMeshEntry;
@@ -2934,25 +2983,9 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
             }
             } // full lane
 
-            // Ocean surfaces are feature-rendered (no MeshRenderer record) but
-            // still change what a probe capture photographs — fold their
-            // presence in so creating or removing an ocean recaptures a "Once"
-            // probe like any other geometry change. Terrain and particle
-            // emitters are NOT covered yet: content rendered by those features
-            // does not reach this digest.
-            {
-                // Arbitrary stable tag for "an ocean renderer".
-                constexpr uint64 kOceanContentTag = 0x0CEA0CEAull;
-                const uint64 oceanTerm =
-                    GameEngine::Rendering::HashUtils::HashValue(kFnvOffsetBasis, kOceanContentTag);
-                world.Query<GameEngine::ECS::Read<GameEngine::Components::OceanRenderer>>()
-                    .Each([&](const GameEngine::Components::OceanRenderer&)
-                          {
-                              contentDigest += oceanTerm;
-                              ++oceanCountOut;
-                          });
-            }
-
+            // Feature-rendered content (ocean, terrain) has no MeshRenderer
+            // record; SetWorldRenderContentDigest adds each feature's
+            // ContentDigest for this world.
             rs->SetWorldRenderContentDigest(worldId, contentDigest);
         }
         else if (m_FeedFastPath)
@@ -3076,7 +3109,9 @@ void RenderExtractionSystem::Update(ECS::World& world, float32 deltaTime)
         stats.LiveParticles = particles.LiveParticles;
         stats.ParticleSimulationMs = particles.SimulationMs;
         stats.VolumeCount = static_cast<uint32_t>(m_Volumes.size());
-        stats.OceanCount = oceanCountOut;
+        // Ocean renderers draw through their own feature, not through a submission.
+        world.Query<GameEngine::ECS::Read<GameEngine::Components::OceanRenderer>>()
+            .Each([&stats](const GameEngine::Components::OceanRenderer&) { ++stats.OceanCount; });
         rs->SetRenderExtractionStats(stats);
     }
 

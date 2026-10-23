@@ -93,16 +93,20 @@ static void FillBlockLayout(const SpvReflectBlockVariable& src, BlockLayout& dst
     }
 }
 
-// SPIR-V storage-image texel format -> engine TextureFormat (the subset the
-// engine's compute shaders declare; extend on contact). 0 = none/unknown.
+// SPIR-V storage-image texel format -> engine TextureFormat: the formats the engine's
+// shaders declare. 0 for an image declared without a format, and for a declared
+// format missing here, which ReflectSpirv refuses: a layout built from 0 would bind
+// a texture of the wrong format.
 static uint32_t ImageFormatToEngineFormat(SpvImageFormat f) {
     switch (f) {
         case SpvImageFormatRgba32f:  return static_cast<uint32_t>(TextureFormat::R32G32B32A32_FLOAT);
         case SpvImageFormatRgba16f:  return static_cast<uint32_t>(TextureFormat::R16G16B16A16_FLOAT);
         case SpvImageFormatR32f:     return static_cast<uint32_t>(TextureFormat::R32_FLOAT);
+        case SpvImageFormatRg32f:    return static_cast<uint32_t>(TextureFormat::R32G32_FLOAT);
         case SpvImageFormatRg16f:    return static_cast<uint32_t>(TextureFormat::R16G16_FLOAT);
         case SpvImageFormatR16f:     return static_cast<uint32_t>(TextureFormat::R16_FLOAT);
         case SpvImageFormatRgba8:    return static_cast<uint32_t>(TextureFormat::RGBA8_UNORM);
+        case SpvImageFormatRgba16:   return static_cast<uint32_t>(TextureFormat::R16G16B16A16_UNORM);
         case SpvImageFormatR11fG11fB10f: return static_cast<uint32_t>(TextureFormat::R11G11B10_FLOAT);
         case SpvImageFormatRgb10A2:  return static_cast<uint32_t>(TextureFormat::RGB10A2_UNORM);
         case SpvImageFormatR32ui:    return static_cast<uint32_t>(TextureFormat::R32_UINT);
@@ -351,8 +355,19 @@ bool ReflectSpirv(ShaderStageKind stage, const uint32_t* words, size_t wordCount
                     ScalarBaseType(*b->type_description) == BaseType::UInt;
                 info.Filtered = filterSampled.count(
                     (static_cast<uint64_t>(s->set) << 32) | b->binding) != 0;
-                if (b->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    info.Format = ImageFormatToEngineFormat(static_cast<SpvImageFormat>(b->image.image_format));
+                if (b->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+                    const auto declared = static_cast<SpvImageFormat>(b->image.image_format);
+                    info.Format = ImageFormatToEngineFormat(declared);
+                    if (info.Format == 0 && declared != SpvImageFormatUnknown) {
+                        if (outError)
+                            *outError = "storage image '" + std::string(b->name ? b->name : "") + "' (set " +
+                                        std::to_string(s->set) + ", binding " + std::to_string(b->binding) +
+                                        ") declares SPIR-V image format " + std::to_string(static_cast<int>(declared)) +
+                                        ", which ImageFormatToEngineFormat does not map; add it there";
+                        spvReflectDestroyShaderModule(&module);
+                        return false;
+                    }
+                }
                 bm.Image = info;
             }
             sm.Bindings.push_back(std::move(bm));

@@ -178,11 +178,6 @@ class CoreCLRHost
                          int32* outResult);
 
     /**
-     * @brief Get runtime information
-     */
-    String GetRuntimeVersion() const;
-
-    /**
      * @brief Preload and atomically swap a script assembly using CoreBridge UCOs (avoids GE_* ABI re-entrancy)
      * Returns true on success.
      */

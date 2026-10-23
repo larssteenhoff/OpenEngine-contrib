@@ -63,28 +63,35 @@ struct OceanSurface
     // Water colors (linear RGBA), shown as swatches with pickers in the inspector.
     // DeepColor = deep-water diffuse base. The shallow/scatter tint is authored via
     // SubSurfaceShallowCol; the sky tint via SkyBase/SkyTowardsSun/SkyAwayFromSun.
+    // @ge-tooltip Base deep-water colour used when depth fog fully hides the refracted scene.
     ColorLinear DeepColor{0.05f, 0.07f, 0.20f, 1.0f};
 
     // Whitecap color (the reference _FoamWhiteColor).
+    // @ge-tooltip Tint of whitecaps, shoreline foam, and intersection foam.
     ColorLinear FoamColor{1.0f, 0.996f, 0.972f, 1.0f};
 
     // Horizontal displacement (choppiness) multiplier. 0 = round swells,
     // 1 = sharp wind-chop crests.
+    // @ge-tooltip Scales horizontal wave displacement. Higher values sharpen crests and wind chop.
     float32 ChoppyScale = 1.0f;
 
     // Fresnel falloff exponent for the reflection blend (higher = reflection
     // concentrated nearer the horizon).
+    // @ge-tooltip Controls how strongly reflection concentrates near grazing viewing angles.
     float32 FresnelPower = 5.0f;
 
     // Sky/planar reflection amount (0 = none, 1 = full). Scales the Fresnel
     // reflection blend (on top of Specular), so you can dial the mirrored sky /
     // planar capture up or down. 1 = the look without this control.
+    // @ge-tooltip Scales sky and planar reflection contribution on the water surface.
     float32 ReflectionStrength = 1.0f;
 
     // Subsurface-scatter (teal glow) intensity (the reference _SubSurfaceBase).
+    // @ge-tooltip Overall intensity of the teal subsurface glow through wave crests.
     float32 SubsurfaceStrength = 1.0f;
 
     // Whitecap coverage scale for the Jacobian/steepness foam.
+    // @ge-tooltip Coverage multiplier for wave-generated whitecaps.
     float32 FoamAmount = 1.0f;
 
     // --- Persistent foam simulation ---
@@ -94,21 +101,26 @@ struct OceanSurface
 
     // Per-second exponential decay of accumulated foam. Lower = foam lingers
     // longer (longer whitecap trails); higher = foam dissipates quickly.
+    // @ge-tooltip How quickly simulated foam decays over time. Lower values leave longer trails.
     float32 FoamFadeRate = 0.8f;
 
     // How much foam a breaking/pinching crest deposits per frame.
+    // @ge-tooltip Amount of foam deposited by breaking or pinching wave crests.
     float32 WaveFoamStrength = 1.0f;
 
     // Jacobian threshold below which a wave is "breaking" and deposits foam.
     // Higher = foam forms more readily (more coverage); lower = only the
     // sharpest folds foam.
+    // @ge-tooltip Breaking threshold for wave foam. Higher values create foam more readily.
     float32 WaveFoamCoverage = 0.55f;
 
     // World tiling (meters) of the bubbly foam surface texture.
+    // @ge-tooltip World tiling scale for the bubble/foam texture pattern.
     float32 FoamScale = 0.25f;
 
     // Softness of the foam coverage/threshold dissolve. Higher feathers whitecap
     // edges into bubbles; lower gives crisper foam borders.
+    // @ge-tooltip Softness of foam edges and threshold transitions.
     float32 FoamFeather = 0.4f;
 
     // --- Wind spray particles ---
@@ -121,6 +133,7 @@ struct OceanSurface
     // Droplets alive at once, per view.
     // @ge-tooltip Most spray droplet clusters alive at once in each view.
     uint32 SprayMaxParticles = 16384u;
+    // @ge-tooltip Minimum wind speed in meters per second before open-water crest spray begins.
     float32 SprayWindThreshold = 9.0f;
     // Crest points tested per second on each square meter of the spawn disk.
     // @ge-tooltip Crest points tested for spray each second, per square meter of the spawn disk.
@@ -130,6 +143,7 @@ struct OceanSurface
     float32 SpraySpawnRadius = 15.0f;
     // Minimum crest score (0..1) required before a droplet detaches. Raise this
     // to restrict spray to the strongest breaking crests.
+    // @ge-tooltip Minimum sampled crest strength required to emit wind spray. Higher values restrict spray to stronger crests.
     float32 SprayEmissionThreshold = 0.08f;
     float32 SprayLifetime = 0.9f;
     float32 SprayStartSize = 0.05f;
@@ -153,11 +167,13 @@ struct OceanSurface
     // Optional user foam-bubble texture. When assigned, the surface samples its red
     // channel for the whitecap bubble pattern instead of the built-in analytic
     // (Worley) foam. Tiled by FoamScale. Empty = procedural foam.
+    // @ge-tooltip Optional texture sampled for foam bubbles. Empty uses procedural foam.
     TextureRef FoamTexture;
 
     // Debug overlay for foam/depth placement. 0 = normal, 1 = combined foam,
     // 2 = wave foam, 3 = shoreline/contact foam, 4 = freshness, 5 = latest deposit,
     // 6 = raw seabed depth ramp, 7 = normalized shallow mask, 8 = invalid/deep tiles.
+    // @ge-tooltip Debug overlay mode for inspecting foam, shoreline, and depth data.
     uint32 FoamDebugMode = 0;
 
     // --- Shoreline foam (driven by the sea-floor depth cascade) ---
@@ -166,75 +182,103 @@ struct OceanSurface
     // shoreline foam appears — full at the waterline (0 m), fading to none at this
     // depth. ShorelineFoamStrength scales how strongly it adds foam. Inert with no
     // tagged seabed (the depth cascade reads deep water everywhere).
+    // @ge-tooltip Seabed depth range where shoreline foam appears and fades out.
     float32 ShorelineFoamMaxDepth = 0.65f;
+    // @ge-tooltip Intensity multiplier for foam along shallow shorelines.
     float32 ShorelineFoamStrength = 2.0f;
 
     // --- Surface normals ---
     // Strength of the high-frequency surface normal detail and its world tiling
     // scale. Strength 0 flattens micro-ripples (mirror); higher sharpens chop.
+    // @ge-tooltip Strength of high-frequency normal detail on the water surface.
     float32 NormalsStrength = 1.0f;
+    // @ge-tooltip World tiling scale of high-frequency water normal detail.
     float32 NormalsScale = 1.0f;
 
     // --- Diffuse scattering (view-weighted) ---
     // The lit surface scatters between a grazing tint (looking across the water)
     // and an up-look tint (looking down into it); DiffuseShadow tints faces the
     // sun doesn't reach. Linear RGBA swatches.
+    // @ge-tooltip Main lit water diffuse/scatter colour.
     ColorLinear Diffuse{0.0f, 0.0027f, 0.17f, 1.0f};
+    // @ge-tooltip Diffuse colour used when viewing across the water at grazing angles.
     ColorLinear DiffuseGrazing{0.0f, 0.0039f, 0.169f, 1.0f};
+    // @ge-tooltip Diffuse tint for water faces with less direct sun.
     ColorLinear DiffuseShadow{0.0f, 0.00135f, 0.085f, 1.0f};
 
     // --- Subsurface scattering ---
     // Shallow-water tint (toward shore; shaped by depth once the depth cascade
     // lands) and the scatter colour the sun lobe pushes through wave crests.
+    // @ge-tooltip Shallow-water tint blended in where the seabed is near the surface.
     ColorLinear SubSurfaceShallowCol{0.42f, 0.75f, 0.69f, 1.0f};
 
     // Depth at which the shallow tint fully fades to deep water (meters), and the
     // shaping exponent of that fade. Inert until the Phase 5 depth cascade.
+    // @ge-tooltip Depth at which shallow-water tint fully fades to deep water.
     float32 SubSurfaceDepthMax = 10.0f;
+    // @ge-tooltip Exponent shaping the shallow-to-deep colour fade.
     float32 SubSurfaceDepthPower = 2.5f;
 
     // Scatter colour, the ambient transmission present everywhere (Base), the
     // forward-scatter lobe gain toward the sun (Sun), and that lobe's falloff.
+    // @ge-tooltip Ambient subsurface scatter colour pushed through the water.
     ColorLinear SubSurfaceColour{0.0885f, 0.497f, 0.456f, 1.0f};
+    // @ge-tooltip Baseline subsurface scatter present across the surface.
     float32 SubSurfaceBase = 0.0f;
+    // @ge-tooltip Forward-scatter lobe intensity toward the sun.
     float32 SubSurfaceSun = 1.7f;
+    // @ge-tooltip Falloff of the sun-facing subsurface scatter lobe.
     float32 SubSurfaceSunFallOff = 5.0f;
 
     // --- Reflection (IOR-driven Schlick Fresnel) ---
     // Reflection intensity (caps the sky blend), microfacet roughness, and the
     // two indices of refraction that set the base reflectance R0.
+    // @ge-tooltip Specular reflection intensity cap.
     float32 Specular = 0.7f;
+    // @ge-tooltip Microfacet roughness for water highlights and reflections.
     float32 Roughness = 0.0f;
+    // @ge-tooltip Index of refraction for air, used with IOR water for Fresnel/refraction.
     float32 IorAir = 1.0f;
+    // @ge-tooltip Index of refraction for water, used for Fresnel and underwater bending.
     float32 IorWater = 1.333f;
 
     // Use a planar reflection capture instead of only the procedural sky. The
     // procedural sky remains the fallback when the capture declines for a frame.
+    // @ge-tooltip Uses a planar reflection capture when available, with sky as fallback.
     bool PlanarReflections = true;
 
     // Blends the planar reflection capture over the procedural reflected sky.
     // 0 keeps the capture running but shows only sky; 1 uses the captured scene;
     // up to 3 over-drives it brighter than the sky for a stronger mirror.
+    // @ge-tooltip Blends the planar reflection capture over the procedural reflected sky.
     float32 PlanarReflectionStrength = 1.0f;
 
     // Resolution scale of the planar reflection capture relative to the main
     // view. 0.5 keeps the previous half-res cost; 1.0 captures at full view size.
+    // @ge-tooltip Resolution scale of the planar reflection capture relative to the main view.
     float32 PlanarReflectionScale = 0.5f;
 
     // --- Procedural sky dome ---
     // The reflected sky: zenith/base colour, the warmer tint toward the sun, and
     // the tint away from it; Directionality steers how sharply they blend.
+    // @ge-tooltip Base/zenith colour of the procedural reflected sky.
     ColorLinear SkyBase{0.09f, 0.19f, 0.34f, 1.0f};
+    // @ge-tooltip Reflected sky tint in the sun direction.
     ColorLinear SkyTowardsSun{0.27f, 0.39f, 0.49f, 1.0f};
+    // @ge-tooltip Reflected sky tint away from the sun.
     ColorLinear SkyAwayFromSun{0.06f, 0.13f, 0.26f, 1.0f};
+    // @ge-tooltip Sharpness of the reflected sky blend around the sun direction.
     float32 SkyDirectionality = 1.0f;
 
     // --- Directional-light glitter ---
     // Tint, boost and falloff of the direct sun glitter spike on the water.
     // White preserves the scene light colour; tint this to colour the bright
     // reflected glints without changing the actual Directional Light.
+    // @ge-tooltip Ocean-only tint for the bright direct sun glitter on the water. White keeps the scene light colour.
     ColorLinear DirectionalLightColor{1.0f, 1.0f, 1.0f, 1.0f};
+    // @ge-tooltip Boost for the sun glitter spike on reflected sky.
     float32 DirectionalLightBoost = 7.0f;
+    // @ge-tooltip Falloff/sharpness of the sun glitter spike.
     float32 DirectionalLightFallOff = 275.0f;
 
     // --- Refraction / depth-fog transparency ---
@@ -246,29 +290,38 @@ struct OceanSurface
     // water-colour falloff). RefractionStrength offsets the screen-space grab UV
     // by the surface normal so ripples distort whatever is below. Authored as a
     // colour swatch for the per-channel densities (the alpha is unused).
+    // @ge-tooltip Per-channel water extinction for refracted and underwater geometry. Higher values fog faster.
     ColorLinear DepthFogDensity{0.9f, 0.3f, 0.35f, 1.0f};
 
     // Falloff shape and distance controls for depth fog. StartDistance keeps the
     // first meters clearer. EndDistance is the authored range for Linear/Smooth;
     // 0 uses an automatic range derived from the density. FalloffPower reshapes
     // the ramp (1 = neutral, >1 = slower near the camera, <1 = faster).
+    // @ge-tooltip Distance curve used by surface refraction fog and the underwater pass.
     OceanDepthFogFalloff DepthFogFalloff = OceanDepthFogFalloff::Exponential;
+    // @ge-tooltip Meters of clear water before depth fog starts to build.
     float32 DepthFogStartDistance = 0.0f;
+    // @ge-tooltip Distance where Linear/Smooth depth fog reaches its authored range. 0 uses an automatic range from density.
     float32 DepthFogEndDistance = 0.0f;
+    // @ge-tooltip Curve shaping for depth fog distance. 1 is neutral; higher values delay fog near the camera.
     float32 DepthFogFalloffPower = 1.0f;
+    // @ge-tooltip Strength of screen-space refraction distortion from surface normals.
     float32 RefractionStrength = 0.5f;
 
     // Reduces sky/planar reflection where shallow refraction is clear, so seabed
     // caustics are not buried by the reflected surface. 0 = no reduction; 1 =
     // current strong shallow-water reduction.
+    // @ge-tooltip Reduces sky and planar reflection only where shallow refraction is clear, keeping seabed caustics visible. 0 leaves reflection unchanged.
     float32 ShallowRefractionReflectionSuppression = 1.0f;
 
     // Shallow clarity window: the depth fog ramps up over the first meters of the
     // view ray's path through the water, so the seabed and its caustics stay
     // readable in the shallows whatever the density. Not applied seen from below.
     // Meters of view-ray path over which the fog ramps to full; shorter brings the deep color in sooner.
+    // @ge-tooltip Meters of view path through the water over which the depth fog ramps up to full strength, keeping the seabed readable in the shallows. Shorter brings the deep color in sooner.
     float32 ShallowClarityDistance = 8.0f;
     // Fraction of the depth fog applied at the surface, where the ramp starts; 1 turns the window off.
+    // @ge-tooltip The fraction of depth fog at the surface (1 = no window), ramping up to full over the clarity distance.
     float32 ShallowClarityFloor = 0.22f;
 
     // --- Underwater caustics ---
@@ -280,34 +333,42 @@ struct OceanSurface
 
     // World tiling (meters) of one caustics texture period — smaller tiles the web
     // tighter (more, smaller cells), larger spreads it out.
+    // @ge-tooltip World tiling size of the caustics pattern. Smaller values make tighter caustics.
     float32 CausticsScale = 5.0f;
 
     // Mean intensity of the caustics web, subtracted so the effect brightens AND
     // darkens the scene around neutral rather than only adding light.
+    // @ge-tooltip Neutral average subtracted from caustics so they can darken as well as brighten.
     float32 CausticsAverage = 0.07f;
 
     // Overall caustic contrast multiplied into the refracted scene colour.
+    // @ge-tooltip Contrast/intensity of the caustics pattern.
     float32 CausticsStrength = 3.2f;
 
     // Seabed distance (meters) at which the caustics are sharpest; the web blurs
     // (lower mip) away from this depth, focusing the effect at one water depth.
+    // @ge-tooltip Water depth where caustics appear sharpest.
     float32 CausticsFocalDepth = 2.0f;
 
     // How quickly caustics blur away from the focal depth. Smaller = a tighter
     // in-focus band; larger keeps caustics crisp across a wider depth range.
+    // @ge-tooltip Depth range over which caustics stay sharp around the focal depth.
     float32 CausticsDepthOfField = 0.33f;
 
     // How strongly a distortion sample bends the caustic lookup UVs (0 = rigid
     // web, higher = more rippling/wobble as if seen through moving water).
+    // @ge-tooltip Amount of ripple distortion applied to procedural caustics UVs.
     float32 CausticsDistortionStrength = 0.16f;
 
     // World tiling (meters) of the distortion sample that warps the caustic UVs.
+    // @ge-tooltip World tiling scale of the caustics distortion sample.
     float32 CausticsDistortionScale = 25.0f;
 
     // Optional user caustics texture. When assigned, the underwater caustics sample
     // this image's red channel instead of the built-in procedural web (and skip the
     // encoded-normal UV distortion, which a plain image has no channel for). Tiled
     // by CausticsScale. Empty = procedural caustics.
+    // @ge-tooltip Optional user caustics texture. Empty uses the procedural caustics web.
     TextureRef CausticsTexture;
 
     // --- Underwater rendering ---
@@ -319,10 +380,12 @@ struct OceanSurface
     // This toggle only enables the effect; the engine still CPU-gates the
     // fullscreen pass to frames where the camera is genuinely submerged. Off
     // keeps the ocean a one-sided above-water surface (no underwater pass).
+    // @ge-tooltip Enables the fullscreen underwater pass when the camera is below the water surface.
     bool Underwater = true;
 
     // Artistic width of the meniscus where the lens crosses the surface.
     // The shader converts it to a pixel-sized band. Zero disables the band.
+    // @ge-tooltip Width of the bright waterline band when the camera crosses the surface.
     float32 MeniscusWidth = 0.05f;
 
     // World-space fade distance (meters) over which the underwater composite blends
@@ -334,14 +397,23 @@ struct OceanSurface
     // screen distortion (lens barrel + waterline pinch), procedural god-ray shafts,
     // and caustics projected onto the submerged seabed (shimmer visible from under
     // the water, not just through the surface). Routed to the pass via the feature.
+    // @ge-tooltip Enables sun light scattering through the underwater view.
     bool UnderwaterInscattering = true;
+    // @ge-tooltip Intensity of underwater in-scattered light.
     float32 InscatterStrength = 1.0f;
+    // @ge-tooltip Anisotropy of underwater scattering. Higher values push light forward toward the sun direction.
     float32 InscatterPhaseG = 0.25f;   // 0 = isotropic scatter, toward 1 = forward-peaked
+    // @ge-tooltip Enables underwater lens and waterline distortion.
     bool UnderwaterDistortion = true;
+    // @ge-tooltip Strength of the underwater screen distortion.
     float32 DistortionStrength = 1.0f;
+    // @ge-tooltip Enables procedural underwater god rays.
     bool UnderwaterGodRays = true;
+    // @ge-tooltip Brightness of underwater god rays.
     float32 GodRayStrength = 0.6f;
+    // @ge-tooltip Angular frequency/density of underwater god ray shafts.
     float32 GodRayDensity = 32.0f;     // angular frequency of the shafts
+    // @ge-tooltip Projects caustics onto submerged scene geometry in the underwater pass.
     bool CausticsOnGeometry = true;
     // Caustics reflected onto geometry above the water; 0 (the default) declares no pass.
     // @ge-tooltip Brightness of the caustics the water reflects onto geometry above it. 0 turns them off (the default).
@@ -357,6 +429,7 @@ struct OceanSurface
     // OceanFlowSource entities (rectangular regions of constant flow) and
     // OceanFlowMapSource entities (texture-driven currents), baked into a
     // camera-snapped flow cascade. Off leaves foam static and ripples stationary.
+    // @ge-tooltip Enables the ocean flow cascade to advect foam and surface detail.
     bool Flow = true;
 
     // --- Dynamic (interactive) waves ---
@@ -366,6 +439,7 @@ struct OceanSurface
     // added into the surface displacement (vertex stage) and folded into the
     // surface normal, so interactive ripples actually deform the geometry and
     // light correctly. Off disables the sim (the surface reads spectrum waves only).
+    // @ge-tooltip Enables interactive dynamic waves from OceanWaveImpulse and water interactions.
     bool DynamicWaves = true;
 
     // --- Clip surface (cut holes) ---
@@ -374,12 +448,14 @@ struct OceanSurface
     // camera-snapped clip cascade; where the surface samples a clip value above
     // 0.5 the fragment is discarded (nothing renders, leaving what's behind the
     // water visible). Off leaves the surface solid everywhere.
+    // @ge-tooltip Enables clip sources that cut holes or restore regions in the ocean surface.
     bool ClipSurface = false;
 
     // The clip state the surface starts at outside every clip source (0 = surface
     // solid by default, sources punch holes; 1 = surface clipped by default,
     // sources carve the water back in). Lets a project clip the whole ocean and
     // restore only authored regions. Inert unless ClipSurface is on.
+    // @ge-tooltip Default clip value outside clip sources. 0 keeps water solid; 1 clips it away.
     float32 DefaultClippingState = 0.0f;
 
     // --- Albedo (decals / paint on the surface) ---
@@ -389,6 +465,7 @@ struct OceanSurface
     // water colour toward the painted colour BEFORE lighting and UNDER foam, so
     // reflections + whitecaps still read over the paint. Off leaves the base water
     // colour unchanged.
+    // @ge-tooltip Enables albedo sources that paint colour onto the water surface.
     bool Albedo = false;
 
     // --- Intersection foam (screen-space, from scene depth) ---
@@ -398,7 +475,9 @@ struct OceanSurface
     // wash; smaller values make crisper lines. IntersectionFoamStrength scales the
     // effect. Unlike shoreline foam (from the seabed depth cascade), this reads
     // the per-frame scene depth buffer, so it works with any opaque geometry.
+    // @ge-tooltip Screen-space depth range used to form foam where water meets opaque geometry.
     float32 IntersectionFoamDepth = 1.0f;
+    // @ge-tooltip Intensity multiplier for intersection/contact foam.
     float32 IntersectionFoamStrength = 0.5f;
 
     // Foam relief uses the same dissolve pattern as coverage. Zero keeps it flat.
@@ -427,18 +506,21 @@ struct OceanRenderer
     // expensive optional sims. High runs every sim; Medium drops flow + dynamic
     // waves; Low keeps only the FFT wave shape.
     // 0 = Low, 1 = Medium, 2 = High (matches Ocean::OceanQuality).
+    // @ge-tooltip Ocean quality tier. 0 = Low, 1 = Medium, 2 = High.
     uint32 QualityOverride = 2;
 
     // Number of camera-snapped LOD layers the sim cascades (foam/flow/depth/clip/
     // albedo) and the displacement reach toward the horizon. Higher covers more
     // distance at the cost of fill. Clamped to the engine ceiling
     // (kMaxOceanLodCascades) and to each sim's allocated layer count.
+    // @ge-tooltip Number of camera-snapped ocean LOD cascade layers.
     uint32 LodCount = 7;
 
     // Texel resolution (per axis) of the snapped sim cascades (foam/flow/dyn-waves/
     // seabed/clip/albedo). A change resizes those cascade textures at runtime.
     // Default matches the engine's built-in cascade resolution; raise (e.g. 384,
     // 512) for sharper near-camera foam/flow detail at more VRAM.
+    // @ge-tooltip Texel resolution per axis for ocean simulation cascades.
     uint32 LodDataResolution = 256;
 
     // World extent (meters) of the finest (LOD 0) cascade. Each higher LOD doubles
@@ -446,7 +528,9 @@ struct OceanRenderer
     // SMALLER MinScale concentrates resolution nearer the camera (less coverage).
     // MaxScale caps the coarsest layer (trims the LOD count so the coarsest cascade
     // stays <= MaxScale). Defaults match the engine's built-in cascade scale.
+    // @ge-tooltip World size of the finest ocean cascade. Smaller values concentrate detail near the camera.
     float32 MinScale = 64.0f;
+    // @ge-tooltip Maximum world size of the coarsest ocean cascade.
     float32 MaxScale = 512.0f;
 
     // Surface geometry budget for the camera-following concentric LOD rings. The
@@ -454,22 +538,27 @@ struct OceanRenderer
     // near-camera wave shape. Combine with GeometryDownSampleFactor to trade
     // detail for fewer triangles; the compatible budget is
     // 256 * UpSample / DownSample and is clamped to [8, 1024].
+    // @ge-tooltip Multiplier for the camera-centered ocean grid density.
     uint32 GeometryUpSampleFactor = 2;
 
     // Surface geometry budget divider. 1 keeps the upsampled density; 2 quarters
     // the triangle count, 4 sixteenths it, and so on.
+    // @ge-tooltip Divider for ocean grid density and triangle count.
     uint32 GeometryDownSampleFactor = 1;
 
     // Scales the dispersion gravity fed to every wave sim (FFT + dynamic waves),
     // so a project can make the whole sea feel heavier/slower (<1) or lighter and
     // faster (>1) without re-authoring per-octave gravity.
+    // @ge-tooltip Scales wave dispersion gravity for FFT and dynamic waves.
     float32 GravityMultiplier = 1.0f;
 
     // Time provider controls for deterministic preview/bakes and slow-motion water.
     // TimeScale multiplies the engine's accumulated ocean time and the ocean sim
     // delta time. 0 freezes animated waves, foam decay/advection, and dynamic-wave
     // propagation. TimeOffset shifts the animated phase without changing speed.
+    // @ge-tooltip Multiplies ocean animation time. 0 freezes wave and simulation motion.
     float32 TimeScale = 1.0f;
+    // @ge-tooltip Offsets ocean animation phase without changing speed.
     float32 TimeOffset = 0.0f;
 
     // Time-provider routing. Custom is the backward-compatible default and maps
@@ -487,13 +576,16 @@ struct OceanRenderer
     // When enabled, FixedTime is used as the absolute ocean animation time and the
     // per-frame ocean sim delta is forced to 0. This holds FFT waves, wave masks,
     // foam, and dynamic-wave state at a stable phase for capture.
+    // @ge-tooltip Uses Fixed Time as the absolute ocean time for deterministic preview or capture.
     bool UseFixedTime = false;
+    // @ge-tooltip Absolute ocean time used when Use Fixed Time is enabled.
     float32 FixedTime = 0.0f;
 
     // Optional runtime budget for enabled OceanDepthCacheSource components. 0 keeps
     // the previous behavior (all eligible caches are composed). Values >0 keep the
     // highest-priority nearest caches around the active ocean camera and evict the
     // rest from the composed runtime texture until the camera approaches them.
+    // @ge-tooltip Runtime budget for active OceanDepthCacheSource components. 0 keeps all eligible caches.
     uint32 MaxActiveDepthCaches = 0u;
 
     // Optional runtime hidden top-down mesh raster capture for dynamic geometry
@@ -502,12 +594,19 @@ struct OceanRenderer
     // RasterDepthCaptureLayers is captured into a one-frame-latent R32F
     // water-depth texture and merged with saved caches, analytic seabeds, and live
     // contributors by the seabed-depth compute.
+    // @ge-tooltip Captures dynamic mesh geometry into the seabed-depth texture from a top-down pass.
     bool RasterDepthCapture = false;
+    // @ge-tooltip Resolution of the dynamic raster seabed-depth capture.
     uint32 RasterDepthCaptureResolution = 512u;
+    // @ge-tooltip The render layers the raster seabed-depth capture draws.
     Rendering::RenderLayerMask RasterDepthCaptureLayers = Rendering::RenderLayerMask::All();
+    // @ge-tooltip World X size of the top-down raster seabed-depth capture.
     float32 RasterDepthCaptureSizeX = 512.0f;
+    // @ge-tooltip World Z size of the top-down raster seabed-depth capture.
     float32 RasterDepthCaptureSizeZ = 512.0f;
+    // @ge-tooltip Extra height above captured geometry for the raster depth camera.
     float32 RasterDepthCaptureTopPadding = 64.0f;
+    // @ge-tooltip Fallback water depth used where raster capture finds no seabed.
     float32 RasterDepthCaptureDeepWaterDepth = 60000.0f;
 
     // --- Global wind (drives the spectrum when authored here) ---
@@ -517,13 +616,17 @@ struct OceanRenderer
     // (0 = waves all along the wind, higher = a more chaotic, spread sea). These
     // override the OceanWaveSpectrum's own wind when this renderer is present, so
     // wind lives in one place. Set GlobalWindSpeed to 0 for a flat calm sea.
+    // @ge-tooltip Global wind speed in meters per second for FFT and Gerstner waves.
     float32 GlobalWindSpeed = 8.0f;
+    // @ge-tooltip Global wind direction in degrees. 0 points along world +X.
     float32 GlobalWindDirection = 30.0f;
+    // @ge-tooltip Directional spread of global wind waves. Higher values make a more chaotic sea.
     float32 GlobalWindTurbulence = 0.145f;
 
     // Optional asset-backed global wave spectrum. When assigned it replaces the
     // first scene OceanWaveSpectrum component as the FFT base spectrum,
     // while the GlobalWind* controls above may still override wind if enabled.
+    // @ge-tooltip Optional asset-backed global wave spectrum.
     OceanWaveSpectrumRef SpectrumAsset;
 
     // Collision provider routing: 0 Auto, 1 GPU queries, 2 baked FFT CPU,
@@ -541,6 +644,7 @@ struct OceanRenderer
     // single cascade once per frame. The current viewer-centered implementation is
     // bypassed for visible waves/foam until it can be made world-stable; the direct
     // 16-cascade path remains authoritative.
+    // @ge-tooltip Experimental path that combines FFT displacement cascades once per frame.
     bool CombineDisplacementCascade = false;
 };
 

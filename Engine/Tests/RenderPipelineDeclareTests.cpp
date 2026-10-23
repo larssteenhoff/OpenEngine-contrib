@@ -1,4 +1,6 @@
 #include "Core/CpuProfiler.h"
+#include "Engine/Rendering/PlanarReflectionFeature.h"
+#include "Engine/Rendering/PostProcessEffectRegistry.h"
 #include "ScopedPipelineFrame.h"
 #include "EngineLogCapture.h"
 #include <map>
@@ -54,6 +56,7 @@
 #include "TestDeviceHelper.h"
 #include "HeldPipelineBuilds.h"
 #include "SceneDrawWarm.h"
+#include "TestTempDir.h"
 #include "Components/Terrain/TerrainGrass.h"
 #include "ECS/ComponentFieldRegistry.h"
 #include "TerrainECS/TerrainGrassAlpha.h"
@@ -86,6 +89,7 @@
 #include "Components/Terrain/Terrain.h"
 #include "Terrain/TerrainTypes.h"
 #include "Engine/Rendering/Pipeline/Nodes/LightUploadNode.h"
+#include "Engine/Rendering/Pipeline/Nodes/PixelPerfectUpscaleNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/RenderScaleUpscaleNode.h"
 #include "Engine/Rendering/Pipeline/Nodes/TemporalAANode.h"
 #include "SssrShaderSource.h"
@@ -134,6 +138,7 @@
 #include <tuple>
 #include <unordered_set>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -197,6 +202,8 @@ struct DeclareProbeNode final : IRenderPipelineNode
         RenderGraph::RGTexture SeenOutputColor{};
         RenderGraph::RGTexture SeenOutputDepth{};
         RenderGraph::RGTexture ResolvedPublished{};
+        RenderGraph::RGTexture PublishedView7Color{};
+        RenderGraph::RGTexture MissingViewColor{};
         uint32_t RenderWidth = 0;
         uint32_t OutputWidth = 0;
         std::string PassName;
@@ -225,6 +232,8 @@ struct DeclareProbeNode final : IRenderPipelineNode
         c.NodeId = d.NodeId;
         c.View = d.View.id;
         c.SeenColor = d.ViewColor;
+        c.PublishedView7Color = d.FindPublishedViewTexture(7u, "View.Color");
+        c.MissingViewColor = d.FindPublishedViewTexture(9999u, "View.Color");
         c.SeenDepth = d.ViewDepth;
         c.SeenResolve = d.ViewResolve;
         c.SeenOutputColor = d.ViewOutputColor;
@@ -2413,6 +2422,26 @@ TEST(RenderPipelineDeclareTests, CrossfadeDurationAloneDoesNotCarveOutReadOnlyDe
     device->Shutdown();
 }
 
+TEST(RenderPipelineDeclareTests, ProceduralDrawRejectsInvalidOrUnboundedGeometry)
+{
+    Nodes::FullscreenShaderNode node;
+    std::string error;
+    EXPECT_TRUE(node.Initialize("Rain", R"({"shaderPkg":"rain_streaks.shaderpkg","proceduralDraw":{"vertexCount":6,"instanceCount":234}})", &error)) << error;
+    for (const auto* draw : {
+             R"({"vertexCount":-3,"instanceCount":234})",
+             R"({"vertexCount":4,"instanceCount":234})",
+             R"({"vertexCount":6,"instanceCount":0})",
+             R"({"vertexCount":6,"instanceCount":1048577})",
+             R"({"vertexCount":6.5,"instanceCount":234})",
+             R"({"vertexCount":6})"})
+    {
+        error.clear();
+        EXPECT_FALSE(node.Initialize("Rain", std::string("{\"shaderPkg\":\"rain_streaks.shaderpkg\",\"proceduralDraw\":") + draw + "}", &error));
+        EXPECT_FALSE(error.empty());
+    }
+    EXPECT_TRUE(node.Initialize("Copy", R"({"shaderPkg":"copy.shaderpkg"})", &error)) << error;
+}
+
 TEST(RenderPipelineDeclareTests, UploadNodesDissolveIntoTheRing)
 {
     auto device = CreateVulkanDeviceFast();
@@ -2458,7 +2487,7 @@ TEST(RenderPipelineDeclareTests, UploadNodesDissolveIntoTheRing)
             p.type = "LightUpload";
             p.enabled = true;
             p.perView = true;
-            p.passJson = R"({"id":"Lights","type":"LightUpload"})";
+            p.passJson = R"({"id":"Lights","type":"LightUpload","forwardBuffer":"RainLights"})";
             bp.passes.push_back(p);
         }
 
@@ -2473,6 +2502,15 @@ TEST(RenderPipelineDeclareTests, UploadNodesDissolveIntoTheRing)
         RenderGraph::RGTexture depth = frame.ImportPersistentTexture("UP.Depth", DepthTargetDesc());
 
         rs.BeginWorldDrawFrame();
+        PostProcessSettings rainSettings{};
+        rainSettings.WaterDropSize = 1.75f;
+        rainSettings.WaterRippleSpeed = 0.5f;
+        rs.Views().SetViewPostProcessOverride(viewId, rainSettings);
+        WeatherWindGPU wind{};
+        wind.Count[0] = 1.0f;
+        wind.Volumes[0].VelocityWeight[0] = 3.0f;
+        wind.Volumes[0].Mode[2] = 0.25f;
+        rs.SetWorldWeatherWind(0, wind);
 
         const std::vector<ViewTargetsRG> targets = {ViewTargetsRG{viewId, color, depth, {}}};
         const std::vector<Rendering::ViewDesc> views(rs.Views().GetViews().begin(), rs.Views().GetViews().end());
@@ -2491,6 +2529,26 @@ TEST(RenderPipelineDeclareTests, UploadNodesDissolveIntoTheRing)
 
         const auto lbIt = fr->Buffers.find({viewId, "LightBuffer"});
         ASSERT_NE(lbIt, fr->Buffers.end());
+        const auto forwardIt = fr->Buffers.find({viewId, "RainLights"});
+        ASSERT_NE(forwardIt, fr->Buffers.end());
+        EXPECT_EQ(forwardIt->second.Size, sizeof(ForwardLightUBO));
+        EXPECT_FALSE(forwardIt->second.Graph.IsValid());
+        if (void* p = device->MapBuffer(forwardIt->second.Buffer))
+        {
+            ForwardLightUBO light{};
+            std::memcpy(&light, static_cast<const uint8_t*>(p) + forwardIt->second.Offset, sizeof(light));
+            device->UnmapBuffer(forwardIt->second.Buffer);
+            EXPECT_FLOAT_EQ(light.uLightDirWorld[3], 0.0f) << "unlit rain must not invent a sun";
+            EXPECT_FLOAT_EQ(light.uAmbient[0], 0.0f);
+            EXPECT_FLOAT_EQ(light.uAmbient[1], 0.0f);
+            EXPECT_FLOAT_EQ(light.uAmbient[2], 0.0f);
+            EXPECT_FLOAT_EQ(light.WeatherWind.Count[1], 1.75f);
+            EXPECT_FLOAT_EQ(light.WeatherWind.Count[2], 0.5f);
+            EXPECT_FLOAT_EQ(light.uTimeParams[3], light.uTimeParams[1]);
+            EXPECT_FLOAT_EQ(light.WeatherWind.Count[0], 1.0f);
+            EXPECT_FLOAT_EQ(light.WeatherWind.Volumes[0].VelocityWeight[0], 3.0f);
+            EXPECT_FLOAT_EQ(light.WeatherWind.Volumes[0].Mode[2], 0.25f);
+        }
         // Header (16) plus one zeroed GPULightPacked (144). WebGPU validates the
         // binding against the WGSL struct's minimum size, which counts one
         // runtime-array element; count=0 keeps the shader from reading it.
@@ -2703,6 +2761,25 @@ TEST(RenderPipelineDeclareTests, CsmNodeCachesFrameDataBeforeTheCascadeArms)
         ASSERT_NE(sdIt, fr->Buffers.end());
         EXPECT_EQ(sdIt->second.Size, sizeof(ShadowDataGPU));
         EXPECT_FALSE(sdIt->second.Graph.IsValid()) << "ring alloc carries no graph edge";
+
+        // A mirror reuses this frame's cascade resource without declaring a
+        // second shadow pass. Neither a foreign world nor a re-begun frame may
+        // inherit the old graph ids.
+        const auto mirrorCamera = rs.Views().AllocateCamera("MirrorShadowTest");
+        rs.Views().SetCameraData(mirrorCamera, cd);
+        const auto mirrorView = rs.Views().AllocateView("MirrorShadowTest", mirrorCamera,
+            ViewPurpose::UtilityCapture, ViewParticipation::OnDemand);
+        rs.Views().SetViewActiveRenderPipeline(mirrorView, false);
+        const auto passCount = frame.Graph().PassCount();
+        ASSERT_TRUE(rs.ShareDirectionalShadowsRG(frame, viewId, mirrorView));
+        EXPECT_EQ(rs.GetShadowMapArrayRG(frame, mirrorView).Id,
+                  rs.GetShadowMapArrayRG(frame, viewId).Id);
+        EXPECT_EQ(frame.Graph().PassCount(), passCount);
+        rs.Views().SetViewWorldId(mirrorView, 123);
+        EXPECT_FALSE(rs.ShareDirectionalShadowsRG(frame, viewId, mirrorView));
+        rs.Views().SetViewWorldId(mirrorView, 0);
+        frame.BeginFrame(1);
+        EXPECT_FALSE(rs.ShareDirectionalShadowsRG(frame, viewId, mirrorView));
 
         depHandle.Reset();
         rs.Shutdown();
@@ -5711,7 +5788,7 @@ struct SssrGateRig
     uint32_t SamplesB = 0;
 
     bool Init(Rendering::IDevice* device, uint32_t samples, uint32_t samplesB = 0,
-              bool letterboxed = false, bool temporalAA = false)
+              bool letterboxed = false, bool temporalAA = false, bool planar = false)
     {
         Samples = samples;
         SamplesB = samplesB;
@@ -5725,12 +5802,13 @@ struct SssrGateRig
             cd.proj[i] = 1.0f;
             cd.viewProj[i] = 1.0f;
         }
+        if (planar) cd.cameraPos[1] = 2.0f;
         Services.Views().SetCameraData(camId, cd);
         Rendering::ViewClearConfig clear{};
         clear.clearColor = true;
         clear.clearDepth = true;
         PostProcessSettings pp{};
-        pp.SSSRIntensity = 1.0f; // defaults keep MaxDistance/MaxSteps active
+        pp.SSSRIntensity = planar ? 0.0f : 1.0f; // planar support does not depend on SSR
 
         View = Services.Views().AllocateView("SssrGateView", camId);
         if (letterboxed)
@@ -5742,6 +5820,13 @@ struct SssrGateRig
         Services.Views().SetViewRenderLayerMask(View, GameEngine::Rendering::RenderLayerMask::Default());
         Services.Views().SetViewTargets(View, 0, 0, 0, clear);
         Services.Views().SetViewPostProcessOverride(View, pp);
+        if (planar)
+        {
+            Services.Views().SetViewWorldId(View, 123);
+            PlanarReflectionPlane plane{};
+            plane.EntityId = 42;
+            Services.EnsureFeature<PlanarReflectionFeature>().SyncWorld(Services, 123, {plane});
+        }
         if (samplesB > 0)
         {
             ViewB = Services.Views().AllocateView("SssrGateViewB", camId);
@@ -6176,7 +6261,7 @@ TEST(RenderPipelineDeclareTests, SssrViewportRectFollowsTheLetterbox)
     using GameEngine::Engine::Renderer::ViewLetterbox;
 
     // No letterbox: the whole target, so every conversion is the identity.
-    const auto full = ScreenSpaceReflectionsNode::ComputeViewportRect(ViewLetterbox{}, 1920u, 1080u);
+    const auto full = ComputeViewportRect(ViewLetterbox{}, 1920u, 1080u);
     EXPECT_FLOAT_EQ(full.X, 0.0f);
     EXPECT_FLOAT_EQ(full.Y, 0.0f);
     EXPECT_FLOAT_EQ(full.Width, 1.0f);
@@ -6189,7 +6274,7 @@ TEST(RenderPipelineDeclareTests, SssrViewportRectFollowsTheLetterbox)
     pillar.y = 0u;
     pillar.width = 1440u;
     pillar.height = 1080u;
-    const auto rect = ScreenSpaceReflectionsNode::ComputeViewportRect(pillar, 1920u, 1080u);
+    const auto rect = ComputeViewportRect(pillar, 1920u, 1080u);
     EXPECT_FLOAT_EQ(rect.X, 0.125f);
     EXPECT_FLOAT_EQ(rect.Y, 0.0f);
     EXPECT_FLOAT_EQ(rect.Width, 0.75f);
@@ -6203,7 +6288,7 @@ TEST(RenderPipelineDeclareTests, SssrViewportRectFollowsTheLetterbox)
     ViewLetterbox degenerate{};
     degenerate.active = true;
     const auto fallback =
-        ScreenSpaceReflectionsNode::ComputeViewportRect(degenerate, 1920u, 1080u);
+        ComputeViewportRect(degenerate, 1920u, 1080u);
     EXPECT_FLOAT_EQ(fallback.Width, 1.0f);
     EXPECT_FLOAT_EQ(fallback.Height, 1.0f);
 }
@@ -6504,6 +6589,10 @@ struct FxChainFixture
         if (!Registry.Register(
                 "RenderScaleUpscale",
                 [] { return std::make_unique<Nodes::RenderScaleUpscaleNode>(); }, true))
+            return false;
+        if (!Registry.Register(
+                "PixelPerfectUpscale",
+                [] { return std::make_unique<Nodes::PixelPerfectUpscaleNode>(); }, true))
             return false;
         return true;
     }
@@ -7399,6 +7488,239 @@ TEST(RenderPipelineDeclareTests, RenderScaleUpscaleCrossesOnceAndStitchesWhenNat
                 << "View.Resolve republished to the caller's display-res colour";
         }
 
+        f.Device->WaitForIdle();
+    }
+    f.Down();
+}
+
+// The pixel-perfect crossing. The caller's targets ARE the camera's padded
+// reference RT, so the display extent can only come from the view's
+// pixel-perfect state: the pre-pass must size Output* from it, materialize the
+// display-extent colour the pipeline owns, and the node must blit into an
+// output-basis target and republish View.Resolve onto it — otherwise the
+// terminal stage would write the finished image back down into the reference RT
+// and every LDR display effect would still run at one sample per art texel.
+// With the state inactive the node declares nothing and stitches through, which
+// is what keeps every non-pixel-perfect view (and the Player) byte-identical.
+static bool PixelPerfectUpscalePackageStaged(const IDevice& device)
+{
+    ShaderPackage pkg{};
+    std::string err;
+    return LoadShaderPkg("Shaders/pixelperfect_upscale.shaderpkg", device.PreferredShaderSource(), pkg, &err);
+}
+
+TEST(RenderPipelineDeclareTests, PixelPerfectHostFallbackReadsTheCurrentPipelineFrame)
+{
+    FxChainFixture f;
+    ASSERT_TRUE(f.Up()) << "Vulkan and render services are required";
+    {
+        FramePools pools(f.Device.get());
+        RenderGraph::RGFrame frame(f.Device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+        GameEngine::Testing::ScopedPipelineFrame registration(f.Rs->Spine(), frame);
+        uint64_t frameIndex = 0;
+        // The node-present arm first gives the stale-frame check a positive
+        // crossing to invalidate; the custom graph then exercises the fallback.
+        for (bool withNode : {true, false})
+        {
+            RenderPipelineBlueprint bp;
+            bp.pipelineName = withNode ? "HostCrossing" : "HostCustomPipeline";
+            bp.contentHash = withNode ? 0x50504301ull : 0x50504302ull;
+            bp.passes.push_back(FxChainFixture::WorldPass());
+            bp.worldColorResolveTargetRef = "SceneColor";
+            FxChainFixture::AddTexResource(bp, "SceneColor");
+            if (withNode)
+            {
+                RenderPipelineBlueprint::Pass cross;
+                cross.id = "PixelPerfectUpscale";
+                cross.type = "PixelPerfectUpscale";
+                cross.enabled = true;
+                cross.perView = true;
+                cross.passJson =
+                    R"({"id":"PixelPerfectUpscale","type":"PixelPerfectUpscale","input":"SceneColor","output":"HDRPixelPerfect"})";
+                bp.passes.push_back(cross);
+                FxChainFixture::AddOutputBasisTexResource(bp, "HDRPixelPerfect");
+            }
+            bp.outputs.push_back({"FinalColor", "View.Resolve"});
+            f.Rs->Spine().SetActiveRenderPipelineBlueprint(bp);
+            for (bool active : {true, false})
+            {
+                PixelPerfectViewState pp{};
+                pp.Active = active;
+                pp.ReferenceWidth = 320;
+                pp.ReferenceHeight = 180;
+                pp.PaddedWidth = 322;
+                pp.PaddedHeight = 182;
+                pp.Zoom = 4;
+                pp.DisplayWidth = 1280;
+                pp.DisplayHeight = 720;
+                f.Rs->Views().SetViewPixelPerfect(f.View, pp);
+                frame.BeginFrame(frameIndex++);
+                const auto stale = f.Rs->GetPipelineOutputRG(frame, f.View);
+                EXPECT_FALSE(stale.Out.IsValid());
+                EXPECT_FALSE(stale.PixelPerfectCrossing);
+                TextureDesc colorDesc = ColorTargetDesc();
+                colorDesc.width = 322;
+                colorDesc.height = 182;
+                TextureDesc depthDesc = DepthTargetDesc();
+                depthDesc.width = 322;
+                depthDesc.height = 182;
+                const auto color = frame.ImportPersistentTexture("HostPP.Color", colorDesc);
+                const auto depth = frame.ImportPersistentTexture("HostPP.Depth", depthDesc);
+                f.Rs->BeginWorldDrawFrame();
+                f.Rs->BuildWorldBatchKeys();
+                const ViewTargetsRG target{f.View, color, depth, {}};
+                RenderServices::FrameGraphBuildParamsRG params{};
+                params.ViewTargets = std::span<const ViewTargetsRG>(&target, 1);
+                f.Rs->Spine().BuildFrameGraph(frame, params);
+                const auto output = f.Rs->GetPipelineOutputRG(frame, f.View);
+                ASSERT_TRUE(output.Out.IsValid());
+                EXPECT_EQ(output.PixelPerfectCrossing, withNode && active);
+                EXPECT_EQ(output.NeedsPixelPerfectFallback(active), active && !withNode);
+                const auto& outputDesc = frame.Graph().ResourceDesc(output.Out.Id);
+                EXPECT_EQ(outputDesc.Width, withNode && active ? 1280u : 322u);
+                EXPECT_EQ(outputDesc.Height, withNode && active ? 720u : 182u);
+            }
+        }
+    }
+    f.Down();
+}
+
+TEST(RenderPipelineDeclareTests, PixelPerfectCrossingSizesOutputAndStitchesWhenInactive)
+{
+    FxChainFixture f;
+    if (!f.Up())
+        GTEST_SKIP() << "No Vulkan device available";
+    {
+        // Reference 32x32 shown at zoom 2 in a 64x64 panel; the caller rasters
+        // into the padded 34x34 RT.
+        constexpr uint32_t kReference = 32;
+        constexpr uint32_t kPadded = kReference + 2;
+        constexpr uint32_t kZoom = 2;
+        constexpr uint32_t kDisplay = 64;
+
+        RenderPipelineBlueprint bp;
+        bp.pipelineName = "PixelPerfectCrossingTest";
+        bp.passes.push_back(FxChainFixture::WorldPass());
+        RenderPipelineBlueprint::Pass cross;
+        cross.id = "PixelPerfectUpscale";
+        cross.type = "PixelPerfectUpscale";
+        cross.enabled = true;
+        cross.perView = true;
+        cross.passJson =
+            R"({"id":"PixelPerfectUpscale","type":"PixelPerfectUpscale","input":"SceneColor","output":"HDRPixelPerfect"})";
+        bp.passes.push_back(cross);
+        bp.worldColorResolveTargetRef = "SceneColor";
+        FxChainFixture::AddTexResource(bp, "SceneColor");                  // render basis
+        FxChainFixture::AddOutputBasisTexResource(bp, "HDRPixelPerfect");  // display basis
+        bp.outputs.push_back({"FinalColor", "View.Resolve"});
+
+        RenderPipelineInstance instance(*f.Rs, f.Registry);
+        instance.SetBlueprint(bp);
+
+        FramePools pools(f.Device.get());
+        RenderGraph::RGFrame frame(f.Device.get(), &pools.Persistent, &pools.Transient,
+                                   &pools.Ring);
+        const std::vector<Rendering::ViewDesc> views(f.Rs->Views().GetViews().begin(),
+                                                     f.Rs->Views().GetViews().end());
+
+        auto declareOnce = [&](uint64_t frameIndex, bool pixelPerfect)
+        {
+            Engine::Renderer::PixelPerfectViewState pp{};
+            if (pixelPerfect)
+            {
+                pp.Active = true;
+                pp.ReferenceWidth = kReference;
+                pp.ReferenceHeight = kReference;
+                pp.PaddedWidth = kPadded;
+                pp.PaddedHeight = kPadded;
+                pp.Zoom = kZoom;
+                pp.DisplayWidth = kDisplay;
+                pp.DisplayHeight = kDisplay;
+            }
+            f.Rs->Views().SetViewPixelPerfect(f.View, pp);
+            frame.BeginFrame(frameIndex);
+            TextureDesc cd = ColorTargetDesc();
+            cd.width = kPadded;
+            cd.height = kPadded;
+            TextureDesc dd = DepthTargetDesc();
+            dd.width = kPadded;
+            dd.height = kPadded;
+            const RenderGraph::RGTexture color = frame.ImportPersistentTexture("PP.Color", cd);
+            const RenderGraph::RGTexture depth = frame.ImportPersistentTexture("PP.Depth", dd);
+            f.Rs->BeginWorldDrawFrame();
+            f.Rs->BuildWorldBatchKeys();
+            const std::vector<ViewTargetsRG> targets = {ViewTargetsRG{f.View, color, depth, {}}};
+            instance.Declare(frame, targets, views);
+        };
+
+        // Inactive: no crossing, no divergence, no pool texture.
+        declareOnce(0, false);
+        const size_t worldOnlyPasses = frame.Graph().PassCount();
+        {
+            const auto* fr = instance.FrameResourcesFor(&frame);
+            ASSERT_NE(fr, nullptr);
+            const auto vi = fr->Views.find(f.View);
+            ASSERT_NE(vi, fr->Views.end());
+            EXPECT_FALSE(vi->second.PixelPerfectCrossing);
+            EXPECT_EQ(vi->second.OutputWidth, kPadded)
+                << "without pixel-perfect state Output* is the caller's extent, unchanged";
+            EXPECT_EQ(vi->second.OutputHeight, kPadded);
+            EXPECT_EQ(fr->Textures.count({f.View, "View.OutputColor"}), 0u);
+            const auto up = fr->Textures.find({f.View, "HDRPixelPerfect"});
+            const auto scene = fr->Textures.find({f.View, "SceneColor"});
+            ASSERT_NE(up, fr->Textures.end());
+            ASSERT_NE(scene, fr->Textures.end());
+            EXPECT_EQ(up->second.Id, scene->second.Id)
+                << "the inactive crossing stitches its input through";
+        }
+
+        // Active: Output* comes from the pixel-perfect state.
+        declareOnce(1, true);
+        {
+            const auto* fr = instance.FrameResourcesFor(&frame);
+            ASSERT_NE(fr, nullptr);
+            const auto vi = fr->Views.find(f.View);
+            ASSERT_NE(vi, fr->Views.end());
+            EXPECT_TRUE(vi->second.PixelPerfectCrossing);
+            EXPECT_EQ(vi->second.RenderWidth, kPadded) << "the world half rasters at the padded RT";
+            EXPECT_EQ(vi->second.OutputWidth, kDisplay) << "the display extent is the panel";
+            EXPECT_EQ(vi->second.OutputHeight, kDisplay);
+            const auto outColor = fr->Textures.find({f.View, "View.OutputColor"});
+            ASSERT_NE(outColor, fr->Textures.end())
+                << "the pipeline owns the display-extent colour the caller cannot supply";
+            EXPECT_EQ(frame.Graph().ResourceDesc(outColor->second.Id).Width, kDisplay);
+            EXPECT_EQ(fr->Textures.count({f.View, "View.OutputDepth"}), 0u)
+                << "no display-extent depth — its absence is what excludes the render-scale crossing";
+        }
+        if (frame.Graph().PassCount() == worldOnlyPasses)
+        {
+            ASSERT_FALSE(PixelPerfectUpscalePackageStaged(*f.Device))
+                << "pixelperfect_upscale.shaderpkg is staged yet the crossing declined";
+            GTEST_SKIP() << "pixelperfect_upscale.shaderpkg unavailable in this environment";
+        }
+        EXPECT_EQ(frame.Graph().PassCount(), worldOnlyPasses + 1u)
+            << "one blit, and nothing else";
+        {
+            const auto* fr = instance.FrameResourcesFor(&frame);
+            ASSERT_NE(fr, nullptr);
+            const auto up = fr->Textures.find({f.View, "HDRPixelPerfect"});
+            const auto scene = fr->Textures.find({f.View, "SceneColor"});
+            ASSERT_NE(up, fr->Textures.end());
+            ASSERT_NE(scene, fr->Textures.end());
+            EXPECT_NE(up->second.Id, scene->second.Id) << "the crossing declared a real output";
+            EXPECT_EQ(frame.Graph().ResourceDesc(up->second.Id).Width, kDisplay)
+                << "everything after the crossing sizes to the display extent";
+            EXPECT_EQ(frame.Graph().ResourceDesc(scene->second.Id).Width, kPadded)
+                << "its input stayed at the padded reference extent";
+            const auto resolve = fr->Textures.find({f.View, "View.Resolve"});
+            const auto outColor = fr->Textures.find({f.View, "View.OutputColor"});
+            ASSERT_NE(resolve, fr->Textures.end());
+            ASSERT_NE(outColor, fr->Textures.end());
+            EXPECT_EQ(resolve->second.Id, outColor->second.Id)
+                << "View.Resolve republished onto the display-extent colour";
+        }
+
+        f.Rs->Views().SetViewPixelPerfect(f.View, {});
         f.Device->WaitForIdle();
     }
     f.Down();
@@ -9445,7 +9767,10 @@ bool ArmGrassMaterialCompile(TerrainFixture& f)
         return false;
     Rendering::MaterialBuildContext mbc{};
     mbc.AdapterShaderDir = adapterDir;
-    mbc.CacheRoot = fs::temp_directory_path() / "ge_grass_order_cache";
+    // The shader cache of this test process, removed at exit: a concurrent ctest process running
+    // the same tests compiles into its own.
+    static const TestUtils::ScopedTempDir cacheDirectory{TestUtils::MakeUniqueTempDirectory("ge_grass_order_cache")};
+    mbc.CacheRoot = cacheDirectory.Path();
     mbc.IncludeDirs = {adapterDir};
     mbc.PackageShaderDirs = {grassPkgRoot};
     f.Rs->Materials().SetMaterialBuildContext(mbc);
@@ -12966,6 +13291,52 @@ TEST(RenderPipelineDeclareTests, ForwardDrainDrawsDepthWritingBeforeBlended)
     }
 }
 
+// Exercise the traversal used by the world pass's recording callbacks, not an
+// ordering comparator: a blended entity must wait for an opaque contributor too.
+TEST(RenderPipelineDeclareTests, WorldForwardDispatchFinishesBothOpaqueSourcesBeforeEitherBlendSource)
+{
+    using namespace GameEngine::Engine::Renderer;
+    using GameEngine::MaterialAlphaMode;
+    Material opaque = Material::TestFactory::Create(GUID::Derive(GUID{}, "world-drain/opaque"), "opaque", 64u);
+    Material mask = Material::TestFactory::Create(GUID::Derive(GUID{}, "world-drain/mask"), "mask", 64u);
+    Material blend = Material::TestFactory::Create(GUID::Derive(GUID{}, "world-drain/blend"), "blend", 64u);
+    Material::TestFactory::SetAlphaMode(mask, MaterialAlphaMode::Mask);
+    Material::TestFactory::SetAlphaMode(blend, MaterialAlphaMode::Blend);
+    std::vector<WorldDrawBuilder::BatchKey> entities(6);
+    const Material* materials[] = {&blend, &opaque, &mask, nullptr, &blend, &opaque};
+    for (size_t i = 0; i < entities.size(); ++i)
+    {
+        entities[i].material = materials[i];
+        entities[i].materialIndex = static_cast<uint32_t>(i);
+    }
+    std::vector<DrawCommand> contributors(5);
+    for (size_t i = 0; i < contributors.size(); ++i)
+        contributors[i].Material = materials[i];
+
+    // Empty spans are the production world pass's entity/contributor scope gates.
+    for (bool entityScope : {false, true})
+    {
+        for (bool contributorScope : {false, true})
+        {
+            SCOPED_TRACE(testing::Message() << "entities=" << entityScope << " contributors=" << contributorScope);
+            std::vector<uint32_t> recorded;
+            DrainWorldForwardOpaqueFirst(
+                entityScope ? std::span<const WorldDrawBuilder::BatchKey>(entities) : std::span<const WorldDrawBuilder::BatchKey>{},
+                contributorScope ? std::span<const DrawCommand>(contributors) : std::span<const DrawCommand>{},
+                [&](const WorldDrawBuilder::BatchKey& key) { recorded.push_back(100u + key.materialIndex); },
+                [&](const DrawCommand& command) { recorded.push_back(200u + static_cast<uint32_t>(&command - contributors.data())); });
+            // Literal expected callback sequence retains every command exactly
+            // once, and stable order within the two sources of each phase.
+            const std::vector<uint32_t> all{101, 102, 103, 105, 201, 202, 203, 100, 104, 200, 204};
+            std::vector<uint32_t> expected;
+            for (uint32_t id : all)
+                if ((id < 200 && entityScope) || (id >= 200 && contributorScope))
+                    expected.push_back(id);
+            EXPECT_EQ(recorded, expected);
+        }
+    }
+}
+
 // Phase B is the HZB occlusion-recovery slice for GPU-cullable entity batches.
 // Explicit contributors are not in that scatter stream: terrain, grass, ocean,
 // and fog already rendered in phase A. A forward command by itself must therefore
@@ -14179,6 +14550,12 @@ TEST(RenderPipelineDeclareTests, ActivePipelineHotReloadRecompilesOffPollAndRelo
             frame.Execute();
             device->WaitForIdle();
         };
+
+        // This test isolates hot-reload invalidation, not initial decode latency.
+        // Frame refresh is nonblocking, so make the actual authored asset ready first.
+        const GUID initialGuid = am.ResolveAssetGuid(pipeRel);
+        ASSERT_FALSE(initialGuid.IsNull());
+        ASSERT_NE(am.LoadAssetAsync(initialGuid).get(), nullptr);
 
         // Frame 1: the EngineCore-backed poll path resolves + compiles the real
         // temp asset. The pipeline name proves it's OUR asset, not the engine's
@@ -17809,6 +18186,31 @@ TEST(RenderPipelineDeclareTests, ShadowMinMaxPyramidDeclaresAndPublishesOnlyForE
     device->Shutdown();
 }
 
+TEST(RenderPipelineDeclareTests, PlanarMaterialsResolveUnderMsaaWithoutEnablingSsr)
+{
+    auto device = CreateVulkanDeviceFast();
+    if (!device) GTEST_SKIP() << "No Vulkan device available";
+    {
+        SssrGateRig rig;
+        ASSERT_TRUE(rig.Init(device.get(), 4, 0, false, false, true));
+        for (const char* name : {"View.NormalRoughness.Written", "View.SSRSpecularWeight.Written",
+                                 "View.SSRSpecularRadiance.Written"})
+        {
+            const auto texture = rig.Tex(name);
+            ASSERT_TRUE(texture.IsValid()) << name;
+            EXPECT_EQ(rig.Frame->Graph().ResourceDesc(texture.Id).SampleCount, 1u);
+            bool resolved = false;
+            for (const auto& attachment : rig.Frame->Attachments())
+                if (!attachment.IsDepth && attachment.Resolve == texture.Id)
+                    resolved = true;
+            EXPECT_TRUE(resolved) << name << " must resolve from the multisampled world pass";
+        }
+        EXPECT_EQ(rig.Instance->GetOutputRG(rig.View, "FinalColor").Id, rig.Tex("View.Resolve").Id);
+        rig.Finish(device.get());
+    }
+    device->Shutdown();
+}
+
 TEST(RenderPipelineDeclareTests, FogEmissionGridIsAllocatedOnlyForAVolumeThatChangesEmission)
 {
     // A froxel's emission equals the view's unless a local volume changes it, so
@@ -19636,6 +20038,709 @@ TEST(RenderPipelineDeclareTests, DdgiTraceDeclaresItsSkyIrradianceRead)
     device->Shutdown();
 }
 
+TEST(DepthPixelationViews, PreservesGeometryAcrossBandBoundariesAndReleasesViews)
+{
+    RenderServices rs;
+    const auto camera = rs.Views().AllocateCamera("PixelationTest");
+    CameraData data{};
+    for (int i = 0; i < 16; i += 5) data.view[i] = 1.0f;
+    data.proj[0] = 1.2f; data.proj[5] = 1.8f;
+    data.proj[10] = -0.1f / 99.9f;
+    data.proj[11] = 1.0f;
+    data.proj[14] = 10.0f / 99.9f;
+    rs.Views().SetCameraData(camera, data);
+    const auto parent = rs.Views().AllocateView("Parent", camera);
+    rs.Views().SetViewWorldId(parent, 42);
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.AfterWorldExtraction) hooks.AfterWorldExtraction(rs, 42);
+    EXPECT_EQ(rs.Views().GetViews().size(), 1u);
+    EXPECT_EQ(rs.Views().GetCameras().size(), 1u);
+    EXPECT_EQ(rs.FindDepthPixelationViews(parent), nullptr);
+    PostProcessSettings pp{};
+    pp.DepthPixelationIntensity = 1;
+    pp.DepthPixelationNearEnd = 10;
+    pp.DepthPixelationMiddleEnd = 40;
+    rs.SetWorldPostProcessSettings(42, pp);
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.AfterWorldExtraction) hooks.AfterWorldExtraction(rs, 42);
+    ASSERT_EQ(rs.Views().GetViews().size(), 5u);
+    const auto bands = *rs.FindDepthPixelationViews(parent);
+    for (int i = 0; i < 3; ++i)
+    {
+        const auto* c = rs.Views().FindCameraData(bands.Cameras[i]);
+        ASSERT_NE(c, nullptr);
+        // Every grid needs samples across the shared boundary to avoid seams.
+        for (int entry = 0; entry < 16; ++entry) EXPECT_EQ(c->proj[entry], data.proj[entry]);
+        EXPECT_EQ(rs.GetEffectivePostProcessSettings(bands.Views[i], 42).DepthPixelationIntensity, 0);
+    }
+    EXPECT_EQ(rs.Views().FindViewDesc(bands.Views[RenderServices::DepthPixelationViews::kSkyIndex])->ActiveRenderLayerMask().Bits, 0u);
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.AfterWorldExtraction) hooks.AfterWorldExtraction(rs, 42);
+    EXPECT_EQ(rs.Views().GetViews().size(), 5u); // no recursive expansion
+    // Image-space mode uses one full-resolution source with no band clipping.
+    // Switching back recreates the original band layout.
+    pp.DepthPixelationSimpleScreenSpace = 1;
+    rs.SetWorldPostProcessSettings(42, pp);
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.AfterWorldExtraction) hooks.AfterWorldExtraction(rs, 42);
+    ASSERT_NE(rs.FindDepthPixelationViews(parent), nullptr);
+    EXPECT_TRUE(rs.FindDepthPixelationViews(parent)->SimpleScreenSpace);
+    EXPECT_EQ(rs.Views().GetViews().size(), 2u);
+    EXPECT_EQ(rs.Views().GetCameras().size(), 2u);
+    float start, end; int mode;
+    EXPECT_FALSE(rs.GetDepthPixelationBandRange(rs.FindDepthPixelationViews(parent)->Views[0], start, end, mode));
+    EXPECT_EQ(rs.GetEffectivePostProcessSettings(parent, 42).DepthPixelationIntensity, 1);
+    pp.DepthPixelationSimpleScreenSpace = 0;
+    rs.SetWorldPostProcessSettings(42, pp);
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.AfterWorldExtraction) hooks.AfterWorldExtraction(rs, 42);
+    ASSERT_NE(rs.FindDepthPixelationViews(parent), nullptr);
+    EXPECT_EQ(rs.Views().GetViews().size(), 5u);
+    pp.DepthPixelationIntensity = 0;
+    rs.SetWorldPostProcessSettings(42, pp);
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.AfterWorldExtraction) hooks.AfterWorldExtraction(rs, 42);
+    EXPECT_EQ(rs.Views().GetViews().size(), 1u);
+    EXPECT_EQ(rs.Views().GetCameras().size(), 1u);
+}
+
+TEST(DepthPixelationViews, DebugOnlyAndEmptyBands)
+{
+    RenderServices rs;
+    const auto camera = rs.Views().AllocateCamera("Ortho");
+    CameraData data{};
+    for (int i = 0; i < 16; i += 5) data.view[i] = data.proj[i] = 1.0f;
+    data.proj[10] = -1.0f / 99.0f;
+    data.proj[14] = 100.0f / 99.0f;
+    rs.Views().SetCameraData(camera, data);
+    const auto parent = rs.Views().AllocateView("Parent", camera);
+    rs.Views().SetViewWorldId(parent, 17);
+    PostProcessSettings pp{};
+    pp.DepthPixelationDebugRanges = 1;
+    pp.DepthPixelationNearEnd = 20;
+    pp.DepthPixelationMiddleEnd = 10;
+    rs.SetWorldPostProcessSettings(17, pp);
+    rs.SyncDepthPixelationViews(17);
+    const auto* bands = rs.FindDepthPixelationViews(parent);
+    ASSERT_NE(bands, nullptr);
+    EXPECT_EQ(rs.Views().FindViewDesc(bands->Views[1])->ActiveRenderLayerMask().Bits, 0u);
+    auto* c = rs.Views().FindCameraData(bands->Cameras[0]);
+    EXPECT_NEAR(c->proj[10] + c->proj[14], 1.0f, 1e-5f);
+    EXPECT_NEAR(c->proj[10] * 100 + c->proj[14], 0.0f, 1e-5f);
+    rs.Views().ReleaseView(parent);
+    rs.SyncDepthPixelationViews(17);
+    EXPECT_TRUE(rs.Views().GetViews().empty());
+}
+
+TEST(DepthPixelationViews, AllocatesActualRasterExtents)
+{
+    auto device = CreateVulkanDeviceFast();
+    if (!device) GTEST_SKIP() << "No Vulkan device available";
+    RenderServices rs;
+    ASSERT_TRUE(rs.Initialize(device.get()));
+    const auto camera = rs.Views().AllocateCamera("ExtentCamera");
+    CameraData data{};
+    for (int i = 0; i < 16; i += 5) data.view[i] = data.proj[i] = 1;
+    rs.Views().SetCameraData(camera, data);
+    const auto parent = rs.Views().AllocateView("ExtentParent", camera);
+    rs.Views().SetViewWorldId(parent, 7);
+    PostProcessSettings pp{};
+    pp.DepthPixelationIntensity = 1;
+    pp.DepthPixelationNearResolution = 40;
+    pp.DepthPixelationMiddleResolution = 100;
+    pp.DepthPixelationFarResolution = 240;
+    pp.DepthPixelationSkyResolution = 240;
+    FramePools pools(device.get());
+    RenderGraph::RGFrame frame(device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+    frame.BeginFrame(0);
+    auto td = ColorTargetDesc();
+    td.width = 1200; td.height = 800;
+    const auto color = frame.ImportPersistentTexture("PixelationTest.Color", td);
+    const std::vector<ViewTargetsRG> parents{{parent, color, {}, {}}};
+    std::vector<ViewTargetsRG> targets;
+    const auto prepare = [&] {
+        for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+            if (hooks.PrepareFrameTargets) hooks.PrepareFrameTargets(rs, frame, parents, targets);
+    };
+    prepare();
+    EXPECT_TRUE(targets.empty()) << "disabled effects do not copy or extend frame targets";
+    rs.SetWorldPostProcessSettings(7, pp);
+    rs.SyncDepthPixelationViews(7);
+    prepare();
+    ASSERT_EQ(targets.size(), 5u);
+    const uint32_t heights[] = {40, 100, 240, 240};
+    for (size_t i = 1; i < targets.size(); ++i)
+    {
+        const auto& cd = frame.Graph().ResourceDesc(targets[i].Color.Id);
+        const auto& dd = frame.Graph().ResourceDesc(targets[i].Depth.Id);
+        EXPECT_EQ(cd.Height, heights[i - 1]);
+        EXPECT_EQ(cd.Width, heights[i - 1] * 3 / 2);
+        EXPECT_EQ(dd.Width, cd.Width);
+        EXPECT_EQ(dd.Height, cd.Height);
+        EXPECT_EQ(cd.SampleCount, 1u);
+        const auto* perView = rs.Views().FindPerView(targets[i].View);
+        ASSERT_NE(perView, nullptr);
+        EXPECT_TRUE(perView->LightBuffers[device->GetFrameIndex() % Rendering::IDevice::kMaxSupportedFramesInFlight].IsValid());
+        EXPECT_NE(targets[i].Depth.Id, targets[1 == i ? 2 : 1].Depth.Id);
+    }
+}
+
+TEST(DepthPixelationViews, ScreenDivisorsFollowViewportResize)
+{
+    auto device = CreateVulkanDeviceFast();
+    if (!device) GTEST_SKIP() << "No Vulkan device available";
+    RenderServices rs;
+    const auto camera = rs.Views().AllocateCamera("DivisorCamera");
+    CameraData data{};
+    for (int i = 0; i < 16; i += 5) data.view[i] = data.proj[i] = 1;
+    rs.Views().SetCameraData(camera, data);
+    const auto parent = rs.Views().AllocateView("DivisorParent", camera);
+    rs.Views().SetViewWorldId(parent, 7);
+    PostProcessSettings pp{};
+    pp.DepthPixelationIntensity = 1;
+    pp.DepthPixelationResolutionMode = 1;
+    pp.DepthPixelationNearDivisor = 8;
+    pp.DepthPixelationMiddleDivisor = 4;
+    pp.DepthPixelationFarDivisor = 1;
+    pp.DepthPixelationSkyDivisor = 0; // invalid input clamps to native size
+    rs.SetWorldPostProcessSettings(7, pp);
+    rs.SyncDepthPixelationViews(7);
+    FramePools pools(device.get());
+    for (uint32_t index = 0; index < 2; ++index)
+    {
+        RenderGraph::RGFrame frame(device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+        frame.BeginFrame(index);
+        auto td = ColorTargetDesc();
+        td.width = index == 0 ? 1920 : 1281;
+        td.height = index == 0 ? 1080 : 721;
+        const auto color = frame.ImportPersistentTexture("DivisorTest.Color", td);
+        std::vector<ViewTargetsRG> targets{{parent, color, {}, {}}};
+        rs.AppendDepthPixelationTargets(frame, targets);
+        ASSERT_EQ(targets.size(), 5u);
+        const uint32_t divisors[] = {8, 4, 1, 1};
+        for (size_t i = 1; i < targets.size(); ++i)
+        {
+            const auto& cd = frame.Graph().ResourceDesc(targets[i].Color.Id);
+            EXPECT_EQ(cd.Width, (td.width + divisors[i-1] - 1) / divisors[i-1]);
+            EXPECT_EQ(cd.Height, (td.height + divisors[i-1] - 1) / divisors[i-1]);
+        }
+    }
+}
+
+TEST(DepthPixelationViews, BandCountAllocatesOnlyRequestedBands)
+{
+    RenderServices rs;
+    const auto camera = rs.Views().AllocateCamera("CountCamera");
+    CameraData data{};
+    for (int i = 0; i < 16; i += 5) data.view[i] = data.proj[i] = 1;
+    rs.Views().SetCameraData(camera, data);
+    const auto parent = rs.Views().AllocateView("CountParent", camera);
+    rs.Views().SetViewWorldId(parent, 7);
+    PostProcessSettings pp{};
+    pp.DepthPixelationIntensity = 1;
+    for (const int requested : {1, 10, 2, 0, 20})
+    {
+        pp.DepthPixelationBandCount = requested;
+        rs.SetWorldPostProcessSettings(7, pp);
+        rs.SyncDepthPixelationViews(7);
+        const int expected = std::clamp(requested, 1, 10);
+        ASSERT_EQ(rs.Views().GetViews().size(), size_t(expected + 2));
+        ASSERT_EQ(rs.Views().GetCameras().size(), size_t(expected + 2));
+        const auto* bands = rs.FindDepthPixelationViews(parent);
+        ASSERT_NE(bands, nullptr);
+        EXPECT_EQ(bands->BandCount, expected);
+        for (int i = 0; i < 10; ++i) EXPECT_EQ(bands->Views[i] != 0, i < expected);
+        EXPECT_NE(bands->Views[RenderServices::DepthPixelationViews::kSkyIndex], 0u);
+        float start = 0, end = 0; int metric = -1;
+        EXPECT_FALSE(rs.GetDepthPixelationBandRange(parent, start, end, metric));
+        EXPECT_FALSE(rs.GetDepthPixelationBandRange(bands->Views[RenderServices::DepthPixelationViews::kSkyIndex], start, end, metric));
+        EXPECT_TRUE(rs.GetDepthPixelationBandRange(bands->Views[expected - 1], start, end, metric));
+        EXPECT_EQ(metric, 0);
+        EXPECT_EQ(end, 1e30f);
+        if (expected == 1) EXPECT_EQ(start, 0.0f);
+        pp.DepthPixelationDistanceMode = 1;
+        rs.SetWorldPostProcessSettings(7, pp);
+        EXPECT_TRUE(rs.GetDepthPixelationBandRange(bands->Views[0], start, end, metric));
+        EXPECT_EQ(metric, 1);
+        pp.DepthPixelationDistanceMode = 0;
+        rs.SetWorldPostProcessSettings(7, pp);
+        rs.SyncDepthPixelationViews(7);
+        EXPECT_EQ(rs.Views().GetViews().size(), size_t(expected + 2));
+    }
+    pp.DepthPixelationIntensity = 0;
+    rs.SetWorldPostProcessSettings(7, pp);
+    rs.SyncDepthPixelationViews(7);
+    EXPECT_EQ(rs.Views().GetViews().size(), 1u);
+}
+
+TEST(DepthPixelationViews, CompositorReadsCurrentRasterCoverageInsteadOfEarlyDepthCopy)
+{
+    FxChainFixture f;
+    if (!f.Up()) GTEST_SKIP() << "No Vulkan device available";
+    {
+        ASSERT_TRUE(f.Registry.Register("DepthResolve", [] { return std::make_unique<Nodes::DepthResolveNode>(); }, true));
+        ASSERT_TRUE(f.Registry.Register("DepthPixelation", [] { return std::make_unique<Nodes::DepthPixelationNode>(); }, true));
+        f.Rs->BeginWorldDrawFrame();
+        f.Rs->Views().SetViewWorldId(f.View, 7);
+        PostProcessSettings pp{};
+        pp.DepthPixelationIntensity = 1;
+        f.Rs->SetWorldPostProcessSettings(7, pp);
+        f.Rs->SyncDepthPixelationViews(7);
+        RenderPipelineBlueprint bp;
+        bp.pipelineName = "PixelationMotionCoverage";
+        auto resolve = FxChainFixture::FxPass("EarlyDepth", R"({"id":"EarlyDepth","type":"DepthResolve"})");
+        resolve.type = "DepthResolve";
+        bp.passes.push_back(resolve);
+        bp.passes.push_back(FxChainFixture::WorldPass());
+        auto composite = FxChainFixture::FxPass("Pixelation", R"({"id":"Pixelation","type":"DepthPixelation","inputs":{"uSceneColor":"SceneColor"},"output":"View.Resolve","shaderPkg":"Shaders/depth_pixelation.shaderpkg"})");
+        composite.type = "DepthPixelation";
+        bp.passes.push_back(composite);
+        bp.worldColorResolveTargetRef = "SceneColor";
+        FxChainFixture::AddTexResource(bp, "SceneColor");
+        bp.outputs.push_back({"FinalColor", "View.Resolve"});
+        RenderPipelineInstance instance(*f.Rs, f.Registry);
+        instance.SetBlueprint(bp);
+        FramePools pools(f.Device.get());
+        RenderGraph::RGFrame frame(f.Device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+        frame.BeginFrame(0);
+        const auto color = frame.ImportPersistentTexture("Motion.Color", ColorTargetDesc());
+        const auto depth = frame.ImportPersistentTexture("Motion.Depth", DepthTargetDesc());
+        std::vector<ViewTargetsRG> targets{{f.View, color, depth, {}}};
+        f.Rs->AppendDepthPixelationTargets(frame, targets);
+        f.Rs->BuildWorldBatchKeys();
+        const auto views = f.Rs->Views().GetViews();
+        instance.Declare(frame, targets, views);
+        const auto* resources = instance.FrameResourcesFor(&frame);
+        ASSERT_NE(resources, nullptr);
+        EXPECT_FALSE(resources->Textures.contains({f.View, "SceneColor"}))
+            << "Pixelation must not allocate the full-resolution scene for blending";
+        EXPECT_EQ(resources->Textures.at({f.View, "Pixelation.OutputDepth"}).Id, depth.Id);
+        bool compositeWritesDisplayDepth = false;
+        for (const auto& access : frame.Graph().Accesses())
+            if (access.Resource == depth.Id)
+            {
+                const std::string passName = frame.Graph().PassName(access.Pass);
+                EXPECT_NE(passName.find("Pixelation"), std::string::npos)
+                    << "The parent must not rasterize geometry or run an early depth copy: " << passName;
+                compositeWritesDisplayDepth = true;
+            }
+        EXPECT_TRUE(compositeWritesDisplayDepth);
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto child = targets[i + 1].View;
+            const auto bound = resources->Textures.at({f.View, "Pixelation.Band" + std::to_string(i) + "Depth"});
+            EXPECT_EQ(bound.Id, targets[i + 1].Depth.Id);
+            const auto early = resources->Textures.at({child, "View.DepthResolved"});
+            ASSERT_NE(early.Id, bound.Id) << "Test must exercise a separate pre-color depth snapshot";
+        }
+    }
+    f.Down();
+}
+
+TEST(DepthPixelationViews, OverlappingBandsSelectNearestSampleAndWriteMatchingDepth)
+{
+    // A conservative band footprint can admit background in the coarse band
+    // while a finer band contains foreground. Exercise the real compositor
+    // shader with known samples, including ties and empty coverage.
+    struct SamplesNode final : IRenderPipelineNode
+    {
+        float NearDepth = 0, FarDepth = 0;
+        int Pattern = 0;
+        uint32_t Size = 4;
+        const char* GetTypeName() const override { return "PixelationSamples"; }
+        bool Initialize(std::string, std::string json, std::string*) override
+        {
+            const auto j = nlohmann::json::parse(json);
+            NearDepth = j.at("nearDepth").get<float>();
+            FarDepth = j.at("farDepth").get<float>();
+            Pattern = j.value("pattern", 0);
+            Size = j.value("size", 4u);
+            return true;
+        }
+        void DeclareForView(ViewDeclare& d) override
+        {
+            const std::string name = d.View.debugName ? d.View.debugName : "";
+            const bool isNear = name == "Pixelation.Band1";
+            const bool isFar = name == "Pixelation.Band2";
+            d.Frame.AddPass(d.PassName().c_str(), static_cast<int32_t>(PassPhase::kWorldRender),
+                [&](RenderGraph::RGPassBuilder& p)
+                {
+                    RenderGraph::RGAttachmentOps colorOps{};
+                    colorOps.Load = RenderGraph::RGLoadOp::Clear;
+                    colorOps.Store = RenderGraph::RGStoreOp::Store;
+                    colorOps.Clear.Color[isNear ? 0 : isFar ? 1 : 2] = 1.0f;
+                    colorOps.Clear.Color[3] = 1.0f;
+                    p.AttachColor(0, d.ViewColor, colorOps);
+                    RenderGraph::RGAttachmentOps depthOps{};
+                    depthOps.Load = RenderGraph::RGLoadOp::Clear;
+                    depthOps.Store = RenderGraph::RGStoreOp::Store;
+                    depthOps.Clear.Depth = isNear ? NearDepth : isFar ? FarDepth : 0.0f;
+                    p.AttachDepth(d.ViewDepth, depthOps);
+                }, [](RenderGraph::RGContext&) {});
+            if (isFar && Pattern != 0)
+            {
+                // Alternating fine columns expose per-output-pixel selection:
+                // each 2x2 coarse cell must choose once at its center.
+                TextureDesc desc{};
+                desc.width = desc.height = Size;
+                desc.format = static_cast<uint32_t>(TextureFormat::R32_FLOAT);
+                desc.usage = static_cast<uint32_t>(TextureUsage::ShaderResource | TextureUsage::TransferDst);
+                const auto depth = d.Frame.ImportPersistentTexture("FinePattern", desc);
+                const auto upload = d.Frame.AllocUpload(Size * Size * sizeof(float));
+                for (uint32_t i = 0; i < Size * Size; ++i)
+                    static_cast<float*>(upload.Ptr)[i] = (int((i % Size) % 2) == Pattern - 1) ? 0.8f : 0.2f;
+                d.Frame.AddPass("FinePattern.Upload", PassPhase::kEarlySetup,
+                    [depth](RenderGraph::RGPassBuilder& p) { p.Write(depth, RenderGraph::RGTextureWrite::CopyDst); },
+                    [depth, upload, size = Size](RenderGraph::RGContext& ctx)
+                    {
+                        ctx.Cmd->CopyBufferToTextureSubresource(upload.Buffer, ctx.GetTexture(depth),
+                            0, 0, size, size, upload.Offset);
+                    });
+                d.PublishTexture("View.Depth", depth);
+            }
+            d.PublishTexture("SceneColor", d.ViewColor);
+        }
+    };
+    FxChainFixture f;
+    if (!f.Up()) GTEST_SKIP() << "No Vulkan device available";
+    {
+        ASSERT_TRUE(f.Registry.Register("PixelationSamples", [] { return std::make_unique<SamplesNode>(); }, true));
+        ASSERT_TRUE(f.Registry.Register("DepthPixelation", [] { return std::make_unique<Nodes::DepthPixelationNode>(); }, true));
+        ShaderPackage package{};
+        std::string packageError;
+        ASSERT_TRUE(LoadShaderPkg("Shaders/depth_pixelation.shaderpkg", f.Device->PreferredShaderSource(), package, &packageError)) << packageError;
+        uint32_t samplerCount = 0;
+        for (const auto& set : package.meta.Sets)
+            for (const auto& binding : set.Bindings)
+                if (binding.Type == ShaderMetaBindingType::kSampler ||
+                    binding.Type == ShaderMetaBindingType::kCombinedImageSampler)
+                    samplerCount += binding.Count;
+        // Vulkan guarantees 16 per-stage samplers. All ten bands plus sky
+        // must fit even on a device exposing that minimum.
+        EXPECT_LE(samplerCount, 16u);
+        f.Rs->Views().SetViewWorldId(f.View, 7);
+        PostProcessSettings pp{};
+        pp.DepthPixelationIntensity = 1;
+        pp.DepthPixelationBandCount = 2;
+        struct Case { float Near, Far; int Channel; float Depth; int Pattern = 0; uint32_t Size = 4; int Stabilization = 0; };
+        const Case cases[] = {{0.2f, 0.8f, 1, 0.8f}, {0.8f, 0.2f, 0, 0.8f},
+                              {0.5f, 0.5f, 0, 0.5f}, {0.0f, 0.0f, 2, 0.0f},
+                              {0.5f, 0.2f, 0, 0.5f, 1}, {0.5f, 0.2f, 1, 0.8f, 2},
+                              {0.5f, 0.2f, 0, 0.5f, 1, 5}, {0.5f, 0.2f, 1, 0.8f, 2, 5},
+                              {0.2f, 0.8f, 1, 0.8f, 0, 5, 2}, {0.8f, 0.2f, 0, 0.8f, 0, 5, 2},
+                              {0.0f, 0.0f, 2, 0.0f, 0, 5, 2}};
+        for (const auto& c : cases)
+        {
+            SCOPED_TRACE(::testing::Message() << "coarse=" << c.Near << " fine=" << c.Far << " pattern=" << c.Pattern << " size=" << c.Size);
+            pp.DepthPixelationStabilizationMode = c.Stabilization;
+            if (c.Stabilization == 2)
+            {
+                CameraData ortho{};
+                for (int k = 0; k < 16; k += 5) ortho.view[k] = ortho.proj[k] = 1;
+                ortho.view[12] = 0.13f;
+                ortho.view[13] = -0.21f;
+                f.Rs->Views().SetCameraData(f.Rs->Views().FindViewDesc(f.View)->cameraId, ortho);
+            }
+            pp.DepthPixelationAutoBandResolution = c.Pattern != 0;
+            pp.DepthPixelationAutoFarPixelSize = 1;
+            f.Rs->BeginWorldDrawFrame();
+            f.Rs->SetWorldPostProcessSettings(7, pp);
+            f.Rs->SyncDepthPixelationViews(7);
+            ASSERT_NE(f.Rs->FindDepthPixelationViews(f.View), nullptr);
+            RenderPipelineBlueprint bp;
+            bp.pipelineName = "PixelationOverlap";
+            auto samples = FxChainFixture::FxPass("Samples", nlohmann::json({
+                {"id", "Samples"}, {"type", "PixelationSamples"},
+                {"nearDepth", c.Near}, {"farDepth", c.Far}, {"pattern", c.Pattern}, {"size", c.Size}}).dump());
+            samples.type = "PixelationSamples";
+            bp.passes.push_back(samples);
+            auto composite = FxChainFixture::FxPass("Pixelation", R"({"id":"Pixelation","type":"DepthPixelation","source":"SceneColor","output":"View.Resolve","shaderPkg":"Shaders/depth_pixelation.shaderpkg"})");
+            composite.type = "DepthPixelation";
+            bp.passes.push_back(composite);
+            bp.outputs.push_back({"FinalColor", "View.Resolve"});
+            RenderPipelineInstance instance(*f.Rs, f.Registry);
+            instance.SetBlueprint(bp);
+            FramePools pools(f.Device.get());
+            RenderGraph::RGFrame frame(f.Device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+            frame.BeginFrame(0);
+            auto colorDesc = ColorTargetDesc();
+            colorDesc.width = colorDesc.height = c.Size;
+            colorDesc.usage |= static_cast<uint32_t>(TextureUsage::TransferSrc);
+            auto depthDesc = DepthTargetDesc();
+            depthDesc.width = depthDesc.height = c.Size;
+            depthDesc.usage |= static_cast<uint32_t>(TextureUsage::TransferSrc);
+            const auto color = frame.ImportPersistentTexture("Overlap.Color", colorDesc);
+            const auto depth = frame.ImportPersistentTexture("Overlap.Depth", depthDesc);
+            std::vector<ViewTargetsRG> targets{{f.View, color, depth, {}}};
+            f.Rs->AppendDepthPixelationTargets(frame, targets);
+            ASSERT_EQ(targets.size(), 4u); // parent, two bands, sky
+            f.Rs->BuildWorldBatchKeys();
+            instance.Declare(frame, targets, f.Rs->Views().GetViews());
+            auto colorTicket = RequestTextureReadbackRG(f.Device.get(), frame,
+                instance.GetOutputRG(f.View, "FinalColor"), "Overlap.ColorReadback");
+            auto depthTicket = RequestTextureReadbackRG(f.Device.get(), frame, depth, "Overlap.DepthReadback");
+            ASSERT_NE(colorTicket, nullptr);
+            ASSERT_NE(depthTicket, nullptr);
+            frame.Execute();
+            OnFrameSubmittedReadbacksRG(frame, frame.SubmissionToken());
+            f.Device->WaitForIdle();
+            ViewReadbackResult rgb{}, z{};
+            ASSERT_TRUE(colorTicket->TryGet(rgb));
+            ASSERT_TRUE(depthTicket->TryGet(z));
+            ASSERT_EQ(rgb.pixels.size(), c.Size * c.Size * 4u);
+            ASSERT_EQ(z.pixels.size(), c.Size * c.Size * sizeof(float));
+            for (size_t pixel = 0; pixel < c.Size * c.Size; ++pixel)
+            {
+                // The last column of an odd viewport is a cropped cell whose
+                // clamped center samples the final (even) fine column.
+                const bool oddEdge = c.Pattern != 0 && c.Size % 2 && pixel % c.Size == c.Size - 1;
+                const int expectedChannel = oddEdge ? 1 - c.Channel : c.Channel;
+                const float expectedDepth = oddEdge ? (expectedChannel ? 0.8f : 0.5f) : c.Depth;
+                for (int channel = 0; channel < 3; ++channel)
+                    EXPECT_EQ(rgb.pixels[pixel * 4 + channel], channel == expectedChannel ? 255 : 0);
+                float actualDepth = 0;
+                std::memcpy(&actualDepth, z.pixels.data() + pixel * sizeof(float), sizeof(float));
+                EXPECT_FLOAT_EQ(actualDepth, expectedDepth);
+            }
+        }
+    }
+    f.Down();
+}
+
+TEST(DepthPixelationViews, SimpleMethodSamplesFullResolutionImageInWholeCellsWithoutDepthFeedback)
+{
+    struct PatternNode final : IRenderPipelineNode
+    {
+        const char* GetTypeName() const override { return "SimplePixelationPattern"; }
+        bool Initialize(std::string, std::string, std::string*) override { return true; }
+        void DeclareForView(ViewDeclare& d) override
+        {
+            TextureDesc td{};
+            td.width = 5; td.height = 3;
+            td.format = static_cast<uint32_t>(TextureFormat::RGBA8_UNORM);
+            td.usage = static_cast<uint32_t>(TextureUsage::ShaderResource | TextureUsage::TransferDst);
+            const auto color = d.Frame.ImportPersistentTexture("SimplePattern.Color", td);
+            td.format = static_cast<uint32_t>(TextureFormat::R32_FLOAT);
+            const auto depth = d.Frame.ImportPersistentTexture("SimplePattern.Depth", td);
+            const auto rgb = d.Frame.AllocUpload(5 * 3 * 4);
+            const auto z = d.Frame.AllocUpload(5 * 3 * sizeof(float));
+            for (int i = 0; i < 15; ++i)
+            {
+                auto* c = static_cast<uint8_t*>(rgb.Ptr) + i * 4;
+                const bool odd = (i % 5) % 2 != 0;
+                c[0] = odd ? 0 : 255; c[1] = odd ? 255 : 0; c[2] = 0; c[3] = 255;
+                static_cast<float*>(z.Ptr)[i] = odd ? 0.8f : 0.2f;
+            }
+            d.Frame.AddPass("SimplePattern.Upload", PassPhase::kEarlySetup,
+                [color, depth](RenderGraph::RGPassBuilder& p) {
+                    p.Write(color, RenderGraph::RGTextureWrite::CopyDst);
+                    p.Write(depth, RenderGraph::RGTextureWrite::CopyDst);
+                }, [color, depth, rgb, z](RenderGraph::RGContext& ctx) {
+                    ctx.Cmd->CopyBufferToTextureSubresource(rgb.Buffer, ctx.GetTexture(color), 0, 0, 5, 3, rgb.Offset);
+                    ctx.Cmd->CopyBufferToTextureSubresource(z.Buffer, ctx.GetTexture(depth), 0, 0, 5, 3, z.Offset);
+                });
+            d.PublishTexture("SceneColor", color);
+            d.PublishTexture("View.DepthResolved", depth);
+            d.PublishTexture("View.Depth", depth);
+        }
+    };
+    FxChainFixture f;
+    if (!f.Up()) GTEST_SKIP() << "No Vulkan device available";
+    {
+        ASSERT_TRUE(f.Registry.Register("SimplePixelationPattern", [] { return std::make_unique<PatternNode>(); }, true));
+        ASSERT_TRUE(f.Registry.Register("DepthPixelation", [] { return std::make_unique<Nodes::DepthPixelationNode>(); }, true));
+        f.Rs->Views().SetViewWorldId(f.View, 7);
+        CameraData camera{};
+        for (int i = 0; i < 16; i += 5) camera.view[i] = camera.proj[i] = 1;
+        f.Rs->Views().SetCameraData(f.Rs->Views().FindViewDesc(f.View)->cameraId, camera);
+        PostProcessSettings pp{};
+        pp.DepthPixelationIntensity = 1;
+        pp.DepthPixelationSimpleScreenSpace = 1;
+        pp.DepthPixelationBandCount = 1;
+        pp.DepthPixelationResolutionMode = 1;
+        pp.DepthPixelationNearDivisor = pp.DepthPixelationSkyDivisor = 2;
+        f.Rs->BeginWorldDrawFrame();
+        f.Rs->SetWorldPostProcessSettings(7, pp);
+        f.Rs->SyncDepthPixelationViews(7);
+        ASSERT_NE(f.Rs->FindDepthPixelationViews(f.View), nullptr);
+        EXPECT_TRUE(f.Rs->FindDepthPixelationViews(f.View)->SimpleScreenSpace);
+        RenderPipelineBlueprint bp;
+        bp.pipelineName = "SimplePixelation";
+        auto pattern = FxChainFixture::FxPass("Pattern", R"({"type":"SimplePixelationPattern"})");
+        pattern.type = "SimplePixelationPattern";
+        bp.passes.push_back(pattern);
+        auto composite = FxChainFixture::FxPass("Pixelation", R"({"id":"Pixelation","type":"DepthPixelation","source":"SceneColor","output":"View.Resolve","shaderPkg":"Shaders/depth_pixelation.shaderpkg"})");
+        composite.type = "DepthPixelation";
+        bp.passes.push_back(composite);
+        bp.outputs.push_back({"FinalColor", "View.Resolve"});
+        RenderPipelineInstance instance(*f.Rs, f.Registry);
+        instance.SetBlueprint(bp);
+        FramePools pools(f.Device.get());
+        RenderGraph::RGFrame frame(f.Device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+        frame.BeginFrame(0);
+        auto cd = ColorTargetDesc(); cd.width = 5; cd.height = 3;
+        cd.usage |= static_cast<uint32_t>(TextureUsage::TransferSrc);
+        auto dd = DepthTargetDesc(); dd.width = 5; dd.height = 3;
+        dd.usage |= static_cast<uint32_t>(TextureUsage::TransferSrc);
+        const auto color = frame.ImportPersistentTexture("Simple.Output", cd);
+        const auto depth = frame.ImportPersistentTexture("Simple.OutputDepth", dd);
+        std::vector<ViewTargetsRG> targets{{f.View, color, depth, {}}};
+        f.Rs->AppendDepthPixelationTargets(frame, targets);
+        ASSERT_EQ(targets.size(), 2u);
+        f.Rs->BuildWorldBatchKeys();
+        instance.Declare(frame, targets, f.Rs->Views().GetViews());
+        const auto* resources = instance.FrameResourcesFor(&frame);
+        ASSERT_NE(resources, nullptr);
+        EXPECT_NE(resources->Textures.at({f.View, "Pixelation.OutputDepth"}).Id,
+                  resources->Textures.at({f.View, "Pixelation.Band0Depth"}).Id);
+        auto colorTicket = RequestTextureReadbackRG(f.Device.get(), frame, instance.GetOutputRG(f.View, "FinalColor"), "Simple.ColorReadback");
+        auto depthTicket = RequestTextureReadbackRG(f.Device.get(), frame, depth, "Simple.DepthReadback");
+        ASSERT_NE(colorTicket, nullptr); ASSERT_NE(depthTicket, nullptr);
+        frame.Execute();
+        OnFrameSubmittedReadbacksRG(frame, frame.SubmissionToken());
+        f.Device->WaitForIdle();
+        ViewReadbackResult rgb{}, z{};
+        ASSERT_TRUE(colorTicket->TryGet(rgb)); ASSERT_TRUE(depthTicket->TryGet(z));
+        ASSERT_EQ(rgb.pixels.size(), 60u); ASSERT_EQ(z.pixels.size(), 60u);
+        for (int i = 0; i < 15; ++i)
+        {
+            const bool edge = i % 5 == 4;
+            EXPECT_EQ(rgb.pixels[i * 4], edge ? 255 : 0);
+            EXPECT_EQ(rgb.pixels[i * 4 + 1], edge ? 0 : 255);
+            float value; std::memcpy(&value, z.pixels.data() + i * 4, 4);
+            EXPECT_NEAR(value, edge ? 0.2f : 0.8f, 1e-6f);
+        }
+    }
+    f.Down();
+}
+
+TEST(DepthPixelationViews, AutomaticPixelsDoubleTowardCameraAndFollowResize)
+{
+    PostProcessSettings pp{};
+    pp.DepthPixelationAutoBandResolution = 1;
+    pp.DepthPixelationAutoFarPixelSize = 2;
+    pp.DepthPixelationBandCount = 4;
+    pp.DepthPixelationResolutionMode = 0; // Automatic overrides manual fixed heights.
+    const uint32_t expectedWidths[] = {120, 240, 480, 960};
+    const uint32_t expectedHeights[] = {68, 135, 270, 540};
+    for (int i = 0; i < 4; ++i)
+    {
+        const auto extent = RenderServices::DepthPixelationRasterExtent(pp, i, 1920, 1080);
+        EXPECT_EQ(extent[0], expectedWidths[i]);
+        EXPECT_EQ(extent[1], expectedHeights[i]);
+    }
+    EXPECT_EQ(RenderServices::DepthPixelationRasterExtent(pp, 10, 1920, 1080),
+              RenderServices::DepthPixelationRasterExtent(pp, 3, 1920, 1080));
+    pp.DepthPixelationAutoFarPixelSize = 1;
+    EXPECT_EQ(RenderServices::DepthPixelationRasterExtent(pp, 3, 1281, 721), (std::array<uint32_t, 2>{1281, 721}));
+    EXPECT_EQ(RenderServices::DepthPixelationRasterExtent(pp, 0, 1281, 721), (std::array<uint32_t, 2>{161, 91}));
+    pp.DepthPixelationBandCount = 10;
+    EXPECT_EQ(RenderServices::DepthPixelationRasterExtent(pp, 0, 1, 1), (std::array<uint32_t, 2>{1, 1}));
+    pp.DepthPixelationBandCount = 1;
+    EXPECT_EQ(RenderServices::DepthPixelationRasterExtent(pp, 0, 1281, 721), (std::array<uint32_t, 2>{1281, 721}));
+}
+
+TEST(DepthPixelationViews, AutoStabilizationKeepsOrthoGridAndCompensatesWithoutEmptyBorders)
+{
+    CameraData camera{};
+    for (int i = 0; i < 16; i += 5) camera.view[i] = camera.proj[i] = 1;
+    camera.proj[0] = camera.proj[5] = 0.02f; // 100 world units, 100 logical pixels.
+    camera.view[12] = 0.25f;
+    camera.view[13] = -0.35f;
+    std::array<float, 4> uv{};
+    const auto snapped = RenderServices::StabilizeDepthPixelationCamera(camera, 100, 100, 10, true, uv);
+    EXPECT_NEAR(snapped.viewProj[12], 0, 1e-6f);
+    EXPECT_NEAR(snapped.viewProj[13], 0, 1e-6f);
+    // A static world point stays in the same raster cell through subpixel translation.
+    camera.view[12] = 0.40f;
+    std::array<float, 4> nextUV{};
+    const auto next = RenderServices::StabilizeDepthPixelationCamera(camera, 100, 100, 10, true, nextUV);
+    EXPECT_NEAR(next.viewProj[12], snapped.viewProj[12], 1e-6f);
+    EXPECT_NE(nextUV[2], uv[2]); // Display correction preserves smooth camera motion.
+    for (int axis = 0; axis < 2; ++axis)
+    {
+        EXPECT_GT(0.5f - 0.5f * uv[axis] + uv[axis + 2], 0.0f);
+        EXPECT_LT(0.5f + 0.5f * uv[axis] + uv[axis + 2], 1.0f);
+    }
+    const auto unchanged = RenderServices::StabilizeDepthPixelationCamera(camera, 100, 100, 10, false, uv);
+    EXPECT_EQ(uv, (std::array<float, 4>{1, 1, 0, 0}));
+    for (int i = 0; i < 16; ++i) EXPECT_EQ(unchanged.proj[i], camera.proj[i]);
+}
+
+TEST(DepthPixelationViews, PerspectiveAutoUsesBandFocusAndKeepsPhysicalCameraAndDepth)
+{
+    CameraData camera{};
+    for (int i = 0; i < 16; i += 5) camera.view[i] = 1;
+    camera.proj[0] = camera.proj[5] = 1;
+    camera.proj[11] = 1;
+    camera.proj[14] = 0.1f;
+    camera.view[12] = 0.075f;
+    camera.cameraPos[0] = -0.075f;
+    std::array<float, 4> uvNear{}, uvFar{};
+    const auto near = RenderServices::StabilizeDepthPixelationCamera(camera, 100, 100, 10, true, uvNear);
+    const auto far = RenderServices::StabilizeDepthPixelationCamera(camera, 100, 100, 30, true, uvFar);
+    EXPECT_NE(uvNear[2], uvFar[2]);
+    for (int i = 0; i < 16; ++i) EXPECT_EQ(near.view[i], camera.view[i]);
+    EXPECT_EQ(near.cameraPos[0], camera.cameraPos[0]);
+    EXPECT_EQ(near.proj[10], far.proj[10]);
+    EXPECT_EQ(near.proj[14], camera.proj[14]);
+    EXPECT_EQ(near.proj[11], camera.proj[11]);
+    EXPECT_TRUE(std::isfinite(near.viewProj[12]));
+}
+
+TEST(RenderPipelineDeclareTests, AnimationPatchPreservesWaterSettingsAndWorldWind)
+{
+    auto device = CreateVulkanDeviceFast();
+    if (!device) GTEST_SKIP() << "No Vulkan device available";
+    RenderServices rs;
+    ASSERT_TRUE(rs.Initialize(device.get()));
+    const auto view = rs.Views().AllocateView("Weather", Rendering::CameraId{});
+    PostProcessSettings settings{};
+    settings.WaterDropSize = 1.8f;
+    settings.WaterRippleSpeed = 0.0f;
+    rs.Views().SetViewPostProcessOverride(view, settings);
+    WeatherWindGPU wind{};
+    wind.Count[0] = 1.0f;
+    wind.Volumes[0].Mode[2] = 0.2f;
+    rs.SetWorldWeatherWind(0, wind);
+    ForwardLightUBO packed{};
+    packed.uTimeParams[2] = 42.0f;
+    packed.uTimeParams[3] = 24.0f;
+    rs.PackViewWeather(view, 0, packed);
+    EXPECT_FLOAT_EQ(packed.uTimeParams[2], 42.0f);
+    EXPECT_FLOAT_EQ(packed.uTimeParams[3], 24.0f);
+    EXPECT_FLOAT_EQ(packed.WeatherWind.Count[1], 1.8f);
+    EXPECT_FLOAT_EQ(packed.WeatherWind.Count[2], 0.0f);
+    rs.WriteViewLightBuffer(view);
+    const auto* pv = rs.Views().FindPerView(view);
+    ASSERT_NE(pv, nullptr);
+    const auto slot = std::find_if(pv->LightBuffers.begin(), pv->LightBuffers.end(),
+                                   [](auto b) { return b.IsValid(); });
+    ASSERT_NE(slot, pv->LightBuffers.end());
+    const auto buffer = *slot;
+    rs.BeginWorldDrawFrame(); // animation patch must not erase weather controls
+    ForwardLightUBO actual{};
+    void* mapped = device->MapBuffer(buffer);
+    ASSERT_NE(mapped, nullptr);
+    std::memcpy(&actual, mapped, sizeof(actual));
+    device->UnmapBuffer(buffer);
+    EXPECT_FLOAT_EQ(actual.WeatherWind.Count[1], 1.8f);
+    EXPECT_FLOAT_EQ(actual.WeatherWind.Count[2], 0.0f);
+    EXPECT_FLOAT_EQ(actual.uTimeParams[3], actual.uTimeParams[1]);
+    EXPECT_FLOAT_EQ(actual.WeatherWind.Count[0], 1.0f);
+    EXPECT_FLOAT_EQ(actual.WeatherWind.Volumes[0].Mode[2], 0.2f);
+    // A fresh write after world extraction resets must remove expired volumes.
+    rs.Views().SetViewPostProcessOverride(view, settings);
+    rs.WriteViewLightBuffer(view);
+    mapped = device->MapBuffer(buffer);
+    ASSERT_NE(mapped, nullptr);
+    std::memcpy(&actual, mapped, sizeof(actual));
+    device->UnmapBuffer(buffer);
+    EXPECT_FLOAT_EQ(actual.WeatherWind.Count[0], 0.0f);
+    rs.Shutdown();
+    device->Shutdown();
+}
+
 // The trace and classify passes ray-query the TLAS that DDGI.ASBuild builds in the
 // same frame. With no resource connecting them the graph was free to schedule a
 // trace ahead of the build, and the first traces after a scene opened traversed a
@@ -20363,4 +21468,43 @@ TEST(RenderPipelineDeclareTests, CommittedPipelinesListTheLutTablesWhereTheirSha
     if (checkedNodes == 0)
         GTEST_SKIP() << "no staged package binds uLut3d (shaderpkgs not staged under the build root's Shaders/)";
     EXPECT_GE(checkedNodes, 2u) << "at least the engine's Tonemap and HDRColorFx nodes";
+}
+
+TEST(RenderPipelineDeclareTests, PublishedViewLookupKeepsViewIdentityAndMissingOutputInvalid)
+{
+    auto device = CreateVulkanDeviceFast();
+    if (!device) GTEST_SKIP() << "No Vulkan device available";
+    {
+        RenderServices rs;
+        RenderPipelineNodeRegistry registry;
+        ASSERT_TRUE(registry.Register("DeclareProbe", [] { return std::make_unique<DeclareProbeNode>(); }, true));
+        RenderPipelineBlueprint bp;
+        bp.pipelineName = "CrossViewLookup";
+        bp.passes.push_back(MakePass("lookup"));
+        RenderPipelineInstance instance(rs, registry);
+        instance.SetBlueprint(bp);
+        FramePools pools(device.get());
+        RenderGraph::RGFrame frame(device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+        frame.BeginFrame(0);
+        const auto first = frame.ImportPersistentTexture("Lookup.First", ColorTargetDesc());
+        const auto second = frame.ImportPersistentTexture("Lookup.Second", ColorTargetDesc());
+        const std::vector<ViewTargetsRG> targets{{7u, first, {}, {}}, {11u, second, {}, {}}};
+        const std::vector<Rendering::ViewDesc> views{MakeViewDesc(7u, 1u), MakeViewDesc(11u, 1u)};
+        std::vector<DeclareProbeNode::Call> calls;
+        DeclareProbeNode::s_Calls = &calls;
+        instance.Declare(frame, targets, views);
+        DeclareProbeNode::s_Calls = nullptr;
+        ASSERT_EQ(calls.size(), 2u);
+        for (const auto& call : calls)
+        {
+            EXPECT_EQ(call.PublishedView7Color.Id, first.Id);
+            EXPECT_FALSE(call.MissingViewColor.IsValid());
+            EXPECT_EQ(call.SeenColor.Id, call.View == 7u ? first.Id : second.Id);
+        }
+        frame.MarkOutput(first);
+        frame.MarkOutput(second);
+        frame.Execute();
+        device->WaitForIdle();
+    }
+    device->Shutdown();
 }

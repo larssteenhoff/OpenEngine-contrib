@@ -163,6 +163,48 @@ void World::GetComponentsBatch(std::span<const EntityHandle> entities,
 }
 
 template<Component T>
+void World::GetComponentsBatchForWrite(std::span<const EntityHandle> entities, std::span<T*> out) {
+    assert(entities.size() == out.size());
+    AutoComponentRegistrar<T>::EnsureRegistered();
+
+    const ComponentTypeId typeId = GetComponentTypeId<T>();
+    {
+        std::shared_lock readLock(worldMutex);
+        if (componentSizes.find(typeId) == componentSizes.end()) {
+            readLock.unlock();
+            std::unique_lock writeLock(worldMutex);
+            componentSizes.try_emplace(typeId, sizeof(T));
+        }
+    }
+    if (entities.empty())
+        return;
+
+    // Shared lock, as GetComponentForWrite takes: a stamp is a store into the
+    // owning chunk's version array, not a structural edit.
+    std::shared_lock lock(worldMutex);
+    // One version for the batch, so each run of entities sharing a chunk with the
+    // previously stamped one is stamped once, as StampComponentWriteBatch does.
+    const uint64_t version = NextGlobalSystemVersion();
+    const Archetype* runArchetype = nullptr;
+    uint32_t runChunk = 0;
+    for (std::size_t i = 0; i < entities.size(); ++i) {
+        const EntityHandle entity = entities[i];
+        out[i] = nullptr;
+        if (!IsValid(entity))
+            continue;
+        const auto& metadata = entityMetadata[entity.index];
+        if (!metadata.archetype)
+            continue;
+        out[i] = metadata.archetype->GetComponentAt<T>(metadata.chunkIndex, metadata.indexInChunk);
+        if (!out[i] || (metadata.archetype == runArchetype && metadata.chunkIndex == runChunk))
+            continue;
+        runArchetype = metadata.archetype;
+        runChunk = metadata.chunkIndex;
+        metadata.archetype->StampColumnVersion(metadata.chunkIndex, typeId, version);
+    }
+}
+
+template<Component T>
 bool World::HasComponent(EntityHandle entity) const {
     AutoComponentRegistrar<T>::EnsureRegistered();
     return GetComponent<T>(entity) != nullptr;

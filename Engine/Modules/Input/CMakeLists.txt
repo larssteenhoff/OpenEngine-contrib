@@ -10,6 +10,11 @@ set(INPUT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/GamepadEdgeTracker.cpp
 )
 
+if(GE_MOBILE)
+    list(REMOVE_ITEM INPUT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/Source/GamepadPolling.cpp)
+    list(APPEND INPUT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/Source/GamepadPolling_Mobile.cpp)
+endif()
+
 add_library(Input OBJECT ${INPUT_PUBLIC_HEADERS} ${INPUT_SOURCES})
 
 # Public includes

@@ -403,6 +403,12 @@ bool BuildPipeline::FailIfCancelled()
     return true;
 }
 
+ShellProcessResult BuildPipeline::RunProcess(const ProcessLaunch& launch,
+                                            std::function<void(const std::string&)> onLine)
+{
+    return m_ActiveShellProcess.Run(launch, [this] { return IsCancelled(); }, std::move(onLine));
+}
+
 ShellProcessResult BuildPipeline::RunShellCommand(const std::string& command,
                                                   std::function<void(const std::string& line)> onLine)
 {
@@ -464,6 +470,21 @@ bool BuildPipeline::Execute(const BuildSettings& settings, ProgressCallback prog
     }
 }
 
+void BuildPipeline::ResolvePackagesForBuild(const BuildSettings& settings)
+{
+    m_SessionMountedPackageAliases.clear();
+    for (const AssetSourceDesc& source :
+         EngineCore::GetInstance().GetAssetManager().GetRegisteredSources())
+    {
+        if (source.Alias != kAssetSourceAliasProject && source.Alias != kAssetSourceAliasEditor)
+            m_SessionMountedPackageAliases.push_back(source.Alias);
+    }
+    m_PackageResolution =
+        ResolveBuildTimePackages(settings.projectRoot, m_SessionMountedPackageAliases);
+    m_PackageRuntimeModules =
+        CollectPackageCodeModules(m_PackageResolution, /*editorContext=*/false);
+}
+
 bool BuildPipeline::ExecuteImpl(const BuildSettings& settings)
 {
     // A cancel requested before Execute (the Build panel closing right after it
@@ -519,17 +540,7 @@ bool BuildPipeline::ExecuteImpl(const BuildSettings& settings)
     // PreAssetCopy validation can attribute mid-session enable/disable drift
     // (mounts only update on project open). Player context — Editor-kind
     // modules never ship.
-    m_SessionMountedPackageAliases.clear();
-    for (const AssetSourceDesc& source :
-         EngineCore::GetInstance().GetAssetManager().GetRegisteredSources())
-    {
-        if (source.Alias != kAssetSourceAliasProject && source.Alias != kAssetSourceAliasEditor)
-            m_SessionMountedPackageAliases.push_back(source.Alias);
-    }
-    m_PackageResolution =
-        ResolveBuildTimePackages(settings.projectRoot, m_SessionMountedPackageAliases);
-    m_PackageRuntimeModules =
-        CollectPackageCodeModules(m_PackageResolution, /*editorContext=*/false);
+    ResolvePackagesForBuild(settings);
 
     // A native template is a runtime, not a cross-compiler. Refuse projects
     // needing target code instead of dropping their gameplay or shipping the
@@ -2215,6 +2226,7 @@ bool BuildPipeline::WriteGameConfig(const fs::path& stagingDir, const BuildSetti
     // server poke RenderServices directly, so a diagnostic tweak left standing
     // in the session would otherwise bake into the game.
     cfg.renderQuality = Rendering::AntiAliasingProjectSettings::Load(s.projectRoot);
+    cfg.sortingLayers = Rendering::SortingLayers::Load(s.projectRoot);
 
     // The render layer names a game's FindRenderLayer answers with.
     cfg.renderLayerNames = Rendering::RenderLayerNames::Load(s.projectRoot);

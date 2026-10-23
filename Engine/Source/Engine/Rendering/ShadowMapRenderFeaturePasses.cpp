@@ -19,6 +19,7 @@
 #include "Engine/Rendering/RenderOrigin.h"
 #include "Engine/Rendering/RenderServices.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Mathematics/Matrix4x4.h"
 #include "Rendering/CameraTypes.h"
 #include "Rendering/Core/RecomputeElision.h"
@@ -28,7 +29,6 @@
 #include <bit>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -44,33 +44,24 @@ using namespace ::GameEngine::Rendering;
 namespace
 {
 // GE_SHADOW_STATIC_CACHE=0 forces the always-render baseline (the A/B lane
-// and kill switch). Any other value (or unset) keeps static-scene cascade
-// shadow caching ON — the standard GE_ flag idiom, flipped from review-gated
-// default-OFF after the dual review's fixes landed and the runtime gates
-// (bit-exact static parity, orbit/dynamic invalidation, tint family, zero
-// validation errors) passed. Read once so the branch is stable for the
-// process lifetime.
+// and kill switch). Unset keeps static-scene cascade shadow caching ON,
+// flipped from review-gated default-OFF after the dual review's fixes landed
+// and the runtime gates (bit-exact static parity, orbit/dynamic invalidation,
+// tint family, zero validation errors) passed. Read once so the branch is
+// stable for the process lifetime.
 bool IsStaticShadowCacheEnabled()
 {
-    static const bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_SHADOW_STATIC_CACHE");
-        return !env || std::strcmp(env, "0") != 0;
-    }();
+    static const bool s_Enabled = Platform::EnvironmentSwitchEnabled("GE_SHADOW_STATIC_CACHE", true);
     return s_Enabled;
 }
 
 // Cache-key view of the caster-reduction lane. Mirrors the file-local
 // IsCasterReductionEnabled in ShadowMapRenderFeature.cpp (anonymous namespace
-// there — same env var, same ON-unless-"0" semantics): the lane changes the
+// there — same env var, same on-unless-switched-off semantics): the lane changes the
 // cull planes and therefore the rendered caster set, so it is a content input.
 bool CacheKeyCasterReductionLane()
 {
-    static const bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_SHADOW_CASTER_REDUCTION");
-        return !env || std::strcmp(env, "0") != 0;
-    }();
+    static const bool s_Enabled = Platform::EnvironmentSwitchEnabled("GE_SHADOW_CASTER_REDUCTION", true);
     return s_Enabled;
 }
 

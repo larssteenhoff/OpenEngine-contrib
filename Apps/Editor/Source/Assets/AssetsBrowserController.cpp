@@ -1,5 +1,6 @@
 #include "Assets/AssetsBrowserController.h"
 #include "Assets/AssetDeletePathGuard.h"
+#include "Assets/AssetGridDragState.h"
 #include "Assets/AssetPathKey.h"
 #include "Assets/AssetsDataProviders.h"
 #include "Assets/PolyhavenDownloadManager.h"
@@ -84,14 +85,7 @@
 namespace GameEngine
 {
 
-// Forward declaration of drag state (defined in BookmarksPanel.cpp)
-struct DragState {
-    bool active;
-    std::filesystem::path assetPath;
-    std::string scenePath;
-    std::string entityId;
-};
-extern DragState g_DragState;
+AssetGridDragState g_DragState;
 
 void SchedulePolyhavenCategoriesLoad(const EditorContext* context, AssetsTreeDataProvider* treeProvider, TreeView* tree,
                                      std::shared_ptr<std::atomic<bool>> alive);
@@ -1825,8 +1819,8 @@ void AssetsBrowserController::Initialize(TreeView* tree, GridView* grid, ListVie
                             s_MouseDown = true;
                             s_DragPath = cellPath;
                             // Clear any previous drag state
-                            g_DragState.active = false;
-                            g_DragState.assetPath.clear();
+                            g_DragState.Active = false;
+                            g_DragState.AssetPath.clear();
                         }
                     });
 
@@ -1844,11 +1838,9 @@ void AssetsBrowserController::Initialize(TreeView* tree, GridView* grid, ListVie
                                 // DragDropManager::BeginDrag from running so inspector/material drops never see
                                 // an in-engine drag. GridView/ListView own AssetPathsDragPayload drags.
 
-                                // Set global drag state for BookmarksPanel
-                                g_DragState.active = true;
-                                g_DragState.assetPath = cellPath;
-                                g_DragState.scenePath.clear();
-                                g_DragState.entityId.clear();
+                                // Set the global drag state for the plain asset-drop targets
+                                g_DragState.Active = true;
+                                g_DragState.AssetPath = cellPath;
                             }
                         }
                     });
@@ -1860,7 +1852,7 @@ void AssetsBrowserController::Initialize(TreeView* tree, GridView* grid, ListVie
                         {
                             s_MouseDown = false;
                             s_DragPath.clear();
-                            // Don't clear g_DragState here - let BookmarksPanel handle it after drop
+                            // Don't clear g_DragState here - the drop target clears it after the drop
                         }
                     });
                 }
@@ -3014,9 +3006,9 @@ void AssetsBrowserController::BindListRow(UIElement* row, ListId id, int /*rowIn
     // Store the row's path so the per-row bookmark micro-drag (below) can recover it.
     m_ListRowPathMap[row] = filePath.string();
 
-    // One-time per-row drag-to-bookmarks gesture. This is distinct from the ListView's asset
-    // DnD (SetDragPayloadBuilder): it drives the global g_DragState that BookmarksPanel reads
-    // on drop. The handlers are registered once per pooled row and recover the current path
+    // One-time per-row plain asset-drag gesture. This is distinct from the ListView's asset
+    // DnD (SetDragPayloadBuilder): it drives the global g_DragState that the Bookmarks panel,
+    // the web panel and the Build settings slots read on drop. The handlers are registered once per pooled row and recover the current path
     // from m_ListRowPathMap (re-keyed every bind), so reuse across items stays correct.
     if (!row->HasClass("asset-list-drag-initialized"))
     {
@@ -3039,8 +3031,8 @@ void AssetsBrowserController::BindListRow(UIElement* row, ListId id, int /*rowIn
             s_DragStartY = e.Y;
             s_MouseDown  = true;
             s_DragPath   = std::filesystem::path(it->second);
-            g_DragState.active = false;
-            g_DragState.assetPath.clear();
+            g_DragState.Active = false;
+            g_DragState.AssetPath.clear();
         });
         row->RegisterEventHandler(kEventMouseMove, [](UIEvent& e)
         {
@@ -3050,10 +3042,8 @@ void AssetsBrowserController::BindListRow(UIElement* row, ListId id, int /*rowIn
             const float dy = std::abs(e.Y - s_DragStartY);
             if (dx > kAssetDragStartThresholdPx || dy > kAssetDragStartThresholdPx)
             {
-                g_DragState.active = true;
-                g_DragState.assetPath = s_DragPath;
-                g_DragState.scenePath.clear();
-                g_DragState.entityId.clear();
+                g_DragState.Active = true;
+                g_DragState.AssetPath = s_DragPath;
             }
         });
         row->RegisterEventHandler(kEventMouseUp, [](UIEvent& e)

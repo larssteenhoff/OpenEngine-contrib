@@ -1,5 +1,7 @@
 #include "Terrain/Heightfield.h"
 
+#include "Noise/ValueNoise2D.h"
+
 #include "Image/Decode.h"
 #include "Image/ImageHeader.h"
 
@@ -298,41 +300,6 @@ void HeightfieldData::Fill(float32 value)
     std::fill(m_Samples.begin(), m_Samples.end(), value);
 }
 
-// Simple hash-based value noise with smoothstep interpolation (no external dependency)
-namespace
-{
-static float32 NoiseHash(int32 x, int32 z, uint32 seed)
-{
-    uint32 h = static_cast<uint32>(x) * 374761393u +
-               static_cast<uint32>(z) * 668265263u +
-               seed * 1274126177u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    h = h ^ (h >> 16);
-    return static_cast<float32>(h & 0x7FFFFFFF) / static_cast<float32>(0x7FFFFFFF);
-}
-
-static float32 SmoothNoise(float32 x, float32 z, uint32 seed)
-{
-    const int32 ix = static_cast<int32>(std::floor(x));
-    const int32 iz = static_cast<int32>(std::floor(z));
-    const float32 fx = x - static_cast<float32>(ix);
-    const float32 fz = z - static_cast<float32>(iz);
-
-    // Smoothstep interpolation
-    const float32 sx = fx * fx * (3.0f - 2.0f * fx);
-    const float32 sz = fz * fz * (3.0f - 2.0f * fz);
-
-    const float32 n00 = NoiseHash(ix, iz, seed);
-    const float32 n10 = NoiseHash(ix + 1, iz, seed);
-    const float32 n01 = NoiseHash(ix, iz + 1, seed);
-    const float32 n11 = NoiseHash(ix + 1, iz + 1, seed);
-
-    const float32 nx0 = n00 + sx * (n10 - n00);
-    const float32 nx1 = n01 + sx * (n11 - n01);
-    return nx0 + sz * (nx1 - nx0);
-}
-} // namespace
-
 void HeightfieldData::FillWithNoise(float32 frequency, float32 amplitude,
                                      uint32 octaves, uint32 seed)
 {
@@ -369,7 +336,7 @@ void HeightfieldData::FillRegionWithNoise(float32 frequency, float32 amplitude,
             {
                 const float32 nx = static_cast<float32>(x) / static_cast<float32>(m_Width) * freq;
                 const float32 nz = static_cast<float32>(z) / static_cast<float32>(m_Height) * freq;
-                value += SmoothNoise(nx, nz, seed + o) * amp;
+                value += Noise::ValueNoise2D(nx, nz, seed + o) * amp;
                 totalAmp += amp;
                 freq *= 2.0f;
                 amp *= 0.5f;
@@ -443,7 +410,7 @@ float32 SampleWorldSpaceNoise(float32 worldX, float32 worldZ, float32 frequency,
         {
             const float32 nx = worldX * freq;
             const float32 nz = worldZ * freq;
-            value += SmoothNoise(nx, nz, seed + o) * amp;
+            value += Noise::ValueNoise2D(nx, nz, seed + o) * amp;
         }
         totalAmp += amp;
         freq *= 2.0f;

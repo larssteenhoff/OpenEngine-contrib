@@ -1,9 +1,11 @@
 #include "Panels/ProjectFolderPickerModal.h"
+#include "UI/ThemeAccent.h"
 #include "Platform/Capabilities.h"
 #include "AssetCore/AssetTypes.h"
 #include "Assets/AssetManager.h"
 #include "UI/Assets/UILayoutAsset.h"
 #include "UI/Controls/Button.h"
+#include "UI/Controls/CollapsibleInfoCard.h"
 #include "UI/Controls/Label.h"
 #include "UI/Controls/ScrollView.h"
 #include "UI/Controls/Scrollbar.h"
@@ -118,11 +120,6 @@ void ApplyScrollbarLane(ScrollView& scrollView)
         .Set(Style::MarginLeft, StyleLength::Px(kProjectPickerScrollbarGapPx))
         .Set(Style::MarginRight, StyleLength::Px(kProjectPickerScrollbarEdgeGapPx));
 }
-
-// --ui_color_accent / the neutral field border from the editor theme. The modal
-// styles inline (overrides beat CSS), so the search bar's focus outline has to
-// be driven in code to match .panel-search-bar's accent focus elsewhere.
-constexpr uint32_t kProjectPickerAccentColor = 0xFF3A8FFFu;
 
 constexpr float kProjectPickerWindowDragThresholdPx = 4.0f;
 
@@ -709,9 +706,8 @@ void ProjectFolderPickerModal::BuildTree()
     // #project-search's border out-specifies them.
     UIElement* searchRoot = search.RootPtr;
     search.FieldPtr->RegisterEventHandler(kEventFocusIn, [searchRoot](UIEvent&) {
-        searchRoot->Overrides().Set(Style::BorderColor, BorderColorsTRBL{
-            kProjectPickerAccentColor, kProjectPickerAccentColor,
-            kProjectPickerAccentColor, kProjectPickerAccentColor});
+        const uint32_t accent = UI::ResolveAccentArgb(searchRoot->GetResolvedStyle());
+        searchRoot->Overrides().Set(Style::BorderColor, BorderColorsTRBL{accent, accent, accent, accent});
         searchRoot->MarkDirty(UIElement::VisualDirty);
     });
     search.FieldPtr->RegisterEventHandler(kEventFocusOut, [searchRoot](UIEvent&) {
@@ -1049,8 +1045,9 @@ void ProjectFolderPickerModal::BuildTree()
     };
 
     // Without a folder picker (web on Firefox/Safari, or Brave with the File
-    // System Access flag off) the dropzone carries the explanation instead of
-    // a dead control — SelectFolder cannot say "impossible" after the click.
+    // System Access flag off) the dropzone says so instead of offering a dead
+    // control — SelectFolder cannot say "impossible" after the click — and an
+    // info card under it names the browsers that can.
     const bool folderPickerAvailable = Platform::SupportsFolderPicker();
 
     auto folderPanel = makeImportPanel(m_ImportFolderView);
@@ -1077,8 +1074,7 @@ void ProjectFolderPickerModal::BuildTree()
     }
     else
     {
-        folderDrop->SetText("This browser can't browse local folders. Use Chrome or Edge — or in "
-                            "Brave, enable brave://flags/#file-system-access-api.");
+        folderDrop->SetText("This browser can't browse local folders.");
         folderDrop->AddClass("disabled");
     }
 
@@ -1112,6 +1108,12 @@ void ProjectFolderPickerModal::BuildTree()
     auto copyOption =
         makeFolderImportOption("Copy into workspace - unavailable in this build", false, false);
     folderPanel->AddChild(std::move(folderDrop));
+    if (!folderPickerAvailable)
+    {
+        folderPanel->AddChild(std::make_unique<EditorUI::CollapsibleInfoCard>(
+            "Use Chrome or Edge to import a local folder, or in Brave enable "
+            "brave://flags/#file-system-access-api."));
+    }
     folderPanel->AddChild(std::move(referenceOption));
     folderPanel->AddChild(std::move(copyOption));
 
@@ -1145,13 +1147,17 @@ void ProjectFolderPickerModal::BuildTree()
     gitUrlField->SetOnValueChanged([this](const std::string&) { UpdateImportProjectEnabled(); });
     gitUrlField->RegisterEventHandler(
         kEventKeyUp, [this](UIEvent&) { UpdateImportProjectEnabled(); });
-    auto gitHint = std::make_unique<Label>();
-    m_ImportGitHint = gitHint.get();
-    gitHint->SetText("");
-    gitHint->AddClass("project-import-git-hint");
+    // Git availability is a requirement, not an explanation: it stays visible
+    // with info cards switched off, because without Git the Import button is
+    // hidden and this line is the only reason given.
+    auto gitRequirement = std::make_unique<Label>();
+    m_ImportGitRequirementLabel = gitRequirement.get();
+    gitRequirement->AddClass("project-import-git-requirement");
     gitPanel->AddChild(std::move(gitUrlLabel));
     gitPanel->AddChild(std::move(gitUrlField));
-    gitPanel->AddChild(std::move(gitHint));
+    gitPanel->AddChild(std::make_unique<EditorUI::CollapsibleInfoCard>(
+        "Public http(s) repository; cloned shallowly."));
+    gitPanel->AddChild(std::move(gitRequirement));
 
     importProjectView->AddChild(std::move(folderPanel));
     importProjectView->AddChild(std::move(archivePanel));
@@ -2214,12 +2220,12 @@ void ProjectFolderPickerModal::UpdateImportProjectMode()
                                                 folder ? DisplayMode::None : DisplayMode::Flex);
         m_ImportDestinationRow->MarkDirty(UIElement::LayoutDirty | UIElement::VisualDirty);
     }
-    if (m_ImportGitHint)
+    if (m_ImportGitRequirementLabel)
     {
-        m_ImportGitHint->SetText(Editor::ProjectAcquisition::IsGitAvailable()
-            ? "Public http(s) repository; cloned shallowly."
+        m_ImportGitRequirementLabel->SetText(Editor::ProjectAcquisition::IsGitAvailable()
+            ? ""
             : "Requires Git — install it from git-scm.com.");
-        m_ImportGitHint->MarkDirty(UIElement::LayoutDirty | UIElement::VisualDirty);
+        m_ImportGitRequirementLabel->MarkDirty(UIElement::LayoutDirty | UIElement::VisualDirty);
     }
     if (m_ImportErrorLabel)
     {

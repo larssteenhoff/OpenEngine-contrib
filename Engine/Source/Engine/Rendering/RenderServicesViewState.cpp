@@ -359,8 +359,11 @@ const ResolvedShadowSettings& RenderServices::GetWorldShadowSettings(uint64 worl
     return it->second;
 }
 
-void RenderServices::SetWorldRenderContentDigest(uint64 worldId, uint64 digest)
+void RenderServices::SetWorldRenderContentDigest(uint64 worldId, uint64 extractedDigest)
 {
+    // Wrapping sum, like the extracted terms: feature order cannot move it.
+    uint64 digest = extractedDigest;
+    ForEachFeature([&](const IRenderFeature& feature) { digest += feature.ContentDigest(worldId); });
     m_WorldRenderContentDigests[worldId] = digest;
 }
 
@@ -399,6 +402,15 @@ std::span<const VolumetricFogLocalVolume> RenderServices::GetEffectiveVolumetric
             m_ViewRegistry.FindViewVolumetricFogVolumesOverride(viewId))
         return *over;
     return GetWorldVolumetricFogVolumes(worldId);
+}
+
+void RenderServices::PackViewWeather(ViewId viewId, uint64 worldId, ForwardLightUBO& ubo) const
+{
+    const auto& settings = GetEffectivePostProcessSettings(viewId, worldId);
+    const auto wind = m_WorldWeatherWind.find(worldId);
+    ubo.WeatherWind = wind != m_WorldWeatherWind.end() ? wind->second : WeatherWindGPU{};
+    ubo.WeatherWind.Count[1] = std::clamp(settings.WaterDropSize, 0.25f, 2.0f);
+    ubo.WeatherWind.Count[2] = std::clamp(settings.WaterRippleSpeed, 0.0f, 4.0f);
 }
 
 void RenderServices::WriteViewLightBuffer(ViewId viewId)
@@ -456,6 +468,7 @@ void RenderServices::WriteViewLightBuffer(ViewId viewId)
     ubo.uTimeParams[2] =
         m_ViewTemporalHistory.ResolveDeformationClock(Time::GetCumulativeSeconds()).TimeSeconds;
     ubo.uTimeParams[3] = ubo.uTimeParams[1];
+    PackViewWeather(viewId, view->worldId, ubo);
 
     void* mapped = m_Device->MapBuffer(buf);
     if (mapped)

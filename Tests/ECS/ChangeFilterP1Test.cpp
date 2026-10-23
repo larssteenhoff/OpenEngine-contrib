@@ -720,3 +720,115 @@ TEST(ChangeFilterP1, StampBatchStampsEachChunkRunOnce) {
     EXPECT_EQ(spanWorld.GetColumnStampCount() - stampsBefore, 2u);
     EXPECT_EQ(VisitedSince(spanWorld, gate), chunkCapacity + 1);
 }
+
+// ---------------------------------------------------------------------------
+// Write<T> in Each and Parallel: the write grant follows the write. The query
+// passes Writable<T>; a callback that only reads it stamps nothing, and a
+// write stamps the written row's chunk. The query still declares the write.
+// ---------------------------------------------------------------------------
+TEST(ChangeFilterP1, WritableVisitWithoutWriteDoesNotStamp) {
+    JobSystem::WorkStealingThreadPool jobSystem(2);
+    World world(&jobSystem);
+    constexpr size_t kEntities = 4000; // several chunks, several Parallel batches
+    constexpr std::size_t kBatch = 256;
+    Populate(world, kEntities);
+
+    EXPECT_TRUE(world.Query<Write<Position>>().GetWriteSet().Contains(GetComponentTypeId<Position>()))
+        << "Write<T> must stay a declared write for the scheduler";
+
+    uint64_t g = world.GetGlobalSystemVersion();
+    std::atomic<size_t> visits{0};
+    world.Query<Write<Position>>().Each([&](EntityHandle, Writable<Position> p) {
+        if (p.Get().x >= 0.0f && p->y == 0.0f)
+            visits.fetch_add(1, std::memory_order_relaxed);
+    });
+    world.Query<Write<Position>>().Parallel(
+        [&](EntityHandle, Writable<Position> p) {
+            if (p->x >= 0.0f)
+                visits.fetch_add(1, std::memory_order_relaxed);
+        },
+        kBatch);
+    EXPECT_EQ(visits.load(), 2 * kEntities) << "both dispatches must visit every row";
+    EXPECT_EQ(VisitedSince(world, g), 0u) << "a Write<T> visit without Mutable() or Set() stamped";
+
+    // Positive controls: writing every row stamps every chunk, in both modes.
+    g = world.GetGlobalSystemVersion();
+    world.Query<Write<Position>>().Each([](Writable<Position> p) { p.Mutable().x += 1.0f; });
+    EXPECT_EQ(VisitedSince(world, g), kEntities) << "Each Mutable() did not stamp";
+
+    g = world.GetGlobalSystemVersion();
+    world.Query<Write<Position>>().Parallel(
+        [](EntityHandle, Writable<Position> p) { p.Mutable().y += 1.0f; }, kBatch);
+    EXPECT_EQ(VisitedSince(world, g), kEntities) << "Parallel Mutable() did not stamp";
+}
+
+TEST(ChangeFilterP1, WritableSetStampsOnlyItsChunk) {
+    JobSystem::WorkStealingThreadPool jobSystem(2);
+    World world(&jobSystem);
+    constexpr size_t kEntities = 4000;
+    auto handles = Populate(world, kEntities);
+
+    auto* archetype = world.GetEntityArchetype(handles[0]);
+    ASSERT_NE(archetype, nullptr);
+    const size_t chunkCapacity = std::as_const(*archetype).GetTable().GetLayout().Capacity;
+    ASSERT_GT(kEntities, chunkCapacity * 3) << "need a full chunk on either side of the target";
+    const ComponentTypeId posId = GetComponentTypeId<Position>();
+
+    // Each: one Set in the second chunk stamps that chunk and nothing else.
+    const EntityHandle eachTarget = handles[chunkCapacity + 3];
+    uint64_t g = world.GetGlobalSystemVersion();
+    world.Query<Write<Position>>().Each([&](EntityHandle e, Writable<Position> p) {
+        if (e == eachTarget)
+            p.Set(Position{7.0f, 7.0f, 7.0f});
+    });
+    EXPECT_EQ(VisitedSince(world, g), chunkCapacity) << "Each Set stamped more or less than its chunk";
+    EXPECT_GT(world.GetEntityColumnVersion(eachTarget, posId), g);
+    EXPECT_LE(world.GetEntityColumnVersion(handles[0], posId), g);
+    EXPECT_LE(world.GetEntityColumnVersion(handles[chunkCapacity * 2 + 1], posId), g);
+    EXPECT_EQ(world.GetComponent<Position>(eachTarget)->x, 7.0f);
+
+    // Parallel: the same, from a worker task, for a row in the third chunk.
+    const EntityHandle parallelTarget = handles[chunkCapacity * 2 + 5];
+    g = world.GetGlobalSystemVersion();
+    world.Query<Write<Position>>().Parallel(
+        [&](EntityHandle e, Writable<Position> p) {
+            if (e == parallelTarget)
+                p.Mutable().z = 9.0f;
+        },
+        chunkCapacity / 2);
+    EXPECT_EQ(VisitedSince(world, g), chunkCapacity) << "Parallel write stamped more or less than its chunk";
+    EXPECT_GT(world.GetEntityColumnVersion(parallelTarget, posId), g);
+    EXPECT_LE(world.GetEntityColumnVersion(eachTarget, posId), g);
+    EXPECT_EQ(world.GetComponent<Position>(parallelTarget)->z, 9.0f);
+}
+
+// ---------------------------------------------------------------------------
+// GetComponentsBatchForWrite: the batch form of GetComponentForWrite. It
+// returns the mutable rows, stamps each resolved entity's chunk, and returns
+// nullptr (and stamps nothing) for a dead entity or one lacking the type.
+// ---------------------------------------------------------------------------
+TEST(ChangeFilterP1, BatchWriteGrantStampsResolvedEntities) {
+    World world(nullptr);
+    constexpr size_t kEntities = 4000;
+    auto handles = Populate(world, kEntities);
+
+    auto* archetype = world.GetEntityArchetype(handles[0]);
+    ASSERT_NE(archetype, nullptr);
+    const size_t chunkCapacity = std::as_const(*archetype).GetTable().GetLayout().Capacity;
+    ASSERT_GT(kEntities, chunkCapacity * 2) << "need several chunks";
+
+    const EntityHandle withoutPosition = world.CreateHandle(Health{});
+    const EntityHandle dead = world.CreateHandle(Health{});
+    world.DestroyEntityImmediate(dead);
+
+    const std::vector<EntityHandle> batch{handles[3], handles[chunkCapacity + 5], withoutPosition, dead};
+    std::vector<Position*> rows(batch.size());
+    const uint64_t g = world.GetGlobalSystemVersion();
+    world.GetComponentsBatchForWrite<Position>(std::span{batch}, std::span{rows});
+
+    EXPECT_EQ(rows[0], world.GetComponent<Position>(handles[3]));
+    EXPECT_EQ(rows[1], world.GetComponent<Position>(handles[chunkCapacity + 5]));
+    EXPECT_EQ(rows[2], nullptr);
+    EXPECT_EQ(rows[3], nullptr);
+    EXPECT_EQ(VisitedSince(world, g), 2 * chunkCapacity) << "exactly the two resolved chunks";
+}

@@ -15,6 +15,7 @@
 #include "Rendering/Core/ResourceManager.h"
 #include "Rendering/Core/TextureManager.h"
 #include "VulkanPipelineCache.h"
+#include "VulkanPromotedCommands.h"
 #include "VulkanPipelineCompileGate.h"
 
 #include "DescriptorSetAllocator.h"
@@ -156,6 +157,7 @@ struct VulkanPipeline
 {
     VkDevice device = VK_NULL_HANDLE; // Track device for proper cleanup
     VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipeline readOnlyDepthPipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkRenderPass renderPass = VK_NULL_HANDLE;
     PipelineType type = PipelineType::Graphics;
@@ -215,6 +217,7 @@ class VulkanDevice : public IDevice
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipelineLayout layout = VK_NULL_HANDLE;
         VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE; // For compute pipelines
+        VkPipeline readOnlyDepthPipeline = VK_NULL_HANDLE;
     };
 
     VulkanDevice();
@@ -611,6 +614,7 @@ class VulkanDevice : public IDevice
     void UpdateDescriptorSetBatch(DescriptorSetHandle descriptorSet, std::span<const DescriptorSetUpdate> updates) override;
 
     // Vulkan-specific accessors
+    const VulkanPromotedCommands& GetPromotedCommands() const { return m_PromotedCommands; }
     VkDevice GetVkDevice() const { return m_Device; }
     VkPhysicalDevice GetVkPhysicalDevice() const { return m_PhysicalDevice; }
     VmaAllocator GetVmaAllocator() const { return reinterpret_cast<VmaAllocator>(m_VmaAllocator); }
@@ -822,6 +826,7 @@ class VulkanDevice : public IDevice
     PipelineHandle m_CurrentPipeline = INVALID_HANDLE;
 
   private:
+    VulkanPromotedCommands m_PromotedCommands;
     // Best-effort sync timing for stall diagnosis (written on render thread).
     IDevice::FrameSyncTimings m_LastFrameSyncTimings{};
 
@@ -1066,6 +1071,10 @@ class VulkanDevice : public IDevice
     VkFormat m_SwapchainImageFormat = VK_FORMAT_UNDEFINED;
     VkColorSpaceKHR m_SwapchainColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     VkExtent2D m_SwapchainExtent = {0, 0};
+    VkSurfaceTransformFlagBitsKHR m_SurfaceTransformAtCreation = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    bool m_CompositorRotatesSurface = false;
+    // True when a SUBOPTIMAL present only reflects compositor rotation of an unchanged surface.
+    bool PresentSuboptimalIsCompositorRotation(VkResult presentResult);
     // True when the swapchain imageUsage includes TRANSFER_SRC (surface-dependent),
     // enabling direct backbuffer readback for full-window screenshots.
     bool m_SwapchainSupportsReadback = false;
@@ -1100,6 +1109,8 @@ class VulkanDevice : public IDevice
         VkFormat swapchainImageFormat = VK_FORMAT_UNDEFINED;
         VkColorSpaceKHR swapchainColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
         VkExtent2D swapchainExtent = {0, 0};
+        VkSurfaceTransformFlagBitsKHR surfaceTransformAtCreation = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        bool compositorRotatesSurface = false;
         bool swapchainSupportsReadback = false;
         HdrOutputState hdrState{};
         VkRenderPass swapchainRenderPass = VK_NULL_HANDLE;
@@ -1408,6 +1419,10 @@ class VulkanDevice : public IDevice
         std::vector<TextureViewHandle> deferredTextureViews;
         std::vector<SamplerHandle> deferredSamplers;
         std::vector<PersistentDescriptorBytes> deferredDescriptorBytes;
+        std::vector<VkFramebuffer> deferredFramebuffers;
+        std::vector<VkRenderPass> deferredRenderPasses;
+        SemaphoreHandle legacyObjectsTimeline{};
+        uint64_t legacyObjectsTimelineValue = 0;
         VkFence fence = VK_NULL_HANDLE;                // signals when this frame finishes (graphics path)
         bool fenceArmed = false;                       // true only if we submitted using this fence last time this frame index was active
         // Compute only: true once any command list was routed on the compute queue in this slot
@@ -1582,6 +1597,9 @@ class VulkanDevice : public IDevice
     // marks the list submitted. Call only for lists whose buffer actually reached vkQueueSubmit.
     void RouteSubmittedCommandList(VulkanCommandList* list, SemaphoreHandle timeline,
                                    uint64_t timelineValue);
+    void RetireLegacyRenderObjects(QueueType queue, std::vector<VkFramebuffer>& framebuffers,
+                                  std::vector<VkRenderPass>& renderPasses, SemaphoreHandle timeline,
+                                  uint64_t timelineValue);
 
     /// The device-level submit chokepoint: submits one batch to `context`'s queue and routes
     /// each of `commandLists` for deferred recycling against the value THIS submit signalled.
@@ -2091,6 +2109,7 @@ class VulkanDevice : public IDevice
     // Stash for Vulkan 1.2 hostQueryReset. Set in CreateLogicalDevice and
     // consumed by the query pool config after device creation.
     bool m_HostQueryResetEnabledAtInit = false;
+    bool m_TimelineSemaphoresEnabledAtInit = false;
     // Stash for Vulkan 1.2 bufferDeviceAddress. Set in CreateLogicalDevice,
     // consumed by QueryDeviceCapabilities (which zeroes m_Capabilities before
     // repopulating). Without this stash, the VMA allocator would be created

@@ -1,26 +1,15 @@
 #include "Video/VideoWriter.h"
 
-#include <algorithm>
-#include <cctype>
+#include "Types/StringUtils.h"
+
 #include <filesystem>
 
 namespace GameEngine::Video
 {
 
-namespace
-{
-std::string LowerCopy(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return value;
-}
-}
-
 VideoCodec GuessCodecForMoviePath(const std::string& path)
 {
-    const std::string ext = LowerCopy(std::filesystem::path(path).extension().string());
+    const std::string ext = ToLowerAscii(std::filesystem::path(path).extension().string());
     if (ext == ".hevc" || ext == ".h265")
         return VideoCodec::HEVC;
     if (ext == ".mov")
@@ -30,7 +19,7 @@ VideoCodec GuessCodecForMoviePath(const std::string& path)
 
 VideoCodec ParseVideoCodecName(const std::string& name, VideoCodec fallback)
 {
-    const std::string n = LowerCopy(name);
+    const std::string n = ToLowerAscii(name);
     if (n == "auto")
         return VideoCodec::Auto;
     if (n == "h264" || n == "avc")

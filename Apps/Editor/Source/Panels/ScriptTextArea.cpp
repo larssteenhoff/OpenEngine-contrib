@@ -2,6 +2,7 @@
 #include "Rendering/Text/FontAtlas.h"
 #include "Rendering/Text/TextLayout.h"
 #include "UI/UIStyle.h"
+#include "UI/ThemeAccent.h"
 #include "UI/UIPrimitive.h"
 #include "UI/GlyphRunEmitter.h"
 #include "UI/TextSelectionFill.h"
@@ -1525,7 +1526,7 @@ void ScriptTextArea::OnGeneratePrimitives(UI::PrimitiveEmitContext& ctx,
 
             uint32_t accentArgb = style.Visual.BorderColor.Top;
             if ((accentArgb >> 24) == 0)
-                accentArgb = 0xFF3A8FFF;
+                accentArgb = UI::ResolveAccentArgb(style);
             uint32_t fillPacked = PackFromARGB((accentArgb & 0x00FFFFFFu) | 0x33000000u);
             uint32_t borderPacked = PackFromARGB(accentArgb);
             const float cs = ctx.ContentScale > 0.0f ? ctx.ContentScale : 1.0f;

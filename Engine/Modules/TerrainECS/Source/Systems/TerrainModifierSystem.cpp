@@ -30,13 +30,13 @@
 #include "JobSystem/ParallelAlgorithms.h"
 #include "JobSystem/TaskHandle.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <future>
@@ -918,30 +918,12 @@ std::atomic<uint64> g_SplatRenormalizeTexelCount{0};
 // quiet-frame oracle (GetGatherCountForTests). An idle frame must not increment it.
 std::atomic<uint64> g_GatherCount{0};
 
-// Kill switch for the incremental per-tile height range (block grid).
-// GE_TERRAIN_INCREMENTAL_MINMAX=0 forces every region range refresh back to a full
-// O(tile-samples) rescan — the pre-change behavior and the A/B measurement lever.
-// Default ON.
-bool IncrementalTileRangeEnabled()
-{
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_INCREMENTAL_MINMAX");
-        return !(v && v[0] == '0');
-    }();
-    return enabled;
-}
-
 // Kill switch for fanning the large-region modifier bake (per-tile base + modifier
 // + splat re-eval) across the job pool. GE_TERRAIN_MODIFIER_PARALLEL=0 forces the
 // serial per-tile path — the A/B lever + safety valve. Default ON.
 bool ModifierParallelBakeEnabled()
 {
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_MODIFIER_PARALLEL");
-        return !(v && v[0] == '0');
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_MODIFIER_PARALLEL", true);
     return enabled;
 }
 
@@ -951,11 +933,7 @@ bool ModifierParallelBakeEnabled()
 // static-lib singleton boundary, so this is the only editor-side attribution.
 bool BakeTimingEnabled()
 {
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_BAKE_TIMING");
-        return v && v[0] != '0';
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_BAKE_TIMING", false);
     return enabled;
 }
 
@@ -1060,11 +1038,6 @@ void RefreshTileHeightRangeRegion(TerrainTileData& tile,
 {
     GE_CPU_PROFILE_SCOPE("Terrain.TileHeightRescan");
     g_TileHeightRescanCount.fetch_add(1, std::memory_order_relaxed);
-    if (!IncrementalTileRangeEnabled())
-    {
-        RebuildTileHeightBlocks(tile); // A/B lever: full rescan every refresh.
-        return;
-    }
     const uint32 w = tile.Heightfield.GetWidth();
     const uint32 h = tile.Heightfield.GetHeight();
     const uint32 wantDim = std::min({kHeightRangeBlockDim, std::max(1u, w), std::max(1u, h)});
@@ -1122,32 +1095,6 @@ void ComputeResidentGlobalHeightRange(const TiledTerrainData& tiled,
     }
 }
 
-// Kill switch for the modifier change gate: GE_TERRAIN_CHANGE_GATING=0
-// restores the ungated per-frame gather + hash exactly (prefix-'0' parse,
-// per the ChangeFilter::Enabled convention).
-bool ChangeGatingEnabled()
-{
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_CHANGE_GATING");
-        return !(v && v[0] == '0');
-    }();
-    return enabled;
-}
-
-// Kill switch for interactive geometry-drag re-bake coalescing:
-// GE_TERRAIN_MODIFIER_COALESCE=0 restores the pre-change per-frame full-footprint
-// re-bake (the before/after measurement lever and the runtime A/B). Default ON.
-bool ModifierCoalesceEnabled()
-{
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_MODIFIER_COALESCE");
-        return !(v && v[0] == '0');
-    }();
-    return enabled;
-}
-
 // Kill switch for the deferred stroke-settle splat renormalize (#526).
 // GE_TERRAIN_DEFER_RESPLAT=0 restores the pre-#526 behavior: a range-shifting
 // height edit renormalizes every resident tile's splat immediately, in the same
@@ -1155,28 +1102,7 @@ bool ModifierCoalesceEnabled()
 // deferral against the immediate path when diagnosing splat-normalization seams.
 bool DeferSplatResplatEnabled()
 {
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_DEFER_RESPLAT");
-        return !(v && v[0] == '0');
-    }();
-    return enabled;
-}
-
-// GE_TERRAIN_INCREMENTAL_QUADTREE=0 restores the pre-fix behavior: a height edit
-// marks the whole global quadtree dirty (QuadtreeDirty), forcing a full rebuild
-// that rescans EVERY resident tile's heightfield min/max per dab — O(all samples)
-// per stroke frame, the dominant sculpt-stroke hitch on large tiled terrains. The
-// default patches only the tiles the edit actually touched into the global
-// quadtree, which is byte-identical to a full rebuild (untouched tiles' nodes are
-// unchanged). Kept as a kill switch to A/B the two paths.
-bool IncrementalQuadtreeEnabled()
-{
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_INCREMENTAL_QUADTREE");
-        return !(v && v[0] == '0');
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_DEFER_RESPLAT", true);
     return enabled;
 }
 
@@ -1188,11 +1114,7 @@ bool IncrementalQuadtreeEnabled()
 // of wall-clock without any single frame hitching. Kept as an A/B lever.
 bool SpreadSettleEnabled()
 {
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_SPREAD_SETTLE");
-        return !(v && v[0] == '0');
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_SPREAD_SETTLE", true);
     return enabled;
 }
 
@@ -1688,7 +1610,7 @@ bool TerrainModifierSystem::ShouldGather(ECS::World& world, TerrainService& terr
     const bool forceFromAssetEvict = m_ForceGatherAfterAssetEvict;
     m_ForceGatherAfterAssetEvict = false;
 
-    if (!ChangeGatingEnabled() || !ECS::ChangeFilter::Enabled())
+    if (!ECS::ChangeFilter::Enabled())
         return true;
 
     // M14 gate contract: entry-sample before the scans, write back the SAME
@@ -1730,10 +1652,11 @@ bool TerrainModifierSystem::ShouldGather(ECS::World& world, TerrainService& terr
     }
 
     // Terrain-side signal: config/handle churn, terrain moves, and tiled tile
-    // streaming live in TerrainService state and the Terrain component (whose
-    // column is write-stamped by extraction every frame, so a Changed<Terrain>
-    // scan is no discriminator). The hash is bounded by terrain-entity count —
-    // a handful — unlike the modifier gather it gates.
+    // config live partly in TerrainService state (heightfield and tile config,
+    // heightmap content versions) and in components beside Terrain, which no
+    // Changed<Terrain> scan sees, so the hash reads them directly. The hash is
+    // bounded by terrain-entity count — a handful — unlike the modifier gather
+    // it gates.
     const uint64 terrainStateHash = ComputeTerrainStateHash(world, terrainService);
     if (terrainStateHash != m_LastSeenTerrainStateHash)
         anyChanged = true;
@@ -4587,11 +4510,9 @@ void TerrainModifierSystem::BakeTiledRegion(TiledTerrainData& tiled, float32 hei
         tiled.CachedGlobalMinH = globalMinH;
         tiled.CachedGlobalMaxH = globalMaxH;
         ++tiled.Revision;
-        // Default: patch only the edited tiles (recorded above) into the global
-        // quadtree. The full O(all-samples) rebuild is reserved for structural
-        // changes (tile load/unload, first bake) and the kill-switch path.
-        if (!IncrementalQuadtreeEnabled())
-            tiled.QuadtreeDirty = true;
+        // Patch only the edited tiles (recorded above) into the global quadtree.
+        // The full O(all-samples) rebuild is reserved for structural changes
+        // (tile load/unload, first bake).
         tiled.GlobalHeightRangeDirty = true;
     }
 
@@ -4776,7 +4697,7 @@ void TerrainModifierSystem::BakeTiledStreamedTiles(TiledTerrainData& tiled, floa
                             modifiers, minX, z0, maxX, z1);
     });
 
-    static const bool kTileStreamDebug = std::getenv("GE_TERRAIN_TILE_DEBUG") != nullptr;
+    static const bool kTileStreamDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_TILE_DEBUG", false);
     for (std::size_t i = 0; i < bakeTiles.size(); ++i)
     {
         const TileCoord coord = bakeTiles[i];
@@ -5223,7 +5144,7 @@ void TerrainModifierSystem::BakeSphereModifiers(TerrainService& terrainService, 
         },
         fullBake);
 
-    static const bool kEditDebug = std::getenv("GE_TERRAIN_ZONE_DEBUG") != nullptr;
+    static const bool kEditDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_ZONE_DEBUG", false);
     if (kEditDebug && baked.Count > 0u)
     {
         std::string faces;
@@ -5316,10 +5237,10 @@ void TerrainModifierSystem::Update(ECS::World& world, float32 /*deltaTime*/)
 void TerrainModifierSystem::RequestBakeCacheStore(ECS::World& world, const GUID& previousScene, const GUID& savedScene)
 {
     world.Query<ECS::Write<Components::Terrain>>().Each(
-        [&](Components::Terrain& terrain)
+        [&](ECS::Writable<Components::Terrain> terrain)
         {
-            if (terrain.BakeOriginScene.IsNull() || terrain.BakeOriginScene == previousScene)
-                terrain.BakeOriginScene = savedScene;
+            if (terrain->BakeOriginScene.IsNull() || terrain->BakeOriginScene == previousScene)
+                terrain.Mutable().BakeOriginScene = savedScene;
         });
     m_BakeStoreScene = savedScene;
     m_BakeStoreRequested = true;
@@ -5453,12 +5374,11 @@ void TerrainModifierSystem::UpdateBakes(ECS::World& world)
     // Interactive geometry-drag coalescing (see the header). `interactiveDrag` is
     // set while the editor drives a modifier/zone transform gizmo; the deferred
     // re-bake is finished by the settle bake the moment it clears.
-    const bool coalesceEnabled = ModifierCoalesceEnabled();
-    const bool interactiveDrag = coalesceEnabled && terrainService->IsInteractiveModifierEdit();
+    const bool interactiveDrag = terrainService->IsInteractiveModifierEdit();
     // A drag that just ended (flag cleared) with a deferred bake owed must run its
     // settle bake now even though the change gate is quiet — no new ECS stamp lands
     // on the frame the mouse is released.
-    const bool forceSettleBake = coalesceEnabled && m_GeometryBakePending && !interactiveDrag;
+    const bool forceSettleBake = m_GeometryBakePending && !interactiveDrag;
 
     // Drag rising edge: reset the live-preview throttle so each drag starts its
     // cadence fresh — the baseline clock is re-taken on the first bake-worthy
@@ -5805,7 +5725,7 @@ void TerrainModifierSystem::UpdateBakes(ECS::World& world)
                 // A region bake that touched no tile (edit outside the terrain)
                 // and every idle frame (gated out before reaching here) stay
                 // silent — the same discipline as CBT.Edit.
-                static const bool kTileBakeDebug = std::getenv("GE_TERRAIN_TILE_DEBUG") != nullptr;
+                static const bool kTileBakeDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_TILE_DEBUG", false);
                 if (kTileBakeDebug && !bakedTiles.empty())
                 {
                     // Signed (x,z) pairs — tile coords can be negative, so a

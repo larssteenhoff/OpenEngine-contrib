@@ -27,7 +27,8 @@ enum class PrimitiveMode : uint8_t
     Textured = 2, // Textured quad (background images, icons)
     Line     = 3, // Anti-aliased line segment
     Bezier   = 4, // Anti-aliased cubic bezier curve
-    Triangle = 5  // Filled anti-aliased triangle
+    Triangle = 5, // Filled anti-aliased triangle
+    MeshTriangle = 6 // Cooked SVG triangle with outline AA and owned shared edges
 };
 
 // Gradient fill modes for Rect primitives.
@@ -80,8 +81,8 @@ constexpr uint32_t kPrimClipIndexShift  = 16;
 constexpr uint32_t kPrimClipIndexMask   = 0xFFFF0000u;
 constexpr uint16_t kNoClip              = 0xFFFFu;
 
-// GradientMode needs three bits, so the fourth bit of the field it used to
-// occupy carries the space flag above. An eighth gradient mode must claim a bit
+// GradientMode needs three bits; bit 11, next to its field, carries the
+// space flag above. An eighth gradient mode must claim a bit
 // elsewhere rather than silently overwrite it.
 static_assert(static_cast<uint32_t>(PrimitiveMode::Triangle) <= kPrimModeMask,
               "PrimitiveMode no longer fits its 3-bit field — kPrimPointFilterBit owns bit 3");
@@ -566,6 +567,32 @@ inline UIPrimitive MakeTriangle(float x0, float y0,
     p.Radii[0] = rounding; // stored in radii[0], same slot as Line thickness
     p.FillColor = color;
     p.ModeAndFlags = MakeFlags(PrimitiveMode::Triangle, GradientMode::None, clipIndex);
+    return p;
+}
+
+// Create one triangle from a cooked vector mesh. edgeFlags bits 0..2 identify
+// silhouette edges and bits 3..5 assign one owner to each shared interior edge.
+inline UIPrimitive MakeMeshTriangle(float x0, float y0,
+                                    float x1, float y1,
+                                    float x2, float y2,
+                                    uint32_t color,
+                                    uint8_t edgeFlags,
+                                    uint16_t clipIndex = kNoClip)
+{
+    UIPrimitive p{};
+    constexpr float kAA = 1.0f;
+    const float minX = std::min({x0, x1, x2}) - kAA;
+    const float minY = std::min({y0, y1, y2}) - kAA;
+    const float maxX = std::max({x0, x1, x2}) + kAA;
+    const float maxY = std::max({y0, y1, y2}) + kAA;
+    p.X = minX; p.Y = minY;
+    p.W = maxX - minX; p.H = maxY - minY;
+    p.UvRect[0] = x0; p.UvRect[1] = y0;
+    p.UvRect[2] = x1; p.UvRect[3] = y1;
+    p.BorderWidths[0] = x2; p.BorderWidths[1] = y2;
+    p.Radii[0] = static_cast<float>(edgeFlags & 0x3Fu);
+    p.FillColor = color;
+    p.ModeAndFlags = MakeFlags(PrimitiveMode::MeshTriangle, GradientMode::None, clipIndex);
     return p;
 }
 

@@ -6,6 +6,7 @@
 #include "Logger/Logger.h"
 #include "Platform/HttpClient.h"
 #include "JobSystem/JobChannel.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -89,12 +90,7 @@ std::string ThumbnailExtensionOf(const std::string& url)
 // and entries with the same id from different catalog sources can't collide.
 std::string UrlHashOf(const std::string& url)
 {
-    uint64_t hash = 14695981039346656037ull;
-    for (const char c : url)
-    {
-        hash ^= static_cast<unsigned char>(c);
-        hash *= 1099511628211ull;
-    }
+    const uint64_t hash = Hashing::Fnv1a64(url);
     char hex[17];
     std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(hash));
     return hex;

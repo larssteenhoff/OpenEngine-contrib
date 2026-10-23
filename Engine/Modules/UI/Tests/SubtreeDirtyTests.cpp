@@ -842,10 +842,9 @@ TEST(ProductionPathTests, OrderOverrideReordersYogaChildren)
         << "resetting the order override must restore document order";
 }
 
-// Splitter regression: WeightedPane::SetFlexWeight raises only LayoutDirty.
-// The rebuild must still re-apply the flex weight to Yoga — skipping
-// LayoutDirty-only elements caused the docked-panel splitter snap-back bug
-// in the Editor.
+// Splitter regression: a WeightedPane::SetFlexWeight change must reach Yoga on
+// the next Update — a weight that never reached the node caused the
+// docked-panel splitter snap-back bug in the Editor.
 TEST(ProductionPathTests, WeightedPaneFlexWeightReachesYoga)
 {
     auto* dev = SharedHeadlessDevice();
@@ -866,15 +865,14 @@ TEST(ProductionPathTests, WeightedPaneFlexWeightReachesYoga)
     // Mimic Splitter::UpdateDrag: change only the flex weight.
     paneRaw->SetFlexWeight(0.75f);
     EXPECT_TRUE(paneRaw->IsDirty(UIElement::LayoutDirty));
-    EXPECT_FALSE(paneRaw->IsDirty(UIElement::StyleDirty));
 
     ui.Update(0.0f, /*interactive=*/true);
 
     YGNodeRef paneYg = paneRaw->m_YogaState ? paneRaw->m_YogaState->Node : nullptr;
     ASSERT_NE(paneYg, nullptr);
     EXPECT_FLOAT_EQ(YGNodeStyleGetFlexGrow(paneYg), 0.75f)
-        << "LayoutDirty-only flex-weight change must reach "
-           "YGNodeStyleSetFlexGrow on the next Update";
+        << "a flex-weight change must reach YGNodeStyleSetFlexGrow on the "
+           "next Update";
     EXPECT_FALSE(paneRaw->IsDirty(UIElement::LayoutDirty))
         << "Update must clear LayoutDirty or the element stays dirty every "
            "frame";

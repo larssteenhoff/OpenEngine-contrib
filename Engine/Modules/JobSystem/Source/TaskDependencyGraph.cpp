@@ -1,5 +1,6 @@
 #include "JobSystem/TaskDependencyGraph.h"
 #include "JobSystem/WorkStealingThreadPool.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <cassert>
@@ -59,10 +60,8 @@ UniquePtr<Task> TaskDependencyGraph::Register(UniquePtr<Task> task) {
                              static_cast<unsigned long long>(taskId),
                              static_cast<unsigned long long>(dependencyId));
                 std::fflush(stderr);
-                static const bool kStrict = [] {
-                    const char* e = std::getenv("GE_JOB_TOMBSTONE_STRICT");
-                    return e && e[0] == '1';
-                }();
+                static const bool kStrict =
+                    GameEngine::Platform::EnvironmentSwitchEnabled("GE_JOB_TOMBSTONE_STRICT", false);
                 if (kStrict) {
                     std::abort();
                 }

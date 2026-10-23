@@ -1,5 +1,8 @@
 #pragma once
 
+#include "AssetCore/GUID.h"
+#include "Components/AssetRef.h" // reflects the GUID field as FieldTypeId::AssetGuid
+#include "Mathematics/Vector3.h"
 #include "Types/StringUtils.h"
 
 #include <string_view>
@@ -14,17 +17,14 @@ namespace GameEngine::Components
 struct SceneSubsceneInstance
 {
     char sourcePath[260]{};
-    char sourceGuid[64]{};
+    // The [resource] section's guid=, or null when the scene authored none.
+    GUID sourceGuid{}; // @ge-readonly
 
-    float offsetX = 0.0f;
-    float offsetY = 0.0f;
-    float offsetZ = 0.0f;
+    Mathematics::Vector3 offset{0.0f, 0.0f, 0.0f};
     bool hasOffset = false;
 
-    // The path and guid buffers can be full with no terminator after a raw component write.
+    // The path buffer can be full with no terminator after a raw component write.
     [[nodiscard]] std::string_view SourcePath() const { return FixedStringView(sourcePath); }
-    [[nodiscard]] std::string_view SourceGuid() const { return FixedStringView(sourceGuid); }
 };
 
 } // namespace GameEngine::Components
-

@@ -5,6 +5,8 @@
 #include "Image/Decode.h"
 #include "Image/Resample.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <array>
@@ -232,20 +234,6 @@ namespace
 #else
     constexpr const char* kStbirVersion = "stbir-none";
 #endif
-
-    constexpr uint64 kFnvOffset = 14695981039346656037ull;
-    constexpr uint64 kFnvPrime = 1099511628211ull;
-
-    uint64 FnvAppend(uint64 hash, const void* data, size_t size)
-    {
-        const auto* bytes = static_cast<const uint8*>(data);
-        for (size_t i = 0; i < size; ++i)
-        {
-            hash ^= bytes[i];
-            hash *= kFnvPrime;
-        }
-        return hash;
-    }
 }
 
 bool ParseTextureCookCompressionMeta(const std::string& value, TextureCookCompression& out)
@@ -406,10 +394,7 @@ bool IsTextureCookEncoderAvailable()
 
 bool IsTextureCookDisabled()
 {
-    static const bool disabled = []() {
-        const char* v = std::getenv("GE_TEXTURE_COOK_DISABLE");
-        return v && v[0] == '1';
-    }();
+    static const bool disabled = Platform::EnvironmentSwitchEnabled("GE_TEXTURE_COOK_DISABLE", false);
     return disabled;
 }
 
@@ -791,7 +776,7 @@ TextureCookOutput ResolveTextureCookOutput(const TextureCookSettings& settings,
 
 uint64 ComputeTextureCookSourceHash(const uint8* bytes, size_t size)
 {
-    return FnvAppend(kFnvOffset, bytes, size);
+    return Hashing::Fnv1a64(bytes, size);
 }
 
 uint64 ComputeTextureCookConfigHash(const TextureCookInputs& inputs, TextureCookOutput output)
@@ -831,7 +816,7 @@ uint64 ComputeTextureCookConfigHash(const TextureCookInputs& inputs, TextureCook
     {
         key += "|enc=dxtex-"; key += std::to_string(kDirectXTexVersion);
     }
-    return FnvAppend(kFnvOffset, key.data(), key.size());
+    return Hashing::Fnv1a64(key);
 }
 
 uint32 ComputeTextureCookMipCount(uint32 width, uint32 height, const TextureCookSettings& settings)

@@ -3,6 +3,7 @@
 #include "UIManager_Internal.h"
 
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Platform/SystemFonts.h"
 #include "Rendering/Common/Utils.h"
 #include "Rendering/Text/FontAtlas.h"
@@ -18,11 +19,6 @@
 using namespace GameEngine;
 using namespace GameEngine::Rendering;
 using namespace GameEngine::Rendering::Text;
-
-void ConfigureUiFontAtlas(FontAtlas& /*atlas*/)
-{
-    // No configuration needed — Slug works at any size with no precomputation parameters.
-}
 
 std::chrono::milliseconds ComputeFontRequestBackoff(uint32_t failCount)
 {
@@ -118,12 +114,12 @@ std::string UIManager::NormalizeFontFamilyKey(const std::string& family)
 
 void UIManager::OnFontResolved(const std::string& fontKey, FontResolveResult&& result, uint64_t resolverGeneration)
 {
-    m_FontFamilyInFlight.erase(fontKey);
-
     if (resolverGeneration != m_FontResolverGeneration)
     {
         return;
     }
+    // A cancelled resolver must not clear the replacement resolver's request.
+    m_FontFamilyInFlight.erase(fontKey);
 
     const auto now = std::chrono::steady_clock::now();
 
@@ -156,8 +152,9 @@ void UIManager::OnFontResolved(const std::string& fontKey, FontResolveResult&& r
     }
 
     auto fa = std::make_unique<FontAtlas>();
-    ConfigureUiFontAtlas(*fa);
-    if (!fa->LoadFontBytes(result.Bytes.data(), result.Bytes.size(), kUiFontAtlasPx))
+    fa->SetTextLanguage(m_TextLanguage);
+    if (!fa->SetFallbackFonts(std::move(result.FallbackFonts)) ||
+        !fa->LoadFontBytes(result.Bytes.data(), result.Bytes.size(), kUiFontAtlasPx))
     {
         const uint32_t fails = ++m_FontFamilyFailCount[fontKey];
         const auto backoff = ComputeFontRequestBackoff(fails);
@@ -166,7 +163,7 @@ void UIManager::OnFontResolved(const std::string& fontKey, FontResolveResult&& r
             ScheduleFontRetryRestyle(backoff);
         else if (fails == kMaxFontRetryRestyles + 1u)
             Logger::Log::Warning(
-                "[UI Font] family key '{}' loaded but failed to parse after {} retries; leaving text on fallback. "
+                "[UI Font] family key '{}' has invalid font bytes or fallback configuration after {} retries; leaving text on fallback. "
                 "No further whole-tree restyles will be scheduled for it.",
                 fontKey, kMaxFontRetryRestyles);
         return;
@@ -237,12 +234,7 @@ void UIManager::OnFontResolved(const std::string& fontKey, FontResolveResult&& r
             m_DefaultFontAtlasGuid = result.AssetGuid;
     }
 
-    static const bool s_LogFonts = []()
-    {
-        if (const char* e = std::getenv("GE_UI_FONT_DEBUG"))
-            return (e && e[0] == '1');
-        return false;
-    }();
+    static const bool s_LogFonts = Platform::EnvironmentSwitchEnabled("GE_UI_FONT_DEBUG", false);
     if (s_LogFonts && faPtr)
     {
         Logger::Log::Info("[UI Font] Installed key='{}' bytes={} debug='{}'",
@@ -272,7 +264,7 @@ bool UIManager::SetDefaultFontBytes(const std::vector<std::uint8_t>& bytes, GUID
         return false;
 
     auto fa = std::make_shared<FontAtlas>();
-    ConfigureUiFontAtlas(*fa);
+    fa->SetTextLanguage(m_TextLanguage);
     if (!fa->LoadFontBytes(bytes.data(), bytes.size(), kUiFontAtlasPx))
         return false;
 
@@ -287,21 +279,11 @@ FontAtlas* UIManager::GetOrRequestFontFamilyInternal(const std::string& family,
                                                      FontStyle style,
                                                      FontVariant variant)
 {
-    auto clampWeight = [](int w) -> int
-    {
-        if (w < 1)
-            w = 1;
-        if (w > 1000)
-            w = 1000;
-        return w;
-    };
-
     const std::string famKey = NormalizeFontFamilyKey(family);
     if (famKey.empty())
         return nullptr;
 
-    const std::string key = famKey + "|" + std::to_string(clampWeight(weight)) + "|" + std::to_string((int)style) + "|" +
-                            std::to_string((int)variant);
+    const std::string key = MakeFontRequestKey(family, weight, style, variant);
 
     auto itAlias = m_FontAtlasAliases.find(key);
     if (itAlias != m_FontAtlasAliases.end())
@@ -332,12 +314,7 @@ FontAtlas* UIManager::GetOrRequestFontFamilyInternal(const std::string& family,
             if (!fontBytes.empty())
                 debugName = p;
         };
-        static const bool s_LogFonts = []()
-        {
-            if (const char* e = std::getenv("GE_UI_FONT_DEBUG"))
-                return (e && e[0] == '1');
-            return false;
-        }();
+        static const bool s_LogFonts = Platform::EnvironmentSwitchEnabled("GE_UI_FONT_DEBUG", false);
 
         const std::string& famLower = famKey; // already lowercased
 
@@ -378,7 +355,7 @@ FontAtlas* UIManager::GetOrRequestFontFamilyInternal(const std::string& family,
         }
 
         auto fa = std::make_unique<FontAtlas>();
-        ConfigureUiFontAtlas(*fa);
+        fa->SetTextLanguage(m_TextLanguage);
         if (!fa->LoadFontBytes(fontBytes.data(), fontBytes.size(), kUiFontAtlasPx))
         {
             const uint32_t fails = ++m_FontFamilyFailCount[key];
@@ -423,7 +400,7 @@ FontAtlas* UIManager::GetOrRequestFontFamilyInternal(const std::string& family,
     FontResolverFn resolver = m_FontResolver;
     const uint64_t gen = m_FontResolverGeneration;
     const std::string familyCopy = family;
-    const int weightCopy = clampWeight(weight);
+    const int weightCopy = std::clamp(weight, 1, 1000);
     const FontStyle styleCopy = style;
     const FontVariant variantCopy = variant;
 
@@ -446,4 +423,47 @@ FontAtlas* UIManager::GetOrRequestFontFamilyInternal(const std::string& family,
     }
 
     return nullptr;
+}
+
+bool UIManager::SetTextLanguage(const std::string& language)
+{
+    if (!FontAtlas::IsTextLanguage(language))
+        return false;
+    if (m_TextLanguage == language)
+        return true;
+    m_TextLanguage = language;
+    if (m_FontAtlas)
+        m_FontAtlas->SetTextLanguage(language);
+    for (auto& [key, font] : m_FontAtlases)
+        font->SetTextLanguage(language);
+    m_FontResolvedDirty = true;
+    MarkStyleDirtyAll();
+    RequestRelayout();
+    return true;
+}
+
+std::string UIManager::MakeFontRequestKey(const std::string& family, int weight, FontStyle style,
+                                          FontVariant variant)
+{
+    return NormalizeFontFamilyKey(family) + "|" + std::to_string(std::clamp(weight, 1, 1000)) + "|" +
+           std::to_string(static_cast<int>(style)) + "|" + std::to_string(static_cast<int>(variant));
+}
+
+UIManager::FontLoadStatus UIManager::LoadFont(const FontFaceRequest& request)
+{
+    FontAtlas* atlas = nullptr;
+    if (request.Family.empty())
+        atlas = m_FontAtlas.get();
+    else
+        atlas = GetOrRequestFontFamilyInternal(request.Family, request.Weight,
+                                               request.Style, request.Variant);
+    if (!atlas)
+    {
+        const auto key = MakeFontRequestKey(request.Family, request.Weight, request.Style, request.Variant);
+        return m_FontFamilyInFlight.contains(key) ? FontLoadStatus::Loading : FontLoadStatus::Failed;
+    }
+
+    FontAtlas::ShapeResult shaped;
+    atlas->ShapeText(request.Text, kUiFontAtlasPx, shaped);
+    return FontLoadStatus::Loaded;
 }

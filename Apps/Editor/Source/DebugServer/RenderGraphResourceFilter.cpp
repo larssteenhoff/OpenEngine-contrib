@@ -1,6 +1,7 @@
 #include "DebugServer/RenderGraphResourceFilter.h"
 
-#include <cctype>
+#include "Types/StringUtils.h"
+
 #include <span>
 
 namespace GameEngine::Editor
@@ -14,21 +15,11 @@ namespace
 constexpr std::string_view kLifetimeNames[] = {"Transient", "Persistent", "Imported", "Swapchain"};
 constexpr std::string_view kKindNames[] = {"Texture", "Buffer", "AccelerationStructure"};
 
-bool IEquals(std::string_view a, std::string_view b)
-{
-    if (a.size() != b.size())
-        return false;
-    for (std::size_t i = 0; i < a.size(); ++i)
-        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
-            return false;
-    return true;
-}
-
 // Canonical spelling of a client value, or empty when it names none of them.
 std::string_view Canonical(const std::string& value, std::span<const std::string_view> accepted)
 {
     for (std::string_view a : accepted)
-        if (IEquals(value, a))
+        if (EqualsIgnoreCase(value, a))
             return a;
     return {};
 }

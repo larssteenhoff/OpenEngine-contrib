@@ -182,7 +182,7 @@ TEST(MarkdownTextLayoutTests, ShippedSheetDrawsTheLooksWrapsWordsAndScrollsCode)
 
     const std::string longLine(240, 'x');
     fx.Text().SetMarkdown("The lantern at the gate is **bright** and the torch by the well burns low, "
-                          "so the square reads warm at dusk.\n\n```\n" +
+                          "so the square reads warm at dusk. Light also reaches the path behind the fountain.\n\n```\n" +
                           longLine + "\n```");
     fx.Settle();
 

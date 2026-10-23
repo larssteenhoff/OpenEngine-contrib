@@ -25,6 +25,9 @@ String LogSink::FormatMessage(const LogMessage& message,
                               bool includeLevel,
                               bool includeSource) const
 {
+#if !LOGGER_ENABLE_SOURCE_LOCATION
+    (void)includeSource;
+#endif
     // Reuse a thread_local buffer to avoid per-call allocation.
     // The drain thread is the primary caller, so this buffer stabilizes quickly.
     thread_local String result;

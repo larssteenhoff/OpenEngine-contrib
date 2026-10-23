@@ -118,6 +118,11 @@ ComputeShaderNode::~ComputeShaderNode()
         m_Device->DestroySampler(m_LinearClampSampler);
         m_LinearClampSampler = {};
     }
+    if (m_Device && m_PointClampSampler.IsValid())
+    {
+        m_Device->DestroySampler(m_PointClampSampler);
+        m_PointClampSampler = {};
+    }
     m_PipelineId = {};
     m_Set0Layout = {};
     m_ShaderMeta.reset();
@@ -171,6 +176,11 @@ bool ComputeShaderNode::Initialize(std::string nodeId, std::string nodeJson, std
     {
         m_Device->DestroySampler(m_LinearClampSampler);
         m_LinearClampSampler = {};
+    }
+    if (m_Device && m_PointClampSampler.IsValid())
+    {
+        m_Device->DestroySampler(m_PointClampSampler);
+        m_PointClampSampler = {};
     }
     m_Device = nullptr;
 
@@ -414,6 +424,11 @@ void ComputeShaderNode::EnsureCachedPipeline(GameEngine::Rendering::IDevice* dev
             m_Device->DestroySampler(m_LinearClampSampler);
             m_LinearClampSampler = {};
         }
+        if (m_PointClampSampler.IsValid())
+        {
+            m_Device->DestroySampler(m_PointClampSampler);
+            m_PointClampSampler = {};
+        }
         m_CsBytes.clear();
         m_PipelineId = {};
         m_Set0Layout = {};
@@ -424,6 +439,8 @@ void ComputeShaderNode::EnsureCachedPipeline(GameEngine::Rendering::IDevice* dev
     }
     m_Device = device;
 
+    if (!m_PointClampSampler.IsValid())
+        m_PointClampSampler = device->CreateSampler(Rendering::SamplerDesc::PointClamp("Pipeline.PointClamp"));
     if (!m_LinearClampSampler.IsValid())
     {
         auto sd = GameEngine::Rendering::SamplerDesc::MaterialLinearClamp("Pipeline.Compute.LinearClamp");
@@ -1055,7 +1072,9 @@ void ComputeShaderNode::DeclareForView(ViewDeclare& d)
                         u.textures = {tb.Tex};
                         if (dtype == Rendering::DescriptorType::CombinedImageSampler &&
                             m_LinearClampSampler.IsValid())
-                            u.samplers = {m_LinearClampSampler};
+                            u.samplers = {Detail::RequiresPointSampling(
+                                device->GetTextureFormat(tb.Tex), device->GetCapabilities())
+                                ? m_PointClampSampler : m_LinearClampSampler};
                         updates.push_back(std::move(u));
                     }
                 }

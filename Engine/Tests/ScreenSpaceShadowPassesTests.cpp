@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../Modules/Rendering/Tests/ScopedEnvVar.h"
 #include "Components/Rendering/PostProcessEffects/ShadowSettingsEffect.h"
 #include "ECS/World.h"
 #include "ECS/ECSTemplates.h"
@@ -356,5 +357,21 @@ TEST(ScreenSpaceShadowSettings, CascadeDepthRoundingRejectsJitterWithoutConverge
         feature.UpdateSDSMBounds(1, resolved.nearDepth, resolved.farDepth);
         EXPECT_FLOAT_EQ(feature.GetSDSMBounds(1).nearDepth, target.nearDepth);
         EXPECT_FLOAT_EQ(feature.GetSDSMBounds(1).farDepth, target.farDepth);
+    }
+}
+
+TEST(ScreenSpaceShadowSettings, LaunchDebugModeSelectsContactOnlyAndRejectsInvalidValues)
+{
+    using GameEngine::Rendering::Tests::ScopedEnvVar;
+    {
+        const ScopedEnvVar mode("GE_SHADOW_DEBUG_MODE", "6");
+        ShadowMapRenderFeature feature;
+        EXPECT_EQ(feature.GetDebugMode(), ShadowDebugMode::ContactOnly);
+    }
+    for (const char* value : {"invalid", "6junk", "-1", "8"})
+    {
+        const ScopedEnvVar mode("GE_SHADOW_DEBUG_MODE", value);
+        ShadowMapRenderFeature feature;
+        EXPECT_EQ(feature.GetDebugMode(), ShadowDebugMode::Off);
     }
 }

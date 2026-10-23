@@ -296,3 +296,20 @@ TEST(UITreeDumpTests, MaxTextLengthZeroReturnsWholeTextHoweverLong)
     EXPECT_EQ(node->value("text", std::string()), text) << "0 means no limit";
     EXPECT_FALSE(node->contains("textTruncated"));
 }
+
+TEST(UITreeDumpTests, ADisabledControlIsFlaggedAndAnEnabledOneIsNot)
+{
+    UIElement root;
+    root.SetId("root");
+    AddChild(root, "apply")->SetEnabled(false);
+    AddChild(root, "discard");
+
+    const json tree = Dump(root, {/*MaxDepth=*/10, true, false});
+
+    const json* apply = FindNode(tree, "apply");
+    const json* discard = FindNode(tree, "discard");
+    ASSERT_NE(apply, nullptr);
+    ASSERT_NE(discard, nullptr);
+    EXPECT_TRUE(apply->value("disabled", false));
+    EXPECT_FALSE(discard->contains("disabled"));
+}

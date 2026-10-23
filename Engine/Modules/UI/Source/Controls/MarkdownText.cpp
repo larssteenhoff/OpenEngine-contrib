@@ -1,4 +1,5 @@
 #include "UI/Controls/MarkdownText.h"
+#include "MarkdownTextRun.h"
 
 #include "UI/Controls/Button.h"
 #include "UI/Controls/Label.h"
@@ -257,7 +258,7 @@ private:
 
     std::unique_ptr<Label> MakePieceLabel(const WordPiece& piece)
     {
-        auto label = std::make_unique<Label>();
+        auto label = std::make_unique<MarkdownTextRun>();
         label->SetText(piece.Text);
         label->AddClass("markdown-word");
         if (piece.MayWrap)
@@ -322,7 +323,7 @@ const char* HeadingSizeClass(uint8_t level)
 // ring when nested) on a no-break space that gives it the line's box and baseline.
 std::unique_ptr<Label> MakeListMarker(const MarkdownBlock& block)
 {
-    auto marker = std::make_unique<Label>();
+    auto marker = std::make_unique<MarkdownTextRun>();
     marker->AddClass("markdown-list-marker");
     if (block.Ordered)
     {
@@ -389,7 +390,7 @@ std::unique_ptr<UIElement> BuildCodeBlock(const MarkdownBlock& block)
     frame->AddChild(BuildCodeHeader(block));
     auto scroll = std::make_unique<ScrollView>();
     scroll->AddClass("markdown-code-scroll");
-    auto code = std::make_unique<Label>();
+    auto code = std::make_unique<MarkdownTextRun>();
     code->AddClass("markdown-code-text");
     code->SetText(block.Code);
     scroll->AddContent(std::move(code));
@@ -448,13 +449,6 @@ const char* SpacingClass(const MarkdownBlock* previous, const MarkdownBlock& blo
 
 } // namespace
 
-MarkdownText::MarkdownText()
-{
-    AddClass("markdown-text");
-}
-
-MarkdownText::~MarkdownText() = default;
-
 void MarkdownText::SetMarkdown(std::string_view markdown)
 {
     MarkdownDocument document = UIParsing::MarkdownParser::Parse(markdown);
@@ -479,6 +473,7 @@ void MarkdownText::SetMarkdown(std::string_view markdown)
         AddChild(std::move(element));
     }
     m_Blocks = std::move(document.Blocks);
+    RefreshSelection();
 }
 
 } // namespace GameEngine

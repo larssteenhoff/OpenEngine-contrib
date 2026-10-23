@@ -159,32 +159,23 @@ struct Animator
         source = AnimatorPlaybackSource::Clip;
     }
 
-    template <size_t Capacity>
-    static void CopyFixedString(char (&target)[Capacity], std::string_view value)
-    {
-        std::memset(target, 0, sizeof(target));
-        const size_t count = std::min(value.size(), sizeof(target) - 1);
-        if (count > 0)
-            std::memcpy(target, value.data(), count);
-    }
-
     std::string_view AssignedAnimation() const { return FixedStringView(assignedAnimation); }
     std::string_view RootNode() const { return FixedStringView(rootNode); }
     std::string_view RootMotionTrack() const { return FixedStringView(rootMotionTrack); }
 
     void SetAssignedAnimation(std::string_view animationName)
     {
-        CopyFixedString(assignedAnimation, animationName);
+        CopyToFixedString(assignedAnimation, animationName);
     }
 
     void SetRootNode(std::string_view path)
     {
-        CopyFixedString(rootNode, path);
+        CopyToFixedString(rootNode, path);
     }
 
     void SetRootMotionTrack(std::string_view track)
     {
-        CopyFixedString(rootMotionTrack, track);
+        CopyToFixedString(rootMotionTrack, track);
     }
 
     // Hard-cut to a named embedded clip (or first embedded clip if the name

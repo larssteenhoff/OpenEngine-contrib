@@ -13,6 +13,7 @@ if(NOT GTest_FOUND)
 endif()
 
 add_executable(TypesTests
+    Base64Tests.cpp
     ColorTests.cpp
     FalseSharingTests.cpp
     FlatMapTests.cpp
@@ -22,6 +23,7 @@ add_executable(TypesTests
     ParseStrictDecimalTests.cpp
     PathUtilsTests.cpp
     StringUtilsTests.cpp
+    Utf8Tests.cpp
 )
 
 target_link_libraries(TypesTests

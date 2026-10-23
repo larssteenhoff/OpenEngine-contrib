@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -52,9 +53,20 @@ struct SettingsFieldDescriptor
     // Optional subsection break emitted immediately above this row, for pages
     // whose rows fall into named groups ("Steam Deck install", "Web export").
     // The category Title already heads the page, so leave both empty for a page
-    // that is one flat list.
+    // that is one flat list. SectionDescription explains the group and renders
+    // as an info card under the header; a name belongs in SectionHeader.
     std::string SectionHeader;
     std::string SectionDescription;
+
+    // Optional explanation shown as a collapsible info card under the row.
+    std::string InfoCard;
+
+    // Optional. The row, its section break and its info card are hidden while
+    // this returns false. Re-evaluated after layout and after every toggle or
+    // dropdown change on the page, so a toggle can pick which rows below it
+    // apply, and a condition outside the page (a panel becoming the active
+    // tab) takes effect without a rebuild. Called often: keep it cheap.
+    std::function<bool()> IsVisible;
 
     // Editor preferences key ("onlineAssets.polyHaven"). When set, the panel
     // loads the initial value from Preferences.json and persists every change
@@ -80,15 +92,43 @@ struct SettingsFieldDescriptor
         float DefaultValue = 0.0f;
         // The row seeds itself from Get() clamped to [MinValue, MaxValue], so
         // this range must admit every value the backing store accepts. A
-        // narrower widget shows a value the file does not hold, and Set then
-        // persists that clamp over the user's setting.
+        // narrower widget shows a value the file does not hold, and the next
+        // commit persists that clamp over the user's setting.
         float MinValue = 0.0f;
         float MaxValue = 1.0f;
         float Step = 0.0f;
         std::function<float()> Get;
-        // Fired once at build time with Get()'s own value; see ToggleField::Set
-        // for the obligation that puts on a Set that persists.
+        // Live feedback while the thumb or the label is dragged: one call per
+        // drag tick, so it must not persist. Optional; without it nothing
+        // changes until the commit.
+        std::function<void(float)> Preview;
+        // The commit: thumb or label release, value-field entry, double-click
+        // reset, undo and redo. Never fired at build time: the value the row
+        // opens with is already live, and a Preview may have left the live
+        // value equal to the one being committed, so Set persists without
+        // comparing against it.
         std::function<void(float)> Set;
+    };
+    // A typed number without a slider: a value field whose label drags it.
+    // Preview and Set follow SliderField.
+    struct NumberField
+    {
+        float DefaultValue = 0.0f;
+        float MinValue = std::numeric_limits<float>::lowest();
+        float MaxValue = std::numeric_limits<float>::max();
+        std::function<float()> Get; // optional when PrefKey is set
+        std::function<void(float)> Preview;
+        std::function<void(float)> Set;
+    };
+    // NumberField for whole numbers.
+    struct IntegerField
+    {
+        int DefaultValue = 0;
+        int MinValue = std::numeric_limits<int>::min();
+        int MaxValue = std::numeric_limits<int>::max();
+        std::function<int()> Get; // optional when PrefKey is set
+        std::function<void(int)> Preview;
+        std::function<void(int)> Set;
     };
     struct DropdownField
     {
@@ -110,7 +150,13 @@ struct SettingsFieldDescriptor
     struct ColorField
     {
         uint32_t DefaultArgb = 0xFF000000u;
+        // Adds an editable "#RRGGBB" field after the swatch.
+        bool ShowHexField = false;
         std::function<uint32_t()> Get;
+        // Live picker changes, and the restore when the picker is cancelled.
+        // It must not persist. Optional: without it those also go to Set.
+        std::function<void(uint32_t)> Preview;
+        // The commit: picker apply, hex entry and double-click reset.
         std::function<void(uint32_t)> Set;
     };
     // Toggle that enables a look, with a color swatch on the same row (info-card
@@ -165,10 +211,6 @@ struct SettingsFieldDescriptor
     {
         std::string ButtonText;
         std::function<void()> OnClick;
-        // Optional. The row is hidden while it returns false. Polled after
-        // layout, so a condition that changes without the page being rebuilt
-        // (a panel becoming the active tab) still takes effect.
-        std::function<bool()> IsVisible;
     };
     // Escape hatch for a row the declarative controls cannot express: drop
     // targets, editable lists, anything owning its own layout and persistence.
@@ -178,8 +220,8 @@ struct SettingsFieldDescriptor
         std::function<std::unique_ptr<UIElement>()> CreateRow;
     };
 
-    std::variant<ToggleField, SliderField, DropdownField, ColorField, ToggleColorField,
-                 StringField, PathField, ButtonField, CustomField>
+    std::variant<ToggleField, SliderField, NumberField, IntegerField, DropdownField, ColorField,
+                 ToggleColorField, StringField, PathField, ButtonField, CustomField>
         Control = ToggleField{};
 };
 
@@ -198,8 +240,8 @@ struct SettingsCategoryDescriptor
     // child that names a parent nobody has registered yet falls back to the
     // group root, and moves under the parent as soon as it appears.
     std::string ParentCategoryId;
-    std::string Description; // optional trailing settings-description paragraph
-    // Keeps that paragraph on screen when explanatory cards are globally
+    std::string Description; // optional trailing info card explaining the page
+    // Keeps that card on screen when explanatory cards are globally
     // hidden. For the page that owns the switch; leave false everywhere else.
     bool DescriptionAlwaysVisible = false;
     std::string TreeRowClass; // optional Settings tree icon/style class

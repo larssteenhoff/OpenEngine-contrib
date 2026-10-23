@@ -53,6 +53,7 @@ target_include_directories(AssetRuntime
 	    PUBLIC
 	        ${CMAKE_SOURCE_DIR}/Engine/Include
 	        ${CMAKE_SOURCE_DIR}/Engine/Modules/Animation/Include
+	        ${CMAKE_SOURCE_DIR}/Engine/Modules/Sprite2D/Include
 	    PRIVATE
 	        Source
 	        ${CMAKE_SOURCE_DIR}/Engine/Modules/Rendering/Include
@@ -76,6 +77,7 @@ target_link_libraries(AssetRuntime
         JobSystem
         FileWatcher
     PRIVATE
+        Localization
         Platform
         FileSystem
         Serialization

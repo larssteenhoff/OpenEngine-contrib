@@ -110,7 +110,7 @@ textarea {
 	border-width: 1px;
 	border-radius: 6px;
 	border-color: transparent;
-	background-color: #202020;
+	background-color: var(--ui_color_bg_value_box);
 	height: var(--value_box_height, 26px);
 	padding: 0 12px;
 }
@@ -279,9 +279,6 @@ button.icon-button.dragging,
 /* Opens the live panel inventory from the top toolbar. */
 .menulist-icon {
 	background-image: url("editor:Icons/menulist.svg");
-	/* 4/3 of the 16-unit art: its 3-unit line spacing becomes 4 whole pixels, so the
-	   three lines land on the same sub-pixel offset and draw at the same width. */
-	background-size: 21.333px 21.333px;
 	background-repeat: no-repeat;
 	background-position: center;
 	opacity: 0.35;
@@ -2039,19 +2036,57 @@ button.layout-button.active.pressed,
 	background-color: var(--ui_color_accent);
 }
 
-/* Ghost panel preview shown under cursor while dock-dragging a tab */
+/* Ghost panel preview shown under the cursor while dock-dragging a tab. The
+   container has no surface; the tab and body paint it. DockspaceElement sets
+   position and size, and adds .undocking while a drop would undock the panel. */
 .dock-drag-ghost {
+	opacity: 0.8;
+}
+
+.dock-drag-ghost.undocking {
+	opacity: 1;
+}
+
+.dock-drag-ghost-tab {
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	background-color: var(--ui_color_bg_panel);
-	border: 2px solid var(--ui_color_accent);
-	border-radius: 4px;
-	opacity: 0.75;
+	border: 2px solid var(--ui_color_dock_ghost_border);
+	border-bottom-width: 0px;
+	border-radius: 4px 4px 0px 0px;
+}
+
+.dock-drag-ghost-tab.undocking {
+	border-color: var(--ui_color_accent);
 }
 
 .dock-drag-ghost-label {
 	color: var(--ui_color_text_bright);
 	font-size: 12px;
-	padding: 4px 8px;
-	background-color: var(--ui_color_bg_tabbar);
+}
+
+.dock-drag-ghost-body {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background-color: var(--ui_color_dock_ghost_body);
+	border: 2px solid var(--ui_color_dock_ghost_border);
+	border-radius: 0px 4px 4px 4px;
+}
+
+.dock-drag-ghost-body.undocking {
+	border-color: var(--ui_color_accent);
+}
+
+.dock-drag-ghost-undock-label {
+	display: none;
+	color: var(--ui_color_text_bright);
+	font-size: 16px;
+}
+
+.dock-drag-ghost-undock-label.undocking {
+	display: flex;
 }
 
 .dock-content {
@@ -2186,8 +2221,6 @@ button.layout-button.active.pressed,
 	background-color: var(--ui_color_bg_panel);
 	/* Thumb border-radius controlled via custom property */
 	--scrollbar-thumb-radius: 4px;
-	/* Scrollbar thickness controlled via custom property */
-	--scrollbar-thickness: 6px;
 	z-index: 50;
 }
 
@@ -2205,15 +2238,15 @@ button.layout-button.active.pressed,
 }
 
 .scrollbar.horizontal {
-	margin-left: 6px;
-	margin-right: 6px;
-	margin-bottom: 6px;
+	margin-left: var(--ui_scrollbar_margin);
+	margin-right: var(--ui_scrollbar_margin);
+	margin-bottom: var(--ui_scrollbar_margin);
 }
 
 .scrollbar.vertical {
-	margin-top: 6px;
-	margin-bottom: 6px;
-	margin-right: 6px;
+	margin-top: var(--ui_scrollbar_margin);
+	margin-bottom: var(--ui_scrollbar_margin);
+	margin-right: var(--ui_scrollbar_margin);
 }
 
 /* Disable horizontal scrollbar in Inspector panel */

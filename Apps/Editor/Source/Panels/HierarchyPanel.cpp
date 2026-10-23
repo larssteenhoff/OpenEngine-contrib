@@ -1,4 +1,5 @@
 #include "Panels/HierarchyPanel.h"
+#include "Panels/HierarchyCommandIds.h"
 #include "AssetCore/Asset.h"
 #include "AssetCore/AssetTypes.h"
 #include "AssetCore/GUID.h"
@@ -107,6 +108,7 @@
 #include "UndoRedo/UndoRedoService.h"
 #include "VersionControl/Ui/HierarchyVcsController.h"
 #include "Editor/Vcs/VcsStatusUi.h"
+#include "Platform/Environment.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <thread>
@@ -123,7 +125,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -149,16 +150,15 @@ namespace
 // the point where O(N^2) bites.
 constexpr std::size_t kIncrementalDeltaMax = 512;
 
+// Row icons are left-aligned in their box, so a letterboxed sprite preview lines
+// up with the glyph icons in the rows above and below it.
+constexpr float kHierarchyRowIconAlignPercent = 0.0f;
+
 // Kill switch (design §5): GE_HIERARCHY_INCREMENTAL=0 restores the pre-incremental
-// full-Refresh Update path exactly. Default ON. Read once per process. Prefix-'0' convention
-// matches ECS::ChangeFilter::Enabled (any value beginning with '0' disables).
+// full-Refresh Update path exactly. Default ON. Read once per process.
 bool HierarchyIncrementalEnabled()
 {
-    static const bool enabled = []()
-    {
-        const char* v = std::getenv("GE_HIERARCHY_INCREMENTAL");
-        return !(v && v[0] == '0');
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_HIERARCHY_INCREMENTAL", true);
     return enabled;
 }
 
@@ -218,44 +218,6 @@ static constexpr TreeId kRootId = std::numeric_limits<TreeId>::max();
 
 namespace
 {
-// Built-in Hierarchy context menu commands (must fit in 16-bit on Win32).
-constexpr uint32_t kCmdCreateEmptyEntity = 0x4101;
-constexpr uint32_t kCmdCreateAsEmptyParent = 0x4102;
-constexpr uint32_t kCmdCreateShapeCube = 0x4110;
-constexpr uint32_t kCmdCreateShapeSphere = 0x4111;
-constexpr uint32_t kCmdCreateShapeCapsule = 0x4112;
-constexpr uint32_t kCmdCreateShapePlane = 0x4113;
-constexpr uint32_t kCmdCreateCamera = 0x4120;
-constexpr uint32_t kCmdCreateLightDirectional = 0x4130;
-constexpr uint32_t kCmdCreateLightPoint = 0x4131;
-constexpr uint32_t kCmdCreateLightSpot = 0x4132;
-constexpr uint32_t kCmdCreateLightAmbient = 0x4133;
-constexpr uint32_t kCmdCreateLightArea = 0x4134;
-constexpr uint32_t kCmdCreateTerrain = 0x4140;      // "Terrain (512 m)" preset + the create_terrain IPC default
-constexpr uint32_t kCmdCreateTerrainLarge = 0x4147; // "Terrain - Large (4 km)"
-constexpr uint32_t kCmdCreatePlanet5km = 0x4148;    // "Planet (5 km)"
-constexpr uint32_t kCmdCreatePlanet50km = 0x4149;   // "Planet (50 km)"
-constexpr uint32_t kCmdCreatePostProcessVolume = 0x4141;
-constexpr uint32_t kCmdCreateOcean = 0x4143;
-constexpr uint32_t kCmdCreateParticleEmitter = 0x4142;
-constexpr uint32_t kCmdCreateWindVolume = 0x4144;
-constexpr uint32_t kCmdCreateReflectionProbe = 0x4145;
-constexpr uint32_t kCmdCreateSkyEnvironment = 0x4146;
-constexpr uint32_t kCmdCreateDDGIVolume = 0x414A;
-constexpr uint32_t kCmdNewScene = 0x4150;
-constexpr uint32_t kCmdDuplicate = 0x4160;
-constexpr uint32_t kCmdSortCustom = 0x4170;
-constexpr uint32_t kCmdSortAlphabetical = 0x4171;
-constexpr uint32_t kCmdSortType = 0x4172;
-constexpr uint32_t kCmdSortAscending = 0x4173;
-constexpr uint32_t kCmdSortDescending = 0x4174;
-constexpr uint32_t kCmdShowRenderLayer = 0x4175;
-constexpr uint32_t kCmdShowVcsSceneDiffDots = 0x4176;
-constexpr uint32_t kCmdShowMeshLocation = 0x4180;
-constexpr uint32_t kCmdAddToBookmarks = 0x4190;
-constexpr uint32_t kCmdLoadRecentSceneBase = 0x41A0;
-constexpr uint32_t kCmdLoadRecentSceneCount = 10;
-constexpr uint32_t kCmdLoadRecentSceneEmpty = 0x41AF;
 constexpr const char* kIconEmptyEntity = "editor:Icons/EmptyEntity.svg";
 constexpr const char* kIconCamera = "editor:Icons/videocam.svg";
 constexpr const char* kIconLightDirectional = "editor:Icons/DirectionalLight.svg";
@@ -268,7 +230,7 @@ constexpr const char* kIconSkyEnvironment = "editor:Icons/skyenvironment.svg";
 
 bool IsLoadRecentSceneCommand(uint32_t cmd)
 {
-    return cmd >= kCmdLoadRecentSceneBase && cmd < (kCmdLoadRecentSceneBase + kCmdLoadRecentSceneCount);
+    return cmd >= HierarchyCommandIds::kCmdLoadRecentSceneBase && cmd < (HierarchyCommandIds::kCmdLoadRecentSceneBase + HierarchyCommandIds::kCmdLoadRecentSceneCount);
 }
 
 std::string BuildRecentSceneMenuLabel(const std::filesystem::path& scenePath,
@@ -1545,6 +1507,7 @@ HierarchyPanel::HierarchyPanel()
             // anyway, so take it here and give the row its own presentation.
             if (Editor::IsGhostTreeId(id))
             {
+                m_LayerControls.Hide(*row);
                 if (m_VcsController)
                     m_VcsController->DecorateGhostRow(id, *row);
                 return;
@@ -1578,7 +1541,6 @@ HierarchyPanel::HierarchyPanel()
             // reuse it across bindings just like the Assets tree does.
             UIElement* titleEl = nullptr;
             UIElement* previewIconEl = nullptr;
-            MaskField* renderLayerField = nullptr;
             for (const auto& child : row->GetChildren())
             {
                 if (child && child->HasClass("tree-title"))
@@ -1587,8 +1549,6 @@ HierarchyPanel::HierarchyPanel()
                 }
                 else if (child && child->HasClass("hierarchy-preview-icon"))
                     previewIconEl = child.get();
-                else if (child && child->HasClass("hierarchy-render-layer-dropdown"))
-                    renderLayerField = dynamic_cast<MaskField*>(child.get());
             }
             if (m_VcsController)
                 m_VcsController->DecorateRow(handle, *row);
@@ -1607,11 +1567,12 @@ HierarchyPanel::HierarchyPanel()
                 row->AddChild(std::move(previewIcon));
             }
             m_RowActivity.Present(*m_World, handle, id, *row);
-            if (!renderLayerField)
+            if (!row->HasClass("hierarchy-hover-wired"))
             {
-                // A pooled row's first bind: the layer field is created once per row, so the
-                // row's own handlers are wired here too. Each asks the tree which item the
-                // row shows now, so a recycled row never answers for its previous item.
+                // A pooled row's first bind wires the row's own handlers once. Each asks the
+                // tree which item the row shows now, so a recycled row never answers for its
+                // previous item.
+                row->AddClass("hierarchy-hover-wired");
                 row->RegisterEventHandler(kEventMouseEnter, [this, row](UIEvent&)
                                           {
                     if (!m_OnHoverEntity || !m_Tree)
@@ -1626,52 +1587,17 @@ HierarchyPanel::HierarchyPanel()
                     if (m_OnHoverEntity)
                         m_OnHoverEntity({});
                 });
-
-                auto layers = std::make_unique<MaskField>();
-                layers->AddClass("hierarchy-render-layer-dropdown");
-                Editor::FeedRenderLayerNames(*layers);
-                layers->SetNothingTooltip(Editor::kRenderLayersNothingTooltip);
-                renderLayerField = layers.get();
-                renderLayerField->SetOnBitsChanged([this, row](uint32 bits, bool on)
-                {
-                    if (!m_World || !m_Tree)
-                        return;
-                    const TreeId tid = m_Tree->BoundIdOf(row);
-                    if (tid == 0 || tid == kRootId)
-                        return;
-                    const ECS::EntityHandle entity = HierarchyDataProvider::Decode(tid);
-                    if (!entity.IsValid() || !m_World->IsValid(entity))
-                        return;
-
-                    // A row inside the selection applies the layer to the whole selection,
-                    // the same rule the enable-toggle icon follows; each entity keeps its
-                    // other layers.
-                    Editor::ApplyRenderLayerBits(*m_World, ResolveRowActionTargets(entity), bits, on,
-                                                 m_Undo, m_ChangeNotifications);
-                });
-                row->AddChild(std::move(layers));
             }
-
-            const auto* layerRenderer = m_World->GetComponent<Components::MeshRenderer>(handle);
-            const bool showRenderLayerDropdown = m_ShowRenderLayer && layerRenderer;
-            UI::Layout::SetElementHidden(*renderLayerField, !showRenderLayerDropdown);
-            // The dropdown is anchored to the row's right edge rather than flowed,
-            // so the title has to reserve its strip explicitly (theme/views.css).
-            if (showRenderLayerDropdown)
-                row->AddClass("has-render-layer");
-            else
-                row->RemoveClass("has-render-layer");
-            // A narrow panel gets a shorter control rather than none: the layer
-            // stays readable and the name keeps usable room.
-            constexpr float kNarrowRenderLayerPx = 400.0f;
-            const bool narrowRenderLayer =
-                showRenderLayerDropdown && GetLayoutWidth() < kNarrowRenderLayerPx;
-            if (narrowRenderLayer)
-                row->AddClass("render-layer-narrow");
-            else
-                row->RemoveClass("render-layer-narrow");
-            if (showRenderLayerDropdown)
-                renderLayerField->SetValueWithoutNotify(layerRenderer->RenderLayers.Bits);
+            // The render-layer and sorting-layer pickers. A row inside the selection applies
+            // its pick to the whole selection, the same rule the enable-toggle icon follows.
+            if (titleEl)
+                m_LayerControls.Present(*m_World, handle, *row, *titleEl, GetLayoutWidth(),
+                    [this, row]()
+                    {
+                        if (!m_Tree)
+                            return std::vector<ECS::EntityHandle>{};
+                        return ResolveRowActionTargets(HierarchyDataProvider::Decode(m_Tree->BoundIdOf(row)));
+                    }, m_Undo, m_ChangeNotifications);
             if (titleEl && previewIconEl)
             {
                 titleEl->AddClass("tree-title-no-icon");
@@ -1750,48 +1676,42 @@ HierarchyPanel::HierarchyPanel()
                             }
                         }
                     }
-                    else if (row->HasClass("hierarchy-entity-sprite") &&
-                             m_Context && m_Context->Assets)
+                    else if (row->HasClass("hierarchy-entity-animated-sprite") &&
+                             m_Context && m_Context->Assets && m_Context->Thumbnails &&
+                             !m_Context->UIReplayActive)
                     {
-                        // Sprite: show the bound albedo texture as the icon. Fall back to
-                        // the CSS sprite icon (via class) when the texture can't be resolved.
-                        const std::filesystem::path spritePath =
-                            Editor::TryResolveSpriteAlbedoTexturePath(m_World, handle, m_Context->Assets);
-                        std::error_code ec;
-                        if (!spritePath.empty() && std::filesystem::exists(spritePath, ec))
+                        // Sprite sheets are useless as previews, so the thumbnail
+                        // service crops the entity's current frame out of its
+                        // sheet. Falls back to the CSS sprite icon (via class)
+                        // while the crop is generating, or when it cannot be.
+                        const Editor::SpriteFramesPreviewRequest request =
+                            Editor::TryResolveSpriteFramesPreview(m_World, handle, m_Context->Assets);
+                        if (!request.AssetPath.empty())
                         {
-                            UIManager* mgr = GetOwnerManager();
-                            if (mgr)
-                            {
-                                const std::string pathStr = spritePath.string();
-                                const GUID bgGuid = mgr->BackgroundImages().ResolvePath(pathStr);
-                                if (!bgGuid.IsNull())
+                            IThumbnailProvider* thumbnails = m_Context->Thumbnails;
+                            ApplyGeneratedRowPreview(
+                                row, id, previewIconEl,
+                                [thumbnails, request](std::function<void(const std::string&)> onReady)
                                 {
-                                    // Uploads at once when the texture is loaded, otherwise requests it;
-                                    // never waits (a first open can still be cooking it). The upload's
-                                    // completion repaints the icon.
-                                    mgr->BackgroundImages().EnsureUploaded(bgGuid);
-
-                                    // Fit inside the square icon box while preserving the texture's
-                                    // aspect ratio, left-aligned and vertically centred like other
-                                    // hierarchy row icons: contain sizes from the uploaded image.
-                                    BackgroundImageSource source{};
-                                    source.Kind = BackgroundImageSource::SourceKind::Path;
-                                    source.Value = pathStr;
-                                    BackgroundSizeValue size{};
-                                    size.Mode = BackgroundSizeMode::Contain;
-                                    BackgroundPositionValue pos{0.0f, true, 50.0f, true};
-                                    previewIconEl->AddClass("hierarchy-entity-model-thumb");
-                                    previewIconEl->Overrides()
-                                        .Set(Style::BackgroundImage, source)
-                                        .Set(Style::BackgroundRepeatProp, BackgroundRepeat::NoRepeat)
-                                        .Set(Style::BackgroundSize, size)
-                                        .Set(Style::BackgroundPosition, pos)
-                                        .Set(Style::BackgroundTint, uint32_t(0xFFFFFFFFu));
-                                    ApplyModelThumbColorOverride(previewIconEl);
-                                    previewIconEl->MarkDirty(UIElement::VisualDirty);
-                                }
-                            }
+                                    return thumbnails->GetOrRequestSpriteFrame(
+                                        request.AssetPath, request.AnimationName, request.FlipX,
+                                        std::move(onReady));
+                                });
+                        }
+                    }
+                    else if (row->HasClass("hierarchy-entity-sprite") &&
+                             m_Context && m_Context->Assets && m_Context->Thumbnails && !m_Context->UIReplayActive)
+                    {
+                        const auto path = Editor::TryResolveSpriteAlbedoTexturePath(m_World, handle, m_Context->Assets);
+                        if (!path.empty())
+                        {
+                            const auto uv = Editor::ResolveSpritePreviewUV(m_World, handle, m_Context->Assets);
+                            const auto keying = Editor::ResolveSpritePreviewKey(m_World, handle, m_Context->Assets);
+                            auto* thumbnails = m_Context->Thumbnails;
+                            ApplyGeneratedRowPreview(row, id, previewIconEl,
+                                [thumbnails, path, uv, keying](std::function<void(const std::string&)> onReady) {
+                                    return thumbnails->GetOrRequestAtlasRegion(path, uv, std::move(onReady), keying);
+                                });
                         }
                     }
                     else
@@ -2186,14 +2106,14 @@ HierarchyPanel::HierarchyPanel()
         ContextMenuBuilder builder;
         // Built-in Create actions
         builder.AddItem("Create", 0, MenuItemFlag_None, -100, EditorIcons::kPlus);
-        builder.AddItem("Create/Empty Entity", kCmdCreateEmptyEntity, MenuItemFlag_None, -100, kIconEmptyEntity);
+        builder.AddItem("Create/Empty Entity", HierarchyCommandIds::kCmdCreateEmptyEntity, MenuItemFlag_None, -100, kIconEmptyEntity);
         if (mask == static_cast<uint32_t>(Editor::EditorContextMenuTarget::HierarchyItem))
         {
-            builder.AddItem("Create/As Empty Parent", kCmdCreateAsEmptyParent, MenuItemFlag_None, -99, kIconEmptyEntity);
-            builder.AddItem("Duplicate", kCmdDuplicate, MenuItemFlag_None, -50, EditorIcons::kCopy);
+            builder.AddItem("Create/As Empty Parent", HierarchyCommandIds::kCmdCreateAsEmptyParent, MenuItemFlag_None, -99, kIconEmptyEntity);
+            builder.AddItem("Duplicate", HierarchyCommandIds::kCmdDuplicate, MenuItemFlag_None, -50, EditorIcons::kCopy);
 
             if (m_OnAddEntitiesToBookmarks)
-                builder.AddItem("Add to Bookmarks", kCmdAddToBookmarks, MenuItemFlag_None, -48, EditorIcons::kBookmark);
+                builder.AddItem("Add to Bookmarks", HierarchyCommandIds::kCmdAddToBookmarks, MenuItemFlag_None, -48, EditorIcons::kBookmark);
 
             // "Show Mesh Location" — only when the target entity (or one of its
             // children) references a model asset we can locate on disk.
@@ -2206,35 +2126,35 @@ HierarchyPanel::HierarchyPanel()
                     AssetMetadata meta;
                     if (m_Context->Assets->GetRegistry().TryGetAssetMetadata(modelGuid, meta) && !meta.Path.empty())
                     {
-                        builder.AddItem("Show Mesh Location", kCmdShowMeshLocation, MenuItemFlag_None, -40, EditorIcons::kEye);
+                        builder.AddItem("Show Mesh Location", HierarchyCommandIds::kCmdShowMeshLocation, MenuItemFlag_None, -40, EditorIcons::kEye);
                     }
                 }
             }
         }
         builder.AddItem("Create/Shape", 0, MenuItemFlag_None, -98, EditorIcons::kCube);
-        builder.AddItem("Create/Shape/Cube", kCmdCreateShapeCube, MenuItemFlag_None, -98, EditorIcons::kCube);
-        builder.AddItem("Create/Shape/Sphere", kCmdCreateShapeSphere, MenuItemFlag_None, -97, EditorIcons::kSphere);
-        builder.AddItem("Create/Shape/Capsule", kCmdCreateShapeCapsule, MenuItemFlag_None, -96, EditorIcons::kCapsule);
-        builder.AddItem("Create/Shape/Plane", kCmdCreateShapePlane, MenuItemFlag_None, -95, EditorIcons::kPlane);
+        builder.AddItem("Create/Shape/Cube", HierarchyCommandIds::kCmdCreateShapeCube, MenuItemFlag_None, -98, EditorIcons::kCube);
+        builder.AddItem("Create/Shape/Sphere", HierarchyCommandIds::kCmdCreateShapeSphere, MenuItemFlag_None, -97, EditorIcons::kSphere);
+        builder.AddItem("Create/Shape/Capsule", HierarchyCommandIds::kCmdCreateShapeCapsule, MenuItemFlag_None, -96, EditorIcons::kCapsule);
+        builder.AddItem("Create/Shape/Plane", HierarchyCommandIds::kCmdCreateShapePlane, MenuItemFlag_None, -95, EditorIcons::kPlane);
         builder.AddItem("Create/Light", 0, MenuItemFlag_None, -93, EditorIcons::kLight);
-        builder.AddItem("Create/Light/Directional", kCmdCreateLightDirectional, MenuItemFlag_None, -93, kIconLightDirectional);
-        builder.AddItem("Create/Light/Point", kCmdCreateLightPoint, MenuItemFlag_None, -92, EditorIcons::kLight);
-        builder.AddItem("Create/Light/Spot", kCmdCreateLightSpot, MenuItemFlag_None, -91, kIconLightSpot);
-        builder.AddItem("Create/Light/Area", kCmdCreateLightArea, MenuItemFlag_None, -90, kIconLightArea);
-        builder.AddItem("Create/Light/Ambient", kCmdCreateLightAmbient, MenuItemFlag_None, -88, kIconLightAmbient);
+        builder.AddItem("Create/Light/Directional", HierarchyCommandIds::kCmdCreateLightDirectional, MenuItemFlag_None, -93, kIconLightDirectional);
+        builder.AddItem("Create/Light/Point", HierarchyCommandIds::kCmdCreateLightPoint, MenuItemFlag_None, -92, EditorIcons::kLight);
+        builder.AddItem("Create/Light/Spot", HierarchyCommandIds::kCmdCreateLightSpot, MenuItemFlag_None, -91, kIconLightSpot);
+        builder.AddItem("Create/Light/Area", HierarchyCommandIds::kCmdCreateLightArea, MenuItemFlag_None, -90, kIconLightArea);
+        builder.AddItem("Create/Light/Ambient", HierarchyCommandIds::kCmdCreateLightAmbient, MenuItemFlag_None, -88, kIconLightAmbient);
         builder.AddItem("Create/Terrain", 0, MenuItemFlag_None, -87, EditorIcons::kTerrain);
-        builder.AddItem("Create/Terrain/Terrain (512 m)", kCmdCreateTerrain, MenuItemFlag_None, -87, EditorIcons::kTerrain);
-        builder.AddItem("Create/Terrain/Terrain \xe2\x80\x94 Large (4 km)", kCmdCreateTerrainLarge, MenuItemFlag_None, -87, EditorIcons::kTerrain);
-        builder.AddItem("Create/Terrain/Planet (5 km)", kCmdCreatePlanet5km, MenuItemFlag_None, -86, kIconPlanet);
-        builder.AddItem("Create/Terrain/Planet (50 km)", kCmdCreatePlanet50km, MenuItemFlag_None, -86, kIconPlanet);
-        builder.AddItem("Create/Camera", kCmdCreateCamera, MenuItemFlag_None, -86, kIconCamera);
-        builder.AddItem("Create/Ocean", kCmdCreateOcean, MenuItemFlag_None, -85, EditorIcons::kOcean);
-        builder.AddItem("Create/Sky Environment", kCmdCreateSkyEnvironment, MenuItemFlag_None, -85, kIconSkyEnvironment);
-        builder.AddItem("Create/Reflection Probe", kCmdCreateReflectionProbe, MenuItemFlag_None, -84, EditorIcons::kProbe);
-        builder.AddItem("Create/Post Process Volume", kCmdCreatePostProcessVolume, MenuItemFlag_None, -84, EditorIcons::kColorFilter);
-        builder.AddItem("Create/DDGI Volume", kCmdCreateDDGIVolume, MenuItemFlag_None, -84, EditorIcons::kDDGIVolume);
-        builder.AddItem("Create/Wind Volume", kCmdCreateWindVolume, MenuItemFlag_None, -83, EditorIcons::kWind);
-        builder.AddItem("Create/Particle Emitter", kCmdCreateParticleEmitter, MenuItemFlag_None, -82, kIconParticles);
+        builder.AddItem("Create/Terrain/Terrain (512 m)", HierarchyCommandIds::kCmdCreateTerrain, MenuItemFlag_None, -87, EditorIcons::kTerrain);
+        builder.AddItem("Create/Terrain/Terrain \xe2\x80\x94 Large (4 km)", HierarchyCommandIds::kCmdCreateTerrainLarge, MenuItemFlag_None, -87, EditorIcons::kTerrain);
+        builder.AddItem("Create/Terrain/Planet (5 km)", HierarchyCommandIds::kCmdCreatePlanet5km, MenuItemFlag_None, -86, kIconPlanet);
+        builder.AddItem("Create/Terrain/Planet (50 km)", HierarchyCommandIds::kCmdCreatePlanet50km, MenuItemFlag_None, -86, kIconPlanet);
+        builder.AddItem("Create/Camera", HierarchyCommandIds::kCmdCreateCamera, MenuItemFlag_None, -86, kIconCamera);
+        builder.AddItem("Create/Ocean", HierarchyCommandIds::kCmdCreateOcean, MenuItemFlag_None, -85, EditorIcons::kOcean);
+        builder.AddItem("Create/Sky Environment", HierarchyCommandIds::kCmdCreateSkyEnvironment, MenuItemFlag_None, -85, kIconSkyEnvironment);
+        builder.AddItem("Create/Reflection Probe", HierarchyCommandIds::kCmdCreateReflectionProbe, MenuItemFlag_None, -84, EditorIcons::kProbe);
+        builder.AddItem("Create/Post Process Volume", HierarchyCommandIds::kCmdCreatePostProcessVolume, MenuItemFlag_None, -84, EditorIcons::kColorFilter);
+        builder.AddItem("Create/DDGI Volume", HierarchyCommandIds::kCmdCreateDDGIVolume, MenuItemFlag_None, -84, EditorIcons::kDDGIVolume);
+        builder.AddItem("Create/Wind Volume", HierarchyCommandIds::kCmdCreateWindVolume, MenuItemFlag_None, -83, EditorIcons::kWind);
+        builder.AddItem("Create/Particle Emitter", HierarchyCommandIds::kCmdCreateParticleEmitter, MenuItemFlag_None, -82, kIconParticles);
 
         Editor::HierarchyContextMenuContext pluginMenuCtx{};
         pluginMenuCtx.World = m_World;
@@ -2259,44 +2179,40 @@ HierarchyPanel::HierarchyPanel()
             const bool isAsc    = (m_SortDirection == HierarchySortDirection::Ascending);
             const bool isDesc   = (m_SortDirection == HierarchySortDirection::Descending);
 
-            builder.AddItem("Sort By",              0,                    MenuItemFlag_None,   50, EditorIcons::kSortList);
-            builder.AddItem("Sort By/Custom",       kCmdSortCustom,       oneOf(isCustom), 50, EditorIcons::kPointer);
-            builder.AddItem("Sort By/Alphabetical", kCmdSortAlphabetical, oneOf(isAlpha),  51, EditorIcons::kSortList);
-            builder.AddItem("Sort By/Type",         kCmdSortType,         oneOf(isType),   52, EditorIcons::kTag);
-            builder.AddItem("Sort By/-",            0,                    MenuItemFlag_None,   55);
-            builder.AddItem("Sort By/Ascending",    kCmdSortAscending,    oneOf(isAsc),    60, EditorIcons::kArrowUp);
-            builder.AddItem("Sort By/Descending",   kCmdSortDescending,   oneOf(isDesc),   61, EditorIcons::kArrowDown);
+            builder.AddItem("Sort By",              0,                                         MenuItemFlag_None,   50, EditorIcons::kSortList);
+            builder.AddItem("Sort By/Custom",       HierarchyCommandIds::kCmdSortCustom,       oneOf(isCustom), 50, EditorIcons::kPointer);
+            builder.AddItem("Sort By/Alphabetical", HierarchyCommandIds::kCmdSortAlphabetical, oneOf(isAlpha),  51, EditorIcons::kSortList);
+            builder.AddItem("Sort By/Type",         HierarchyCommandIds::kCmdSortType,         oneOf(isType),   52, EditorIcons::kTag);
+            builder.AddItem("Sort By/-",            0,                                         MenuItemFlag_None,   55);
+            builder.AddItem("Sort By/Ascending",    HierarchyCommandIds::kCmdSortAscending,    oneOf(isAsc),    60, EditorIcons::kArrowUp);
+            builder.AddItem("Sort By/Descending",   HierarchyCommandIds::kCmdSortDescending,   oneOf(isDesc),   61, EditorIcons::kArrowDown);
             builder.AddItem("Hierarchy Options", 0, MenuItemFlag_None, 70, EditorIcons::kSettings);
-            builder.AddItem("Hierarchy Options/Show Render Layer",
-                            kCmdShowRenderLayer,
-                            checkedIf(m_ShowRenderLayer),
-                            70,
-                            EditorIcons::kEye);
+            m_LayerControls.BuildMenu(builder);
             // One preference behind both panels, so the label says so rather
             // than implying the Hierarchy has its own.
             if (m_VcsController && m_VcsController->CanToggleIndicatorVisibility())
                 builder.AddItem("Hierarchy Options/Show Version Control Dots",
-                                kCmdShowVcsSceneDiffDots,
+                                HierarchyCommandIds::kCmdShowVcsSceneDiffDots,
                                 checkedIf(Editor::AreVcsSceneDiffIndicatorsVisible()),
                                 71,
                                 EditorIcons::kEye);
         }
 
         // Scene actions
-        builder.AddItem("New Scene", kCmdNewScene, MenuItemFlag_None, 100, EditorIcons::kScene);
+        builder.AddItem("New Scene", HierarchyCommandIds::kCmdNewScene, MenuItemFlag_None, 100, EditorIcons::kScene);
         m_ContextMenuRecentScenes.clear();
         if (m_GetRecentScenes)
         {
             m_ContextMenuRecentScenes = m_GetRecentScenes();
-            if (m_ContextMenuRecentScenes.size() > kCmdLoadRecentSceneCount)
-                m_ContextMenuRecentScenes.resize(kCmdLoadRecentSceneCount);
+            if (m_ContextMenuRecentScenes.size() > HierarchyCommandIds::kCmdLoadRecentSceneCount)
+                m_ContextMenuRecentScenes.resize(HierarchyCommandIds::kCmdLoadRecentSceneCount);
         }
 
         builder.AddItem("Load Recent Scene", 0, MenuItemFlag_None, 101, EditorIcons::kScene);
         if (m_ContextMenuRecentScenes.empty())
         {
             builder.AddItem("Load Recent Scene/No Recent Scenes",
-                            kCmdLoadRecentSceneEmpty,
+                            HierarchyCommandIds::kCmdLoadRecentSceneEmpty,
                             MenuItemFlag_Disabled,
                             101);
         }
@@ -2308,7 +2224,7 @@ HierarchyPanel::HierarchyPanel()
 
             for (size_t i = 0; i < m_ContextMenuRecentScenes.size(); ++i)
             {
-                const uint32_t cmd = kCmdLoadRecentSceneBase + static_cast<uint32_t>(i);
+                const uint32_t cmd = HierarchyCommandIds::kCmdLoadRecentSceneBase + static_cast<uint32_t>(i);
                 builder.AddItem("Load Recent Scene/" + BuildRecentSceneMenuLabel(m_ContextMenuRecentScenes[i], fileNameCounts),
                                 cmd,
                                 MenuItemFlag_None,
@@ -2767,7 +2683,6 @@ void HierarchyPanel::HandleTreeDrop(const UI::Interaction::DropRequest& req)
             // Store canonical relative path when possible.
             Components::SceneBlueprintInstance inst{};
             std::memset(inst.sourcePath, 0, sizeof(inst.sourcePath));
-            std::memset(inst.sourceGuid, 0, sizeof(inst.sourceGuid));
             // Drop payloads carry registry paths, which are folded on
             // case-insensitive platforms while the root carries its own
             // spelling; a lexical subtraction compares case and would
@@ -3280,12 +3195,12 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
 {
     if (IsLoadRecentSceneCommand(cmd))
     {
-        const size_t index = static_cast<size_t>(cmd - kCmdLoadRecentSceneBase);
+        const size_t index = static_cast<size_t>(cmd - HierarchyCommandIds::kCmdLoadRecentSceneBase);
         if (index < m_ContextMenuRecentScenes.size() && m_OnOpenRecentScene)
             m_OnOpenRecentScene(m_ContextMenuRecentScenes[index]);
         return true;
     }
-    if (cmd == kCmdLoadRecentSceneEmpty)
+    if (cmd == HierarchyCommandIds::kCmdLoadRecentSceneEmpty)
         return true;
 
     if (!m_World)
@@ -3755,43 +3670,43 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
 
     switch (cmd)
     {
-    case kCmdCreateEmptyEntity:
+    case HierarchyCommandIds::kCmdCreateEmptyEntity:
         createEntity("Create Empty Entity", "Empty Entity", /*withRenderer*/ false, 0u, /*withCamera*/ false, /*withLight*/ false, Components::LightType::Directional, PhysicsSpawn::None);
         return true;
-    case kCmdCreateAsEmptyParent:
+    case HierarchyCommandIds::kCmdCreateAsEmptyParent:
         createAsEmptyParent();
         return true;
-    case kCmdCreateShapeCube:
+    case HierarchyCommandIds::kCmdCreateShapeCube:
         createEntity("Create Cube", "Cube", /*withRenderer*/ true, 1u, /*withCamera*/ false, /*withLight*/ false, Components::LightType::Directional, PhysicsSpawn::DynamicBox);
         return true;
-    case kCmdCreateShapeSphere:
+    case HierarchyCommandIds::kCmdCreateShapeSphere:
         createEntity("Create Sphere", "Sphere", /*withRenderer*/ true, 2u, /*withCamera*/ false, /*withLight*/ false, Components::LightType::Directional, PhysicsSpawn::DynamicSphere);
         return true;
-    case kCmdCreateShapeCapsule:
+    case HierarchyCommandIds::kCmdCreateShapeCapsule:
         createEntity("Create Capsule", "Capsule", /*withRenderer*/ true, 3u, /*withCamera*/ false, /*withLight*/ false, Components::LightType::Directional, PhysicsSpawn::DynamicCapsule);
         return true;
-    case kCmdCreateShapePlane:
+    case HierarchyCommandIds::kCmdCreateShapePlane:
         createEntity("Create Plane", "Plane", /*withRenderer*/ true, 4u, /*withCamera*/ false, /*withLight*/ false, Components::LightType::Directional, PhysicsSpawn::StaticPlaneBox);
         return true;
-    case kCmdCreateCamera:
+    case HierarchyCommandIds::kCmdCreateCamera:
         createEntity("Create Camera", "Camera", /*withRenderer*/ false, 0u, /*withCamera*/ true, /*withLight*/ false, Components::LightType::Directional, PhysicsSpawn::None);
         return true;
-    case kCmdCreateLightDirectional:
+    case HierarchyCommandIds::kCmdCreateLightDirectional:
         createEntity("Create Directional Light", "Directional Light", /*withRenderer*/ false, 0u, /*withCamera*/ false, /*withLight*/ true, Components::LightType::Directional, PhysicsSpawn::None);
         return true;
-    case kCmdCreateLightPoint:
+    case HierarchyCommandIds::kCmdCreateLightPoint:
         createEntity("Create Point Light", "Point Light", /*withRenderer*/ false, 0u, /*withCamera*/ false, /*withLight*/ true, Components::LightType::Point, PhysicsSpawn::None);
         return true;
-    case kCmdCreateLightSpot:
+    case HierarchyCommandIds::kCmdCreateLightSpot:
         createEntity("Create Spot Light", "Spot Light", /*withRenderer*/ false, 0u, /*withCamera*/ false, /*withLight*/ true, Components::LightType::Spot, PhysicsSpawn::None);
         return true;
-    case kCmdCreateLightArea:
+    case HierarchyCommandIds::kCmdCreateLightArea:
         createEntity("Create Area Light", "Area Light", /*withRenderer*/ false, 0u, /*withCamera*/ false, /*withLight*/ true, Components::LightType::Area, PhysicsSpawn::None);
         return true;
-    case kCmdCreateLightAmbient:
+    case HierarchyCommandIds::kCmdCreateLightAmbient:
         createEntity("Create Ambient Light", "Ambient Light", /*withRenderer*/ false, 0u, /*withCamera*/ false, /*withLight*/ true, Components::LightType::Ambient, PhysicsSpawn::None);
         return true;
-    case kCmdCreateOcean:
+    case HierarchyCommandIds::kCmdCreateOcean:
     {
         ECS::World* world = m_World;
         if (!world)
@@ -3819,7 +3734,7 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
 
         return true;
     }
-    case kCmdCreateSkyEnvironment:
+    case HierarchyCommandIds::kCmdCreateSkyEnvironment:
     {
         if (!m_World)
             return true;
@@ -3829,10 +3744,10 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
         scheduleSelectCreatedEntity(h);
         return true;
     }
-    case kCmdCreateTerrain:
-    case kCmdCreateTerrainLarge:
-    case kCmdCreatePlanet5km:
-    case kCmdCreatePlanet50km:
+    case HierarchyCommandIds::kCmdCreateTerrain:
+    case HierarchyCommandIds::kCmdCreateTerrainLarge:
+    case HierarchyCommandIds::kCmdCreatePlanet5km:
+    case HierarchyCommandIds::kCmdCreatePlanet50km:
     {
         ECS::World* world = m_World;
         if (!world)
@@ -3843,9 +3758,9 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
             return true;
 
         const CBTTerrainECS::TerrainPreset preset =
-            (cmd == kCmdCreateTerrainLarge) ? CBTTerrainECS::TerrainPreset::LargePlanar :
-            (cmd == kCmdCreatePlanet5km)    ? CBTTerrainECS::TerrainPreset::Planet5km :
-            (cmd == kCmdCreatePlanet50km)   ? CBTTerrainECS::TerrainPreset::Planet50km :
+            (cmd == HierarchyCommandIds::kCmdCreateTerrainLarge) ? CBTTerrainECS::TerrainPreset::LargePlanar :
+            (cmd == HierarchyCommandIds::kCmdCreatePlanet5km)    ? CBTTerrainECS::TerrainPreset::Planet5km :
+            (cmd == HierarchyCommandIds::kCmdCreatePlanet50km)   ? CBTTerrainECS::TerrainPreset::Planet50km :
                                               CBTTerrainECS::TerrainPreset::SmallPlanar;
         const Components::Terrain terrainComp = CBTTerrainECS::MakeTerrainPreset(preset);
         const Components::TerrainPlanetRelief reliefComp =
@@ -3877,7 +3792,7 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
 
         return true;
     }
-    case kCmdCreateDDGIVolume:
+    case HierarchyCommandIds::kCmdCreateDDGIVolume:
     {
         ECS::World* world = m_World;
         if (!world)
@@ -3912,7 +3827,7 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
 
         return true;
     }
-    case kCmdCreatePostProcessVolume:
+    case HierarchyCommandIds::kCmdCreatePostProcessVolume:
     {
         ECS::World* world = m_World;
         if (!world)
@@ -3939,7 +3854,7 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
 
         return true;
     }
-    case kCmdCreateWindVolume:
+    case HierarchyCommandIds::kCmdCreateWindVolume:
     {
         ECS::World* world = m_World;
         if (!world)
@@ -3966,48 +3881,50 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
 
         return true;
     }
-    case kCmdCreateReflectionProbe:
+    case HierarchyCommandIds::kCmdCreateReflectionProbe:
         createReflectionProbe();
         return true;
-    case kCmdCreateParticleEmitter:
+    case HierarchyCommandIds::kCmdCreateParticleEmitter:
         createParticleEmitter();
         return true;
-    case kCmdNewScene:
+    case HierarchyCommandIds::kCmdNewScene:
         if (m_OnNewScene)
             m_OnNewScene();
         return true;
-    case kCmdDuplicate:
+    case HierarchyCommandIds::kCmdDuplicate:
         DuplicateSelectedEntities();
         return true;
-    case kCmdSortCustom:
+    case HierarchyCommandIds::kCmdSortCustom:
         m_SortMode = HierarchySortMode::Custom;
         ApplySortSettings();
         return true;
-    case kCmdSortAlphabetical:
+    case HierarchyCommandIds::kCmdSortAlphabetical:
         m_SortMode = HierarchySortMode::Alphabetical;
         ApplySortSettings();
         return true;
-    case kCmdSortType:
+    case HierarchyCommandIds::kCmdSortType:
         m_SortMode = HierarchySortMode::Type;
         ApplySortSettings();
         return true;
-    case kCmdSortAscending:
+    case HierarchyCommandIds::kCmdSortAscending:
         m_SortDirection = HierarchySortDirection::Ascending;
         ApplySortSettings();
         return true;
-    case kCmdSortDescending:
+    case HierarchyCommandIds::kCmdSortDescending:
         m_SortDirection = HierarchySortDirection::Descending;
         ApplySortSettings();
         return true;
-    case kCmdShowVcsSceneDiffDots:
+    case HierarchyCommandIds::kCmdShowVcsSceneDiffDots:
         if (m_VcsController)
             m_VcsController->ToggleIndicatorVisibility();
         return true;
-    case kCmdShowRenderLayer:
-        m_ShowRenderLayer = !m_ShowRenderLayer;
-        ApplyRenderLayerVisibility();
+    case HierarchyCommandIds::kCmdShowRenderLayer:
+    case HierarchyCommandIds::kCmdShowSortingLayer:
+        m_LayerControls.HandleCommand(cmd);
+        if (m_Tree)
+            m_Tree->RefreshFromProvider();
         return true;
-    case kCmdShowMeshLocation:
+    case HierarchyCommandIds::kCmdShowMeshLocation:
     {
         if (!m_ContextTargetEntity.IsValid() || !m_World->IsValid(m_ContextTargetEntity))
             return true;
@@ -4022,7 +3939,7 @@ bool HierarchyPanel::HandleCommand(std::uint32_t cmd)
         m_PingAsset(meta.Path);
         return true;
     }
-    case kCmdAddToBookmarks:
+    case HierarchyCommandIds::kCmdAddToBookmarks:
     {
         if (!m_OnAddEntitiesToBookmarks || !m_World)
             return true;
@@ -4210,6 +4127,44 @@ void HierarchyPanel::SetChangeNotifications(Editor::EditorChangeNotifications* n
                                  m_Provider->Rebuild();
                                  m_Tree->RefreshFromProvider(); });
         });
+}
+
+void HierarchyPanel::ApplyGeneratedRowPreview(
+    UIElement* row, TreeId id, UIElement* previewIconEl,
+    const std::function<std::string(std::function<void(const std::string&)>)>& request)
+{
+    const auto weakPanel = UIElement::MakeWeakRef(this);
+    const auto weakRow = UIElement::MakeWeakRef(row);
+    const auto weakIcon = UIElement::MakeWeakRef(previewIconEl);
+    const std::string immediate = request(
+        [weakPanel, weakRow, weakIcon, id](const std::string& rel)
+        {
+            if (rel.empty())
+                return;
+            // The concrete thumbnail service delivers this callback on the UI
+            // thread; the panel can have closed while the worker produced it.
+            auto* panel = weakPanel.Get();
+            if (!panel)
+                return;
+            panel->PostAction(
+                [weakPanel, weakRow, weakIcon, id, rel]()
+                {
+                    auto* currentPanel = weakPanel.Get();
+                    auto* currentRow = weakRow.Get();
+                    auto* currentIcon = weakIcon.Get();
+                    if (!currentPanel || !currentRow || !currentIcon || !currentPanel->m_Tree)
+                        return;
+                    if (currentPanel->m_Context && currentPanel->m_Context->UIReplayActive)
+                        return;
+                    // TreeView owns pooled-row bindings. A live row may now
+                    // represent another entity even when its icon still exists.
+                    if (currentPanel->m_Tree->BoundIdOf(currentRow) != id)
+                        return;
+                    Editor::ApplySpriteFrameThumbnail(*currentIcon, rel, kHierarchyRowIconAlignPercent);
+                });
+        });
+    if (!immediate.empty())
+        Editor::ApplySpriteFrameThumbnail(*previewIconEl, immediate, kHierarchyRowIconAlignPercent);
 }
 
 void HierarchyPanel::ApplyModelThumbColorOverride(UIElement* titleEl)
@@ -4454,6 +4409,9 @@ void HierarchyPanel::Update()
     if (!m_World || !m_Provider || !m_Tree)
         return;
 
+    // A renamed or reordered sorting layer, or a changed RenderSorting, re-presents the rows.
+    if (m_LayerControls.NeedsRefresh(*m_World))
+        RePresentHeldRows();
     m_RowActivity.Refresh(*m_World, *m_Tree, *m_Provider);
 
     if (m_VcsController)
@@ -4975,13 +4933,6 @@ void HierarchyPanel::ApplySortSettings()
     m_Provider->SetSortMode(m_SortMode);
     m_Provider->SetSortDirection(m_SortDirection);
     Refresh();
-}
-
-void HierarchyPanel::ApplyRenderLayerVisibility()
-{
-    if (!m_Tree)
-        return;
-    m_Tree->RefreshFromProvider();
 }
 
 // has-* follows whether a bar is really on screen, so the navigation row only

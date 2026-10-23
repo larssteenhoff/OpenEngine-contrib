@@ -1,16 +1,15 @@
 #include "AssetCore/AssetTypes.h"
+#include "Types/StringUtils.h"
 #include <algorithm>
 #include <unordered_map>
-#include <cctype>
 
 namespace GameEngine {
 
 namespace
 {
-static String NormalizeExtensionLower(String ext)
+static String NormalizeExtensionLower(std::string_view extension)
 {
-    std::transform(ext.begin(), ext.end(), ext.begin(),
-                   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+    String ext = ToLowerAscii(extension);
 
     if (!ext.empty() && ext[0] != '.')
     {
@@ -23,6 +22,8 @@ static String NormalizeExtensionLower(String ext)
 static const std::unordered_map<String, AssetType>& GetExtensionMap()
 {
     static const std::unordered_map<String, AssetType> extensionMap = {
+        {".localization", AssetType::Localization},
+
         // Texture formats
         {".png", AssetType::Texture},
         {".svg", AssetType::Texture},
@@ -30,7 +31,6 @@ static const std::unordered_map<String, AssetType>& GetExtensionMap()
         {".jpeg", AssetType::Texture},
         {".bmp", AssetType::Texture},
         {".tga", AssetType::Texture},
-        {".dds", AssetType::Texture},
         {".hdr", AssetType::Texture},
         {".exr", AssetType::Texture},
         {".ktx", AssetType::Texture},
@@ -68,7 +68,7 @@ static const std::unordered_map<String, AssetType>& GetExtensionMap()
 
         // Scene formats
         {".scene", AssetType::Scene},
-        {".unity", AssetType::Scene},
+        {".blueprint", AssetType::Scene},
 
         // Material formats
         {".mat", AssetType::Material},
@@ -102,6 +102,9 @@ static const std::unordered_map<String, AssetType>& GetExtensionMap()
         {".animcontroller", AssetType::AnimationController},
         {".animationcontroller", AssetType::AnimationController},
         {".spriteframes", AssetType::SpriteFrames},
+        {".tileset", AssetType::TileSet},
+        {".tilemap", AssetType::TileMap},
+        {".physmat", AssetType::PhysicsMaterial},
         {".timeline", AssetType::Timeline},
         {".animgraph", AssetType::AnimationGraph},
         {".clipset",  AssetType::ClipSet},
@@ -230,9 +233,7 @@ String GetCompoundExtensionFromPath(const String& path) {
     if (filename.empty()) return {};
 
     // Lowercase for case-insensitive map lookup.
-    String lowerName = filename;
-    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
-                   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+    const String lowerName = ToLowerAscii(filename);
 
     const auto& extensionMap = GetExtensionMap();
 
@@ -291,6 +292,9 @@ bool IsTextBasedAssetType(AssetType type) {
         case AssetType::AnimationLibrary:
         case AssetType::AnimationController:
         case AssetType::SpriteFrames:
+        case AssetType::TileSet:
+        case AssetType::TileMap:
+        case AssetType::PhysicsMaterial:
         case AssetType::Timeline:
         case AssetType::AnimationGraph:
         case AssetType::ClipSet:

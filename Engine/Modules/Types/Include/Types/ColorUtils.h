@@ -57,6 +57,24 @@ inline void ARGBToLinearFloats(std::uint32_t argb, float out[4])
     out[3] = linear.a;
 }
 
+// Packs float RGB in [0,1] into opaque ARGB (0xFFRRGGBB), clamping and rounding each channel.
+// No transfer function: the bytes carry whatever encoding the floats are in.
+inline std::uint32_t RgbFloatsToArgb(const float rgb[3])
+{
+    const auto toByte = [](float value)
+    { return static_cast<std::uint32_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    return 0xFF000000u | (toByte(rgb[0]) << 16) | (toByte(rgb[1]) << 8) | toByte(rgb[2]);
+}
+
+// Unpacks the RGB bytes of an ARGB value (0xAARRGGBB) into floats in [0,1]; alpha is ignored.
+// No transfer function, the inverse of RgbFloatsToArgb.
+inline void ArgbToRgbFloats(std::uint32_t argb, float out[3])
+{
+    out[0] = static_cast<float>((argb >> 16) & 0xFFu) / 255.0f;
+    out[1] = static_cast<float>((argb >> 8) & 0xFFu) / 255.0f;
+    out[2] = static_cast<float>(argb & 0xFFu) / 255.0f;
+}
+
 // Convert HSV to RGB (sRGB space).
 // h: hue in degrees (0-360), s: saturation (0-1), v: value (0-1)
 // Returns r, g, b in range 0-1

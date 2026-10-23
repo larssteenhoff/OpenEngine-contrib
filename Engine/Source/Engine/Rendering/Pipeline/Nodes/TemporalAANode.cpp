@@ -300,7 +300,11 @@ bool TemporalAANode::DeclareResolve(ViewDeclare& d)
     // resolve becomes resolve+upscale: history/output at the display extent,
     // the current frame jitter-sampled from the internal extent. Outside TAAU
     // every value below equals the native path.
-    const bool taau = d.ViewOutputColor.IsValid() && d.OutputWidth > 0 && d.OutputHeight > 0 &&
+    // A pixel-perfect view also runs Output* > Render*, but its crossing is the
+    // integer zoom and belongs to PixelPerfectUpscaleNode — a temporal resample
+    // there would smear the art grid it exists to preserve.
+    const bool taau = d.ViewOutputColor.IsValid() && !d.PixelPerfectCrossing &&
+                      d.OutputWidth > 0 && d.OutputHeight > 0 &&
                       (d.OutputWidth != w || d.OutputHeight != h);
     const uint32_t outW = taau ? d.OutputWidth : w;
     const uint32_t outH = taau ? d.OutputHeight : h;

@@ -138,13 +138,10 @@ class StyleOverrides
     void SetById(StylePropertyId id, const StyleValue& value, StyleImpact impact);
     void SetKeywordById(StylePropertyId id, StyleKeyword kw, StyleImpact impact);
 
-    // Dirty-propagation callback (Slice 2 follow-up): previously override
-    // mutations set m_LayoutDirty/m_VisualDirty/m_NeedsCascadeRerun internally
-    // without routing through UIElement::MarkDirty, which meant SubtreeDirty
-    // wasn't propagated up the ancestor chain and the fast path had to abort
-    // whenever any descendant had override-dirty bits. UIElement now wires a
-    // callback here on construction; every mutator fires it with the relevant
-    // flag bits so MarkDirty runs with proper ancestor walk.
+    // Dirty-propagation callback. UIElement wires it on construction
+    // (WireOverridesDirtyCallback); every mutator fires it with the relevant
+    // flag bits so UIElement::MarkDirty runs and propagates SubtreeDirty up
+    // the ancestor chain.
     enum DirtyBit : uint32_t
     {
         Layout  = 1u << 0,

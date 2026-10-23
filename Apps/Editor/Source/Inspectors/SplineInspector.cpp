@@ -1,6 +1,7 @@
 #include "Inspectors/SplineInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
 
 #include "Components/Transform.h"
 #include "Components/Spline/SplineComponent.h"
@@ -35,6 +36,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace GameEngine
@@ -500,6 +502,15 @@ bool ApplyResampleFromSource(Spline::SplineData& data, const ResamplePreviewStat
 
 void RegisterSplineInspectors()
 {
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Spline";
+        traits.Category = "Spline";
+        traits.InspectorIconClass = "inspector-section-icon-spline";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::SplineComponent>(), std::move(traits));
+    }
+
     using namespace Components;
     using namespace InspectorDrag;
 

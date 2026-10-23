@@ -1,9 +1,7 @@
 #include "UI/UIManager.h"
 #include "UIManager_Internal.h"
 
-#include "UI/Controls/Mount.h"
 #include "UI/Controls/ScrollView.h"
-#include "UI/Controls/WeightedPane.h"
 #include "UI/Layout/ElementOverrideHelpers.h"
 #include "UI/Layout/YogaLayout.h"
 #include "UI/Parsers/CSSParser.h"
@@ -19,6 +17,7 @@
 #include "Logger/Logger.h"
 #include "Rendering/Text/FontAtlas.h"
 #include "Rendering/Text/TextLayout.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <cassert>
@@ -74,12 +73,6 @@ YGSize MeasureTextFn(YGNodeConstRef node,
     {
         wrapWidth = std::max(0.0f, width * scale); // logical → physical
     }
-
-    // Record the solve-time constraint so the parallel pre-measure pass can
-    // predict it next time (exact for fixed-width virtualized rows and any
-    // steady-state element).
-    ctx->LastWrapWidthPhysical = wrapWidth;
-    ctx->HasMeasured = true;
 
     // If the font atlas is not yet available (e.g. host is resolving font bytes asynchronously),
     // return a conservative fallback size so Yoga layout doesn't collapse to 0x0 and cause
@@ -167,10 +160,7 @@ YGSize MeasureTextWithAtlas(TextMeasureCtx* ctx, float wrapWidth, bool* outShape
     {
         return ctx->Atlas->GetFontLineMetrics(ctx->PixelSize);
     };
-    auto buildCaretMap = [&](std::string_view s, std::vector<float>& out)
-    {
-        return ctx->Atlas->BuildCaretMapUtf8(s, ctx->PixelSize, out, ctx->LetterSpacingPx);
-    };
+
 
     // CSS line box: a declared line-height resolves against the font size or
     // as an exact length; unset/"normal" uses the font's metric height. One
@@ -217,6 +207,7 @@ YGSize MeasureTextWithAtlas(TextMeasureCtx* ctx, float wrapWidth, bool* outShape
     // font reloads and can be reused across destroy/recreate, serving sizes
     // measured with the old glyphs.
     key ^= (std::uint64_t)ctx->Atlas->GetAtlasId() * 0x9E3779B97F4A7C15ull;
+    key ^= ctx->Atlas->GetLayoutRevision() * 0xD6E8FEB86659FD93ull;
 
     if (ctx->CachedValid && ctx->CachedKey == key)
     {
@@ -250,260 +241,23 @@ YGSize MeasureTextWithAtlas(TextMeasureCtx* ctx, float wrapWidth, bool* outShape
         return YGSize{ctx->CachedW * invScale, ctx->CachedH * invScale};
     }
 
-    auto utf8Next = [](std::string_view s, size_t i, uint32_t& outCp) -> size_t
+    // Measurement and rendering must share Unicode wrapping and bidi rules.
+    using Layout = Rendering::Text::TextLayout;
+    Layout::WordBreak policy = Layout::WordBreak::Normal;
+    switch (ctx->BreakPolicy)
     {
-        if (i >= s.size())
-        {
-            outCp = 0;
-            return s.size();
-        }
-        unsigned char c = (unsigned char)s[i];
-        if (c < 0x80)
-        {
-            outCp = c;
-            return i + 1;
-        }
-        if ((c >> 5) == 0x6)
-        {
-            if (i + 1 >= s.size())
-            {
-                outCp = 0;
-                return s.size();
-            }
-            outCp = ((uint32_t)(c & 0x1F) << 6) | ((uint32_t)(s[i + 1] & 0x3F));
-            return i + 2;
-        }
-        if ((c >> 4) == 0xE)
-        {
-            if (i + 2 >= s.size())
-            {
-                outCp = 0;
-                return s.size();
-            }
-            outCp = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(s[i + 1] & 0x3F) << 6) | ((uint32_t)(s[i + 2] & 0x3F));
-            return i + 3;
-        }
-        if ((c >> 3) == 0x1E)
-        {
-            if (i + 3 >= s.size())
-            {
-                outCp = 0;
-                return s.size();
-            }
-            outCp = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(s[i + 1] & 0x3F) << 12) | ((uint32_t)(s[i + 2] & 0x3F) << 6) | ((uint32_t)(s[i + 3] & 0x3F));
-            return i + 4;
-        }
-        outCp = c;
-        return i + 1;
-    };
-
-    auto isWrapWhitespace = [](uint32_t cp) -> bool
-    {
-        return (cp == ' ' || cp == '\t' || cp == '\r');
-    };
-
-    // UAX #14 class HY. Kept in step with TextLayout::ShapeMultiline: Yoga must
-    // size a box for the same lines the renderer will draw into it.
-    auto isWrapHyphen = [](uint32_t cp) -> bool { return cp == '-'; };
-
-    float maxW = 0.0f;
-    size_t lineCount = 0;
-
-    const float lineBox = lineBoxOrNormal();
-
-    const std::string& t = ctx->Text;
-    size_t start = 0;
-    while (start <= t.size())
-    {
-        size_t nl = t.find('\n', start);
-        const size_t len = (nl == std::string::npos) ? (t.size() - start) : (nl - start);
-        std::string_view seg(t.data() + start, len);
-
-        if (seg.empty())
-        {
-            ++lineCount;
-        }
-        else if (!wrapEnabled)
-        {
-            auto m = measureUtf8(seg);
-            maxW = std::max(maxW, m.width);
-            ++lineCount;
-        }
-        else
-        {
-            std::vector<float> xByByte;
-            if (!buildCaretMap(seg, xByByte))
-            {
-                auto m = measureUtf8(seg);
-                maxW = std::max(maxW, m.width);
-                ++lineCount;
-            }
-            else
-            {
-                std::vector<size_t> cpBounds;
-                std::vector<size_t> breakBounds;
-                cpBounds.reserve(seg.size() + 1);
-                breakBounds.reserve(8);
-
-                size_t i = 0;
-                while (i < seg.size())
-                {
-                    uint32_t cp = 0;
-                    size_t next = utf8Next(seg, i, cp);
-                    if (next <= i)
-                        next = i + 1;
-                    cpBounds.push_back(next);
-                    if (isWrapWhitespace(cp) || isWrapHyphen(cp))
-                        breakBounds.push_back(next);
-                    i = next;
-                }
-
-                // Whitespace that a soft wrap consumes hangs past the wrap
-                // width and adds nothing to the line box, so every fit test
-                // and every reported line width measures content only.
-                auto hangWidth = [&](size_t start, size_t end) -> float
-                {
-                    size_t e = end;
-                    while (e > start && isWrapWhitespace(static_cast<unsigned char>(seg[e - 1])))
-                        --e;
-                    return xByByte[end] - xByByte[e];
-                };
-                auto contentWidth = [&](size_t start, size_t end) -> float
-                {
-                    return (xByByte[end] - xByByte[start]) - hangWidth(start, end);
-                };
-
-                auto nextCpBoundary = [&](size_t pos) -> size_t
-                {
-                    auto it = std::upper_bound(cpBounds.begin(), cpBounds.end(), pos);
-                    if (it == cpBounds.end())
-                        return seg.size();
-                    return *it;
-                };
-                // Invariant these fitters share with measure: the intrinsic
-                // width reported to Yoga is exactly the widest fitted line
-                // (pure advance, no halo margin), so a shrink-wrapped box
-                // re-measures at its own max line width with zero slack.
-                // Lines re-fit only because Yoga rounds the box up on the
-                // 1/64 grid; anything that shrinks avail below the reported
-                // width by even a fraction re-wraps the text.
-                auto findFittingCpBoundary = [&](size_t pos, float avail) -> size_t
-                {
-                    size_t best = pos;
-                    auto it = std::upper_bound(cpBounds.begin(), cpBounds.end(), pos);
-                    for (; it != cpBounds.end(); ++it)
-                    {
-                        size_t end = *it;
-                        if (contentWidth(pos, end) <= avail)
-                            best = end;
-                        else
-                            break;
-                    }
-                    return best;
-                };
-                auto findFittingBreak = [&](size_t pos, float avail) -> size_t
-                {
-                    size_t best = std::string::npos;
-                    auto it = std::upper_bound(breakBounds.begin(), breakBounds.end(), pos);
-                    for (; it != breakBounds.end(); ++it)
-                    {
-                        size_t end = *it;
-                        if (contentWidth(pos, end) <= avail)
-                            best = end;
-                        else
-                            break;
-                    }
-                    return best;
-                };
-                auto nextBreakOrEnd = [&](size_t pos) -> size_t
-                {
-                    auto it = std::upper_bound(breakBounds.begin(), breakBounds.end(), pos);
-                    if (it == breakBounds.end())
-                        return seg.size();
-                    return *it;
-                };
-                auto skipWhitespace = [&](size_t pos) -> size_t
-                {
-                    size_t p = pos;
-                    while (p < seg.size())
-                    {
-                        uint32_t cp = 0;
-                        size_t next = utf8Next(seg, p, cp);
-                        if (!isWrapWhitespace(cp))
-                            break;
-                        p = next;
-                    }
-                    return p;
-                };
-
-                size_t pos = 0;
-                while (pos < seg.size())
-                {
-                    const float remainingWidth = contentWidth(pos, seg.size());
-                    if (remainingWidth <= wrapWidth)
-                    {
-                        maxW = std::max(maxW, remainingWidth);
-                        ++lineCount;
-                        break;
-                    }
-
-                    size_t breakPos = pos;
-                    bool skipWs = false;
-                    if (ctx->BreakPolicy == WordBreak::BreakAll)
-                    {
-                        breakPos = findFittingCpBoundary(pos, wrapWidth);
-                        if (breakPos == pos)
-                            breakPos = nextCpBoundary(pos);
-                    }
-                    else
-                    {
-                        size_t wsPos = findFittingBreak(pos, wrapWidth);
-                        if (wsPos != std::string::npos && wsPos > pos)
-                        {
-                            breakPos = wsPos;
-                            skipWs = true;
-                        }
-                        else if (ctx->BreakPolicy == WordBreak::BreakWord)
-                        {
-                            breakPos = findFittingCpBoundary(pos, wrapWidth);
-                            if (breakPos == pos)
-                                breakPos = nextCpBoundary(pos);
-                        }
-                        else
-                        {
-                            breakPos = nextBreakOrEnd(pos);
-                            if (breakPos == pos)
-                                breakPos = nextCpBoundary(pos);
-                            skipWs = true;
-                        }
-                    }
-
-                    const float lineW = contentWidth(pos, breakPos);
-                    maxW = std::max(maxW, lineW);
-                    ++lineCount;
-                    pos = breakPos;
-                    // Only a whitespace break swallows what follows; a hyphen
-                    // break keeps the next character on the new line.
-                    if (skipWs && breakPos > 0 &&
-                        isWrapWhitespace(static_cast<unsigned char>(seg[breakPos - 1])))
-                        pos = skipWhitespace(pos);
-                }
-            }
-        }
-
-        if (nl == std::string::npos)
-            break;
-        start = nl + 1;
+        case WordBreak::BreakAll: policy = Layout::WordBreak::BreakAll; break;
+        case WordBreak::KeepAll: policy = Layout::WordBreak::KeepAll; break;
+        case WordBreak::BreakWord: policy = Layout::WordBreak::BreakWord; break;
+        default: break;
     }
-
-    if (lineCount == 0)
-        return YGSize{0, 0};
-
-    const float h = lineBox * (float)lineCount;
-
-    ctx->CachedW = maxW; // stored in physical px
-    ctx->CachedH = h;
-    ctx->MeasuredLineCount = (int)lineCount;
+    Rendering::Text::StyledRun run{ctx->Atlas, ctx->Text, ctx->PixelSize};
+    run.LetterSpacingPx = ctx->LetterSpacingPx;
+    const auto measured = Layout::ShapeMultiline(std::span<const Rendering::Text::StyledRun>(&run, 1),
+        wrapEnabled ? wrapWidth : 0.0f, resolvedBox, policy);
+    ctx->CachedW = measured.Metrics.width;
+    ctx->CachedH = measured.Metrics.height;
+    ctx->MeasuredLineCount = static_cast<int>(measured.LineCount);
     ctx->CachedKey = key;
     ctx->CachedValid = true;
     return YGSize{ctx->CachedW * invScale, ctx->CachedH * invScale};
@@ -574,14 +328,6 @@ void RemoveAllYogaChildren(YGNodeRef node)
     }
 }
 
-void ApplyWeightedPaneFlexGrowOverride(GameEngine::UIElement* el, YGNodeRef node)
-{
-    if (!node || !el || el->Kind() != UIElementKind::WeightedPane)
-        return;
-    auto* pane = static_cast<WeightedPane*>(el);
-    YGNodeStyleSetFlexGrow(node, std::max(0.0f, pane->GetFlexWeight()));
-}
-
 void ApplyBlockFlowShrinkDefault(YGNodeRef node,
                                  const GameEngine::ResolvedStyle& style,
                                  const GameEngine::ResolvedStyle* parentStyle)
@@ -623,11 +369,9 @@ RetainedYogaNode::~RetainedYogaNode()
 
 void UIManager::ResetRetainedYogaTree()
 {
-    // YGNode ownership lives on UIElement::m_YogaState now (Stage 7 step 8).
-    // This function no longer walks per-element retained nodes — the YGNodes
-    // get destroyed when their owning UIElements destruct (e.g. when m_Root
-    // is reassigned, or when subtrees are torn down by callers like the
-    // dockspace rebuild). Here we just reset the manager-side caches that
+    // YGNodes are owned by UIElement::m_YogaState and destroyed with their
+    // elements (e.g. when m_Root is reassigned, or when the dockspace rebuild
+    // tears down a subtree). This only resets the manager-side caches that
     // the next BuildYogaRecursive run rebuilds from scratch.
 
     // Interned sheet-set IDs referred to entries on now-stale RetainedYogaNodes.
@@ -641,10 +385,8 @@ void UIManager::ResetRetainedYogaTree()
 
     // Invalidate the FocusOrder skip gate. It compares against the
     // structure-change generation captured on the last run and would
-    // otherwise wrongly reuse a stale m_FocusOrder vector against a fresh
-    // ctx.nodes population on the first post-reset frame. (The matching
-    // IndicesAndClips skip gate retired in Stage 7 step 7.2 alongside
-    // RebuildNodeIndices.)
+    // otherwise wrongly reuse a stale m_FocusOrder vector on the first
+    // post-reset frame.
     m_FocusOrderPrimed = false;
 }
 
@@ -680,10 +422,7 @@ void UIManager::InvalidateRetainedLayout(UIElement* subtreeRoot)
 
         element->MarkDirty(UIElement::LayoutDirty);
 
-        for (const auto& child : element->GetChildren())
-            stack.push_back(child.get());
-        if (element->Kind() == UIElementKind::Mount)
-            stack.push_back(static_cast<Mount*>(element)->GetTarget());
+        element->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
     }
     NotifyRelayoutRequested(subtreeRoot);
 }
@@ -712,11 +451,11 @@ uint32_t UIManager::SheetSetInterner::Intern(
     std::span<const StylesheetHandle> handles,
     UIManager& mgr)
 {
-    // MT-4.1 seam: interning mutates manager-container state (the interner
-    // entries + the rule-index cache via GetOrBuildRuleIndex). It must run in
-    // the collect stage only — never from the cascade compute region. Verified:
-    // no ComputeElementCascade / ResolveCascadeForElement / ComputeStyleInto
-    // path reaches Intern (compute consumes pre-built sheet/index spans;
+    // Cascade seam: interning mutates manager-container state (the interner
+    // entries + the rule-index cache via GetOrBuildRuleIndex). It runs in the
+    // collect stage only — never from the cascade compute region: no
+    // ComputeElementCascade / ResolveCascadeForElement / ComputeStyleInto path
+    // reaches Intern (compute consumes pre-built sheet/index spans;
     // CollectYogaInputs interns first). The Debug seam assert catches a
     // regression at its source.
     assert(!CascadeComputeActive() &&
@@ -836,18 +575,12 @@ void UIManager::InvalidateSheetSetSubtree(UIElement* root)
     // descendants also receive StyleDirty since MarkDirtySubtree doesn't
     // walk Mount portals.
     root->MarkDirty(UIElement::StyleDirty);
-    // Cascade-memoization Phase 2: stylesheet attach/detach changes the
-    // candidate-rule pool for the entire subtree. Invalidate the rule
-    // cache here so the next cascade rebuilds against the new sheet set.
+    // Stylesheet attach/detach changes the candidate-rule pool for the
+    // entire subtree. Invalidate the rule cache here so the next cascade
+    // rebuilds against the new sheet set.
     // The recursive walk below handles Mount portal targets too.
     root->InvalidateRuleCacheSubtree();
-    for (const auto& ch : root->GetChildren())
-        InvalidateSheetSetSubtree(ch.get());
-    if (root->Kind() == UIElementKind::Mount)
-    {
-        if (UIElement* tgt = static_cast<Mount*>(root)->GetTarget())
-            InvalidateSheetSetSubtree(tgt);
-    }
+    root->ForEachLogicalChild([&](UIElement* child) { InvalidateSheetSetSubtree(child); });
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +591,7 @@ namespace
 {
 bool ChainIsShareSensitive(const SelectorChain& chain);
 
-// P4 sibling sharing: true when a compound's own matchers can differ between
+// Sibling sharing: true when a compound's own matchers can differ between
 // two same-key siblings — positional pseudos, :empty, or attribute selectors
 // (per-element values), including nested inside :is()/:not()/:where()
 // (nested chains are scanned in full so `:is(.a + .b)` catches the sibling
@@ -916,7 +649,7 @@ bool ChainIsShareSensitive(const SelectorChain& chain)
 
 const StylesheetRuleIndex* UIManager::GetOrBuildRuleIndex(const Stylesheet* s)
 {
-    // MT-4.1 seam: on a cache miss this builds and inserts into the manager-
+    // Cascade seam: on a cache miss this builds and inserts into the manager-
     // owned rule-index cache. Collect-stage only (CollectYogaInputs /
     // ResetFlatSheetTable / Intern / root-sheet setup pre-warm every index the
     // compute stage consumes). The compute region receives already-built index
@@ -933,13 +666,14 @@ const StylesheetRuleIndex* UIManager::GetOrBuildRuleIndex(const Stylesheet* s)
     auto idx = std::make_unique<StylesheetRuleIndex>();
     idx->Universal.reserve(s->Rules.size() / 4);
 
-    // P4: rarest-class bucketing. A rule keyed by class goes into the
+    // Rarest-class bucketing. A rule keyed by class goes into the
     // LEAST-POPULATED class bucket of its rightmost compound, not the first
     // written one — theme-common prefix classes (.inspector-field, .tree-row)
     // otherwise absorb every compound rule and the fat bucket is re-matched
     // by every element carrying the common class. Two passes: count how many
     // rules would key to each class, then assign each rule to its rarest.
-    // Lookup is unchanged (candidates already probe every element class).
+    // Lookup is independent of the bucket choice: candidate collection probes
+    // every element class.
     std::unordered_map<StringId, uint32_t> classKeyCounts;
     for (const CSSRule& rule : s->Rules)
     {
@@ -1056,30 +790,13 @@ void UIManager::ApplyElementStyleOverrides(UIElement* el, ResolvedStyle& cs, boo
 // Thread-local buffers for BuildYogaRecursive (capacity retained across frames).
 static thread_local std::vector<GameEngine::UILayout::YogaAdapter::ChildWithOrder> s_OrderedChildrenBuf;
 
-// TextMeasureCtx used to live in a thread_local pool here; Slice 2 step 3
-// moved per-element contexts onto RetainedYogaNode so fast-path appends
-// keep Yoga's context pointer stable across frames. The stubs below keep
-// the old API surface alive for the spike logger (ctx.textMeasureCtxUsed)
-// and are always zero.
-static thread_local size_t s_TextMeasureCtxUsed = 0;
-size_t& GetTextMeasureCtxUsed() { return s_TextMeasureCtxUsed; }
-
-void TrimTextMeasureCtxPool()
-{
-    // No-op after the pool was removed. Kept so existing callers compile.
-
-    // Never resize the pool. Retained Yoga nodes may hold context pointers
-    // to any pool entry across frames when computeLayoutSignaturesThisFrame
-    // is false. Freeing entries causes use-after-free in MeasureTextFn.
-}
-
 // ---------------------------------------------------------------------------
 // Style resolution helpers (shared by BuildYogaRecursive and ConvergePostLayout)
 // ---------------------------------------------------------------------------
 
 namespace
 {
-// P4 sibling sharing: dynamic pseudo state packed into the share key.
+// Sibling sharing: dynamic pseudo state packed into the share key.
 uint8_t PackShareStateBits(const ElementState& st)
 {
     uint8_t bits = 0;
@@ -1128,10 +845,11 @@ bool ProbeShareSensitive(const UIElement* el, StringId tagId,
 }
 } // namespace
 
-// Build the per-element cascade state (pseudo-class predicates). Extracted
-// from ResolveCascadeForElement (MT-4.2) so the parallel children builder can
-// pre-compute the sibling-share key at collect time. Reads manager pointer
-// members that are stable for the whole build pass.
+// Build the per-element cascade state (pseudo-class predicates). Shared by
+// ResolveCascadeForElement and the level-wave cascade probe
+// (UIManager_CascadeProbe.cpp), which pre-computes the sibling-share key when
+// it groups a level. Reads manager pointer members that are stable for the
+// whole build pass.
 UIParsing::ElementState UIManager::BuildCascadeElementState(UIElement* el) const
 {
     ElementState st{};
@@ -1141,12 +859,12 @@ UIParsing::ElementState UIManager::BuildCascadeElementState(UIElement* el) const
     st.Hover = (el == m_Hovered);
     st.Focus = el->IsFocusTargetForId(m_FocusId);
     st.FocusVisible = st.Focus && m_FocusViaKeyboard;
-    // Stage 5 Block D: :focus-within is true for the focused element and all
+    // :focus-within is true for the focused element and all
     // its ancestors. The chain is precomputed by RebuildFocusWithinChain at
     // Update entry; this is an O(1) hash lookup.
     st.FocusWithin = m_FocusWithinChain.count(el) > 0;
     st.Active = m_MouseDown && (m_MouseCaptured ? (el == m_CaptureElement) : (el == m_Hovered));
-    // Stage 5 Block C: copy the element's active custom-state ids into the
+    // Copy the element's active custom-state ids into the
     // cascade's ElementState. MatchesSelectorChain looks up custom :my-state
     // selectors via ResolvedCustomNameId in this set.
     const auto& customIds = el->GetCustomStateIds();
@@ -1156,10 +874,10 @@ UIParsing::ElementState UIManager::BuildCascadeElementState(UIElement* el) const
     return st;
 }
 
-// Sibling-share eligibility + key, extracted from ResolveCascadeForElement
-// (MT-4.2). Single source of truth: ResolveCascadeForElement calls this so the
-// key the parallel builder groups by is byte-identical to the key the donor
-// registers under. Reads only el + the passed hover-ancestor set (both stable
+// Sibling-share eligibility + key. Single source of truth:
+// ResolveCascadeForElement calls this so the key the cascade probe groups by
+// is byte-identical to the key the donor registers under. Reads only el + the
+// passed hover-ancestor set (both stable
 // during the pass; `hover` may be null when the hover-chain bit is disabled).
 // Returns eligibility; out params are 0 when ineligible.
 bool UIManager::ComputeCascadeShareKey(UIElement* el,
@@ -1218,7 +936,7 @@ bool UIManager::ResolveCascadeForElement(UIElement* el,
     outTransition = TransitionRegistration::None;
     ElementState st = BuildCascadeElementState(el);
 
-    // P4 sibling style sharing: identically-shaped siblings (same DFS
+    // Sibling style sharing: identically-shaped siblings (same DFS
     // parent, type, sheet set, classes, dynamic state — no id, no
     // attributes, no custom states, no custom override vars, no reachable
     // share-sensitive rule) resolve to identical cascade output. The first
@@ -1230,10 +948,10 @@ bool UIManager::ResolveCascadeForElement(UIElement* el,
     bool shareEligible = false;
     uint16_t shareStateBits = 0;
     uint32_t shareSheetSetId = 0;
-    // MT-4.1: the share cache + active flag arrive via the explicit context
+    // The share cache + active flag arrive via the explicit context
     // (nullptr / !Active == sharing disabled). Registering a donor into
     // shareCtx->Cache is per-context state, so it stays legal inside the
-    // compute region (each MT-4.2 worker owns its own context).
+    // compute region.
     CascadeShareCache* shareCache =
         (shareCtx && shareCtx->Active) ? shareCtx->Cache : nullptr;
     if (shareCache)
@@ -1268,7 +986,7 @@ bool UIManager::ResolveCascadeForElement(UIElement* el,
 
     if (!sharedFromCache)
     {
-        // Stage 5 Block B: capture the per-element pseudo-state predicate as
+        // Capture the per-element pseudo-state predicate as
         // a side output of the cascade. Mark-dirty sites consult
         // el->m_MatchedPseudoStates to skip pushes for elements whose style
         // cannot change for the given state flip.
@@ -1297,17 +1015,16 @@ bool UIManager::ResolveCascadeForElement(UIElement* el,
     }
 
     // Decide the declared-transition registry action; the CALLER applies it
-    // (MT-4.1) so this function performs no manager-container mutation and can
-    // run on an MT-4.2 worker. rs.Transitions changes only when a cascade
-    // rewrites it, so this is the single decision point; TransitionEngine::
-    // Advance iterates the registry instead of walking the tree every heavy
-    // frame. The decision reads the freshly-cascaded style BEFORE overrides
-    // are applied (identical to the pre-4.1 in-place site). Registration
+    // so this function performs no manager-container mutation. rs.Transitions
+    // changes only when a cascade rewrites it, so this is the single decision
+    // point; TransitionEngine::Advance iterates the registry instead of
+    // walking the tree every heavy frame. The decision reads the
+    // freshly-cascaded style BEFORE overrides are applied. Registration
     // requires ownership: the unregister hooks key off el's owner, and
     // BuildYogaRecursive can cascade a mount target before Mount::OnPostLayout
     // adopts it — that adoption re-marks the subtree, so the next cascade
-    // registers it. An empty transition set always unregisters (ownership-
-    // independent, matching the old unconditional erase).
+    // registers it. An empty transition set always unregisters, whatever the
+    // owner.
     if (el->GetResolvedStyle().Transitions.IsEmpty())
         outTransition = TransitionRegistration::Unregister;
     else if (el->GetOwnerManager() == this)
@@ -1453,7 +1170,7 @@ BuiltNode UIManager::BuildYogaRecursive(UIElement* el, const ResolvedStyle* pare
         return BuiltNode{nullptr, 0};
     }
 
-    // P4 sibling sharing (MT-4.1): the share cache + active flag travel in an
+    // Sibling sharing: the share cache + active flag travel in an
     // explicit CascadeShareContext instead of manager members. The root build
     // pass (parentStyle == nullptr) owns the context as a stack local and binds
     // it to the manager-owned cache (kept across frames for allocation reuse);
@@ -1461,7 +1178,7 @@ BuiltNode UIManager::BuildYogaRecursive(UIElement* el, const ResolvedStyle* pare
     // root pass — the share key cannot see inherited CONTENT changes, which is
     // exactly what ConvergePostLayout re-resolves for — and the local's scope
     // is precisely that pass (covering early returns), so no reset flag is
-    // needed. MT-4.2 gives each subtree worker its own context/cache.
+    // needed.
     const bool isRootBuild = (parentStyle == nullptr);
     CascadeShareContext rootShareCtx;
     if (isRootBuild)
@@ -1471,9 +1188,8 @@ BuiltNode UIManager::BuildYogaRecursive(UIElement* el, const ResolvedStyle* pare
         m_CascadeShareCache->Entries.clear();
         // Mirror ElementMatchesHover exactly: the hovered element and its
         // plain GetParent() ancestors all match rightmost `:hover`. Built on the
-        // root cache; MT-4.2 chunks read it by pointer without copying (#215).
-        // Lives on the cache (behind the unique_ptr) so the fix leaves
-        // UIManager's member layout unchanged (ODR-safe for stale dependents).
+        // root cache and read through shareCtx->Hover by pointer, never copied
+        // (#215).
         m_CascadeShareCache->HoverChain.clear();
         for (const UIElement* cur = m_Hovered; cur; cur = cur->GetParent())
             m_CascadeShareCache->HoverChain.insert(cur);
@@ -1483,7 +1199,7 @@ BuiltNode UIManager::BuildYogaRecursive(UIElement* el, const ResolvedStyle* pare
         shareCtx = &rootShareCtx;
     }
 
-    // === MT-4.0 Stage 1: Collect (UI thread) ============================
+    // === 1. Collect (UI thread) ==========================================
     // Ensure the Yoga node exists, resolve + intern the effective sheet set,
     // and compute the sheet-identity hashes. A false return means node-create
     // OOM — the parent can't include us either way.
@@ -1491,24 +1207,23 @@ BuiltNode UIManager::BuildYogaRecursive(UIElement* el, const ResolvedStyle* pare
     if (!CollectYogaInputs(el, parentSheetSetIdx, ctx, item))
         return BuiltNode{nullptr, 0};
 
-    // --- Subtree-skip gate (Stage 7 step 7 option 2) ---------------------
+    // --- Subtree-skip gate ---------------------------------------------
     // Early-return when every dependency is verifiably clean.
     BuiltNode skipBuilt;
     if (EvaluateSubtreeSkipGate(el, item, ctx, skipBuilt))
         return skipBuilt;
 
-    // === MT-4.0 Stage 2: Compute (element-local cascade; Yoga-free) ======
+    // === 2. Compute (element-local cascade; Yoga-free) ==================
     ComputeElementCascade(el, parentStyle, ctx, item, shareCtx);
 
-    // === MT-4.0 Stage 3: Apply (UI thread; Yoga mutations + recursion) ===
+    // === 3. Apply (UI thread; Yoga mutations + recursion) ===============
     return ApplyElementBuild(el, parentStyle, ctx, item, shareCtx);
 }
 
-// Subtree-skip gate factored out of BuildYogaRecursive. Returns true when el's
-// subtree is verifiably clean and the caller must early-out with outBuilt;
-// false to proceed to compute+apply. Side effects on the false path (prof
-// reason counters + ctx.subtreeStructureChanges bump) are byte-identical to the
-// pre-extraction inline gate.
+// Subtree-skip gate for BuildYogaRecursive. Returns true when el's subtree is
+// verifiably clean and the caller must early-out with outBuilt; false to
+// proceed to compute+apply, after bumping the prof reason counters and, when a
+// structural trigger fired, ctx.subtreeStructureChanges.
 bool UIManager::EvaluateSubtreeSkipGate(UIElement* el, const YogaBuildItem& item,
                                         UpdateContext& ctx, BuiltNode& outBuilt)
 {
@@ -1672,7 +1387,7 @@ bool UIManager::CollectYogaInputs(UIElement* el, int32_t parentSheetSetIdx,
     item.LocalSheetSetIdx = localSheetSetIdx;
     const auto localHandlesSpan = ctx.GetHandleSpan(localSheetSetIdx);
 
-    // Retained Yoga node lives on el->m_YogaState (Stage 7 step 8).
+    // Retained Yoga node lives on el->m_YogaState.
     // Allocated lazily on first visit; persists for the element's lifetime
     // and is freed by ~RetainedYogaNode when the element destructs. Pointer
     // reuse can't happen across element lifetimes since the state is owned
@@ -1758,25 +1473,19 @@ bool UIManager::CollectYogaInputs(UIElement* el, int32_t parentSheetSetIdx,
 
 void UIManager::ComputeElementCascade(UIElement* el, const ResolvedStyle* parentStyle,
                                      UpdateContext& ctx, YogaBuildItem& item,
-                                     CascadeShareContext* shareCtx, bool forceCascade)
+                                     CascadeShareContext* shareCtx)
 {
-    // forceCascade is the MT-4.2 escalation re-run: the tripped worker run
-    // already cleared StyleDirty (ResolveCascadeForElement tail) and the
-    // override dirty bits, so a plain re-run would compute needCascade=false
-    // and repair nothing. Forcing rebuilds the element's style from scratch,
-    // which is exactly what the tripwire needs to restore trusted state.
     const bool needCascade =
-        forceCascade || ctx.forceGlobalStyle || item.IsFreshNode ||
+        ctx.forceGlobalStyle || item.IsFreshNode ||
         el->IsDirty(UIElement::StyleDirty) ||
         el->Overrides().NeedsCascadeRerun();
     item.NeedCascade = needCascade;
 
-    // MT-4.1 seam: the cascade must stay Yoga-free AND manager-container-free
-    // so MT-4.2 can run it on a worker thread. Yoga mutation trips the guard;
-    // prof counters, the CascadeComputeMs timer, and the declared-transition
-    // registry decision are all recorded onto `item` and merged by the caller
-    // (ApplyElementBuild) on the UI thread. The share cache written here is
-    // per-context state (shareCtx), which stays worker-local.
+    // Cascade seam: the cascade must stay Yoga-free AND manager-container-free.
+    // Yoga mutation trips the guard; prof counters, the CascadeComputeMs
+    // timer, and the declared-transition registry decision are all recorded
+    // onto `item` and merged by the caller (ApplyElementBuild) on the UI
+    // thread. The share cache written here is per-context state (shareCtx).
     struct ComputeGuardScope
     {
         ComputeGuardScope() { SetCascadeComputeActive(true); }
@@ -1788,7 +1497,7 @@ void UIManager::ComputeElementCascade(UIElement* el, const ResolvedStyle* parent
         bool shared = false;
         {
             // Time into the item (merged into prof->CascadeComputeMs by the
-            // caller); a worker can't touch the shared prof frame.
+            // caller); the compute stage does not touch the shared prof frame.
             ScopedSectionTimer _tCascade(ctx.profEnabled && ctx.prof != nullptr,
                                          &item.CascadeComputeMs);
             // Spans re-derived from the set index (never held across the
@@ -1814,34 +1523,163 @@ void UIManager::ComputeElementCascade(UIElement* el, const ResolvedStyle* parent
 }
 
 
+namespace
+{
+// Whether this element establishes block flow lands on its CHILDREN's Yoga
+// input (ApplyBlockFlowShrinkDefault), and flipping it leaves each child's
+// own style untouched — so a child carrying no dirty bit of its own would
+// be served by the subtree-skip gate and never re-pushed. Mark them before
+// BuildYogaChildren visits them. Runs before ApplyYogaLayoutInputs, so
+// `PrevLayout` still holds the previous push's value.
+void MarkChildrenOnBlockFlowFlip(UIElement* el, const ResolvedStyle& cs, const RetainedYogaNode& retainedNode)
+{
+    if (retainedNode.HasPrevInputs &&
+        EstablishesBlockFlow(retainedNode.PrevLayout.DisplayMode) !=
+            EstablishesBlockFlow(cs.Layout.DisplayMode))
+    {
+        constexpr unsigned kFlipFlags = UIElement::StyleDirty | UIElement::LayoutDirty;
+        // A Mount's portal target is a Yoga child of this node too and reads
+        // this style as its parent.
+        el->ForEachLogicalChild([&](UIElement* child) { child->MarkDirty(kFlipFlags); });
+    }
+}
+
+// Virtualized controls frequently hide pooled rows by toggling display:none
+// on the row container. If the build still traversed those children, their Yoga
+// layout can collapse to (0,0,0,0) while their paint style (e.g. folder icon
+// background-image on .tree-title) remains, causing a "ghost icon" drawn at
+// the origin that then gets cached. Fix by detaching Yoga children and
+// skipping subtree traversal when display:none is active.
+void DetachDisplayNoneSubtree(UIElement* el, YGNodeRef n, RetainedYogaNode* retained)
+{
+    RemoveAllYogaChildren(n);
+    el->ClearDirty(UIElement::ChildrenDirty);
+    // Invalidate the subtree-skip gate — children are detached; on
+    // re-show the element re-cascades from scratch and would otherwise
+    // serve a stale fast-path skip if no descendant re-dirties.
+    retained->CachedSubtreeValid = false;
+    retained->CachedStylesheetContentGen = 0;
+    // Clear SubtreeDirty on self so ancestors can clear theirs next frame.
+    // Without this, a display:none element whose descendants were dirtied
+    // while visible keeps SubtreeDirty set forever — the ancestor-chain
+    // clear is gated on "no child still has SubtreeDirty", so one hidden
+    // dropdown/panel is enough to force the whole ancestor chain to
+    // slow-path every frame in perpetuity. Own StyleDirty/LayoutDirty
+    // stay as-is; a transition back to visible marks StyleDirty anyway,
+    // which re-enters the full slow path and re-cascades.
+    //
+    // INVARIANT CAVEAT: this clear makes "SubtreeDirty set => all DFS
+    // ancestors set" hold only for VISIBLE chains. Descendants (and
+    // Mount targets) of a hidden element keep their bits while the
+    // hidden ancestor's is cleared, so new dirt below it early-stops at
+    // the first stale bit and does not re-mark the chain. Safe today:
+    // un-hiding forces the slow path, which descends unconditionally
+    // and finds the persisted flags. Anything new that consumes
+    // SubtreeDirty (dirty-range uploads, O(changed) commit walks) must
+    // not assume the invariant holds through hidden subtrees.
+    el->ClearDirty(UIElement::SubtreeDirty);
+}
+
+// Clear SubtreeDirty on this element if the whole subtree rooted here is
+// now clean. Without this clear the summary bit becomes "sticky": once any
+// descendant dirties, every ancestor keeps SubtreeDirty forever and the
+// fast path never fires. Eligibility: self has no layout-affecting dirty
+// flags remaining AND no UIElement child still has SubtreeDirty.
+void ClearSubtreeDirtyIfConverged(UIElement* el)
+{
+    const unsigned kLayoutAffecting =
+        UIElement::StyleDirty | UIElement::LayoutDirty | UIElement::ChildrenDirty;
+    const bool selfClean =
+        (el->IsDirty(kLayoutAffecting) == false) &&
+        !el->Overrides().NeedsCascadeRerun() &&
+        !el->Overrides().IsLayoutDirty() &&
+        !el->Overrides().IsVisualDirty();
+    if (selfClean)
+    {
+        bool anyChildSubtreeDirty = false;
+        for (const auto& childEntry : el->GetChildren())
+        {
+            if (childEntry && childEntry->IsDirty(UIElement::SubtreeDirty))
+            {
+                anyChildSubtreeDirty = true;
+                break;
+            }
+        }
+        // Portal-aware: a Mount's summary bit also covers its target
+        // subtree. The target was built before this runs (post-order), so its
+        // SubtreeDirty is already cleared when it converged — this only
+        // holds the bit when the target genuinely didn't.
+        if (!anyChildSubtreeDirty)
+        {
+            if (UIElement* tgt = el->GetMountTarget())
+                anyChildSubtreeDirty = tgt->IsDirty(UIElement::SubtreeDirty);
+        }
+        if (!anyChildSubtreeDirty)
+        {
+            el->ClearDirty(UIElement::SubtreeDirty);
+        }
+    }
+}
+} // namespace
+
 BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* parentStyle,
                                        UpdateContext& ctx, const YogaBuildItem& item,
                                        CascadeShareContext* shareCtx)
 {
-    // Local aliases: identical names/values to the pre-split locals so the
-    // apply body below is byte-for-byte the original code.
     const ResolvedStyle& cs = el->GetResolvedStyle();
     YGNodeRef n = item.Node;
     RetainedYogaNode* retained = item.Retained;
     RetainedYogaNode& retainedNode = *retained;
-    const bool isFreshNode = item.IsFreshNode;
-    const bool hadChildrenDirty = item.HadChildrenDirty;
-    const bool needCascade = item.NeedCascade;
-    const bool overridesDirty = item.OverridesDirty;
-    const int32_t localSheetSetIdx = item.LocalSheetSetIdx;
-    const uint64_t localSheetsHashNow = item.LocalSheetsHashNow;
-    const uint64_t parentSheetsHashNow = item.ParentSheetsHashNow;
 
-    // MT-4.1: merge the compute stage's deferred effects on the UI thread, in
-    // DFS/item order, before any child recurses — reproducing the exact pre-4.1
-    // ordering (the counters were bumped and m_TransitioningElements mutated
-    // inside the cascade, i.e. right here in pre-order, before descending).
-    // needCascade gates the CascadeCalls/CascadeCallsBuildYoga pair; the timer
+    MergeCascadeComputeEffects(el, ctx, item);
+    const bool becomingVisible = TrackDisplayModeFlip(cs, retainedNode, ctx);
+    MarkChildrenOnBlockFlowFlip(el, cs, retainedNode);
+
+    if (!ctx.computeLayoutSignaturesThisFrame && item.NeedCascade)
+    {
+        ++ctx.cssRecomputeWhileSignaturePassDisabled;
+    }
+
+    const bool orderChangedSinceLastBuild = ApplyYogaLayoutInputs(el, parentStyle, ctx, item);
+
+    if (el->IsDirty(UIElement::ChildrenDirty))
+        ctx.anyChildrenDirty = true;
+
+    // CSS semantics: display:none removes the entire subtree from layout/paint.
+    if (cs.Layout.DisplayMode == DisplayMode::None)
+    {
+        DetachDisplayNoneSubtree(el, n, retained);
+        return BuiltNode{n, cs.Layout.Order, item.IsFreshNode, orderChangedSinceLastBuild};
+    }
+
+    BuildYogaChildren(el, item, becomingVisible, ctx, shareCtx);
+
+    // Slow-path exit: prime the subtree-skip gate so the next visit can
+    // early-out. We commit the freshly-observed sheet hashes + content
+    // generation here so the gate's equality checks pass on the next
+    // clean frame. CachedSubtreeValid is the load-bearing flag that
+    // refuses to skip until at least one slow-path build has run.
+    retained->CachedSubtreeValid = true;
+    retained->CachedStylesheetContentGen = m_StylesheetContentGeneration;
+    retained->PrevLocalSheetsHash = item.LocalSheetsHashNow;
+    retained->PrevParentSheetsHash = item.ParentSheetsHashNow;
+
+    ClearSubtreeDirtyIfConverged(el);
+
+    return BuiltNode{n, cs.Layout.Order, item.IsFreshNode, orderChangedSinceLastBuild};
+}
+
+void UIManager::MergeCascadeComputeEffects(UIElement* el, UpdateContext& ctx, const YogaBuildItem& item)
+{
+    // Merge the compute stage's deferred effects on the UI thread, in
+    // DFS/item order, before any child recurses, so the counters and
+    // m_TransitioningElements update in pre-order.
+    // item.NeedCascade gates the CascadeCalls/CascadeCallsBuildYoga pair; the timer
     // and share flag ride the item. Nothing reads these between compute and
-    // now, so the merged result is bit-identical to the inline writes.
+    // this merge.
     if (ctx.profEnabled && ctx.prof)
     {
-        if (needCascade)
+        if (item.NeedCascade)
         {
             ++ctx.prof->CascadeCalls;
             ++ctx.prof->CascadeCallsBuildYoga;
@@ -1851,13 +1689,16 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
         ctx.prof->CascadeComputeMs += item.CascadeComputeMs;
     }
     ApplyTransitionRegistration(el, item.TransitionDecision);
+}
 
-    // display:none ↔ visible transitions change ctx.nodes size
-    // (descendants appear/disappear via the display:none early-return
-    // branch below) without ChildrenDirty firing. Bump the structure
-    // counter here so downstream skip gates (indicesAndClips) know the
-    // node list changed. `cs` holds the currently-resolved style (whether
-    // cascade ran this frame via needCascade above, or was inherited from
+bool UIManager::TrackDisplayModeFlip(const ResolvedStyle& cs, RetainedYogaNode& retainedNode, UpdateContext& ctx)
+{
+    // display:none ↔ visible transitions change which descendants the
+    // build visits (they appear/disappear via ApplyElementBuild's
+    // display:none early return) without ChildrenDirty firing. Bump the
+    // structure counter here so the focus-order skip gate knows the
+    // visited set changed. `cs` holds the currently-resolved style (whether
+    // cascade ran this frame via NeedCascade, or was inherited from
     // a prior frame) — either way it's the right value to compare.
     const bool nowDisplayNone = (cs.Layout.DisplayMode == DisplayMode::None);
     // When coming back from display:none, RemoveAllYogaChildren was called on
@@ -1872,190 +1713,33 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
         NotifyTreeStructureChanged();
     }
     retainedNode.PrevDisplayModeNone = nowDisplayNone;
+    return becomingVisible;
+}
 
-    // Whether this element establishes block flow lands on its CHILDREN's Yoga
-    // input (ApplyBlockFlowShrinkDefault), and flipping it leaves each child's
-    // own style untouched — so a child carrying no dirty bit of its own would
-    // be served by the subtree-skip gate and never re-pushed. Mark them here,
-    // before the child loop further down visits them. `PrevLayout` still holds
-    // the previous push's value; the overwrite happens later in this function.
-    if (retainedNode.HasPrevInputs &&
-        EstablishesBlockFlow(retainedNode.PrevLayout.DisplayMode) !=
-            EstablishesBlockFlow(cs.Layout.DisplayMode))
-    {
-        constexpr unsigned kFlipFlags = UIElement::StyleDirty | UIElement::LayoutDirty;
-        for (const auto& childEntry : el->GetChildren())
-        {
-            if (childEntry)
-                childEntry->MarkDirty(kFlipFlags);
-        }
-        // GetChildren() excludes a Mount's portal target, which is still a Yoga
-        // child of this node and reads this style as its parent.
-        if (el->Kind() == UIElementKind::Mount)
-        {
-            if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                tgt->MarkDirty(kFlipFlags);
-        }
-    }
-
-    if (!ctx.computeLayoutSignaturesThisFrame && needCascade)
-    {
-        ++ctx.cssRecomputeWhileSignaturePassDisabled;
-    }
+bool UIManager::ApplyYogaLayoutInputs(UIElement* el, const ResolvedStyle* parentStyle, UpdateContext& ctx,
+                                      const YogaBuildItem& item)
+{
+    const ResolvedStyle& cs = el->GetResolvedStyle();
+    YGNodeRef n = item.Node;
+    RetainedYogaNode& retainedNode = *item.Retained;
 
     // Reported to the parent via BuiltNode so an order-only mutation (e.g.
     // an Overrides().Set(Style::Order), which raises just LayoutDirty)
     // still triggers the parent's child re-attach.
     bool orderChangedSinceLastBuild = false;
 
-    if (ctx.computeLayoutSignaturesThisFrame || needCascade || overridesDirty)
+    if (ctx.computeLayoutSignaturesThisFrame || item.NeedCascade || item.OverridesDirty)
     {
         const bool needLayoutSigForThisNode =
             ctx.computeLayoutSignaturesAll ||
-            needCascade || overridesDirty ||
+            item.NeedCascade || item.OverridesDirty ||
             !retainedNode.HasPrevInputs ||
             el->IsDirty(UIElement::LayoutDirty) ||
             el->IsDirty(UIElement::ChildrenDirty);
 
         if (needLayoutSigForThisNode)
         {
-            // Intrinsic measurement (for text controls). This affects layout and
-            // must be accounted for in the layout signature.
-            bool hasMeasure = false;
-            bool allowWrapForMeasure = false;
-            uint64_t measureTextHash = 0;
-            float measureFontSize = 0.0f;
-            float measureLineHeight = 0.0f;
-            // Text measurement is opt-in via ITextMeasurable so UIManager/Yoga can size
-            // leaf text ctx.nodes without UIManager knowing about concrete control types.
-            //
-            // IMPORTANT: Do not gate this on font availability. When fonts are resolved
-            // asynchronously by the host, we still need a conservative non-zero fallback
-            // measure so Yoga layout doesn't collapse (stacking/overlap). MeasureTextFn
-            // handles the atlas-missing case.
-            const bool allowMeasure = el->GetChildren().empty();
-            if (allowMeasure)
-            {
-                if (auto* textMeasurable = el->GetTextMeasurable())
-                {
-                    ITextMeasurable::TextMeasureInfo tm{};
-                    textMeasurable->GetTextMeasureInfo(tm, cs);
-                    if (tm.HasText)
-                    {
-                        // Defensive: retained ctx.nodes may still have children (e.g. from a stale entry).
-                        // Yoga forbids children on ctx.nodes with measure functions.
-                        if (YGNodeGetChildCount(n) > 0)
-                        {
-                            RemoveAllYogaChildren(n);
-                        }
-
-                        measureTextHash = HashString64(tm.Text);
-                        const bool tmHasNewlines = (tm.Text.find('\n') != std::string::npos);
-                        allowWrapForMeasure = textMeasurable->AllowWrapForMeasure();
-                        if (cs.Visual.WhiteSpace == WhiteSpace::NoWrap ||
-                            cs.Visual.WhiteSpace == WhiteSpace::Pre)
-                        {
-                            allowWrapForMeasure = false;
-                        }
-
-                        // Stable per-element measure context (Slice 2 step 3).
-                        // Lives on the RetainedYogaNode; its address doesn't
-                        // move across frames so YGNodeSetContext stays valid
-                        // even if the fast path skips re-binding next frame.
-                        if (!retained->MeasureCtx)
-                            retained->MeasureCtx = std::make_unique<TextMeasureCtx>();
-                        TextMeasureCtx* mctx = retained->MeasureCtx.get();
-
-                        FontAtlas* measureAtlas = m_FontAtlas.get();
-                        if (!measureAtlas && !m_FontAtlases.empty())
-                        {
-                            measureAtlas = m_FontAtlases.begin()->second.get();
-                        }
-                        if (cs.Visual.FontFamily && !cs.Visual.FontFamily->empty())
-                        {
-                            for (const auto& fam : *cs.Visual.FontFamily)
-                            {
-                                if (auto* fa = GetOrRequestFontFamilyInternal(fam, cs.Visual.FontWeight, cs.Visual.FontStyle, cs.Visual.FontVariant))
-                                {
-                                    measureAtlas = fa;
-                                    break;
-                                }
-                            }
-                        }
-                        if (mctx)
-                        {
-                            mctx->Atlas = measureAtlas; // may be null; MeasureTextFn handles fallback
-                            mctx->Text = std::move(tm.Text);
-                            mctx->LineHeight = cs.Visual.LineHeight;
-                            // Device px, like PixelSize — the FontAtlas unit.
-                            mctx->LetterSpacingPx = cs.Visual.LetterSpacing * ctx.contentScale;
-                            mctx->TextHash = measureTextHash;
-                            mctx->HasNewlines = tmHasNewlines;
-                            mctx->AllowWrap = allowWrapForMeasure;
-                            mctx->BreakPolicy =
-                                allowWrapForMeasure
-                                    ? ResolveTextBreakPolicy(cs.Visual.WordBreak, cs.Visual.OverflowWrap)
-                                    : WordBreak::Normal;
-                        }
-                        // Measure using either an explicit size from the control or
-                        // the same font-size the element will render with.
-                        measureFontSize = tm.ExplicitFontSize > 0.0f ? tm.ExplicitFontSize : cs.Visual.FontSize;
-                        measureLineHeight = cs.Visual.LineHeight;
-                        if (mctx)
-                        {
-                            // pixelSize is physical so the font atlas is queried at the
-                            // correct resolution. MeasureTextFn divides results by
-                            // contentScale to return logical dimensions to Yoga.
-                            mctx->PixelSize = std::max(1.0f, measureFontSize * ctx.contentScale);
-                            mctx->ContentScale = ctx.contentScale;
-                            // A control's explicit size overrides the visual font-size
-                            // for measurement; unitless line-height must resolve
-                            // against the size actually measured with. Every control
-                            // currently reports 0 here (meaning "use the style"), so
-                            // this equals Visual.FontSize and matches what primitive
-                            // generation resolves against. A control that starts
-                            // reporting a real explicit size must also carry it into
-                            // EmitTextPrimitives, or layout and rendering would size
-                            // the same text differently.
-                            mctx->FontSize = measureFontSize;
-                        }
-                        YGNodeSetContext(n, mctx);
-                        YGNodeSetMeasureFunc(n, MeasureTextFn);
-                        YGNodeSetBaselineFunc(n, BaselineTextFn);
-                        hasMeasure = true;
-                    }
-                }
-            }
-            // Clear any stale measurement callback/context when measurement is not active.
-            if (!hasMeasure)
-            {
-                YGNodeSetMeasureFunc(n, nullptr);
-                YGNodeSetBaselineFunc(n, nullptr);
-                YGNodeSetContext(n, nullptr);
-            }
-
-            MeasureInputs curMeasure{};
-            curMeasure.HasMeasure = hasMeasure;
-            if (hasMeasure)
-            {
-                curMeasure.TextHash = measureTextHash;
-                curMeasure.FontSize = measureFontSize;
-                curMeasure.LineHeight = measureLineHeight;
-                curMeasure.LetterSpacing = cs.Visual.LetterSpacing;
-                curMeasure.VisualFontSize = cs.Visual.FontSize;
-                curMeasure.VisualLineHeight = cs.Visual.LineHeight;
-                curMeasure.AllowWrap = allowWrapForMeasure;
-                curMeasure.BreakPolicy =
-                    allowWrapForMeasure
-                        ? ResolveTextBreakPolicy(cs.Visual.WordBreak, cs.Visual.OverflowWrap)
-                        : WordBreak::Normal;
-                curMeasure.AtlasId = (retainedNode.MeasureCtx && retainedNode.MeasureCtx->Atlas)
-                                         ? retainedNode.MeasureCtx->Atlas->GetAtlasId()
-                                         : 0;
-            }
-
-            auto* wp = (el->Kind() == UIElementKind::WeightedPane) ? static_cast<WeightedPane*>(el) : nullptr;
-            const float effectiveFlexGrow = (wp ? std::max(0.0f, wp->GetFlexWeight()) : cs.Layout.FlexGrow);
+            const MeasureInputs curMeasure = BindTextMeasure(el, n, retainedNode, ctx);
 
             // Not derivable from cs.Layout: the container decides it, and this
             // element's own style is unchanged when the container flips.
@@ -2066,7 +1750,6 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
                 !retainedNode.HasPrevInputs ||
                 retainedNode.PrevLayout != cs.Layout ||
                 retainedNode.PrevMeasure != curMeasure ||
-                retainedNode.PrevFlexGrowOverride != effectiveFlexGrow ||
                 retainedNode.PrevParentBlockFlow != parentBlockFlow;
 
             orderChangedSinceLastBuild =
@@ -2078,22 +1761,17 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
                                                ctx.prof ? &ctx.prof->YogaApplyMs : nullptr);
                 retainedNode.PrevLayout = cs.Layout;
                 retainedNode.PrevMeasure = curMeasure;
-                retainedNode.PrevFlexGrowOverride = effectiveFlexGrow;
                 retainedNode.PrevParentBlockFlow = parentBlockFlow;
                 retainedNode.HasPrevInputs = true;
                 ctx.anyLayoutSignatureChanged = true;
                 YogaAdapter::ApplyStyle(n, cs);
                 ApplyBlockFlowShrinkDefault(n, cs, parentStyle);
-                if (wp)
-                {
-                    YGNodeStyleSetFlexGrow(n, std::max(0.0f, effectiveFlexGrow));
-                }
                 // YGNodeSetMeasureFunc does not dirty the node when the same function
                 // pointer is re-set (Yoga 3.x). Explicitly dirty the node so
                 // CalculateLayout calls MeasureTextFn with the updated text context
                 // rather than using the cached zero-width result from a previous pass
                 // (e.g. when a pooled row transitions from empty to a real entity name).
-                if (hasMeasure)
+                if (curMeasure.HasMeasure)
                 {
                     YGNodeMarkDirty(n);
                 }
@@ -2104,47 +1782,166 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
         // comparison above will decide whether a Yoga solve is needed).
         el->ClearDirty(UIElement::LayoutDirty);
     }
+    return orderChangedSinceLastBuild;
+}
 
-    if (el->IsDirty(UIElement::ChildrenDirty))
-        ctx.anyChildrenDirty = true;
-
-    // CSS semantics: display:none removes the entire subtree from layout/paint.
-    // Virtualized controls frequently hide pooled rows by toggling display:none
-    // on the row container. If we still traverse/build children here, their Yoga
-    // layout can collapse to (0,0,0,0) while their paint style (e.g. folder icon
-    // background-image on .tree-title) remains, causing a "ghost icon" drawn at
-    // the origin that then gets cached. Fix by detaching Yoga children and
-    // skipping subtree traversal when display:none is active.
-    if (cs.Layout.DisplayMode == DisplayMode::None)
+UIManager::MeasureInputs UIManager::BindTextMeasure(UIElement* el, YGNodeRef n, RetainedYogaNode& retainedNode,
+                                                    const UpdateContext& ctx)
+{
+    const ResolvedStyle& cs = el->GetResolvedStyle();
+    // Intrinsic measurement (for text controls). This affects layout and
+    // must be accounted for in the layout signature.
+    bool hasMeasure = false;
+    bool allowWrapForMeasure = false;
+    uint64_t measureTextHash = 0;
+    float measureFontSize = 0.0f;
+    float measureLineHeight = 0.0f;
+    // Text measurement is opt-in via ITextMeasurable so UIManager/Yoga can size
+    // leaf text nodes without UIManager knowing about concrete control types.
+    //
+    // IMPORTANT: Do not gate this on font availability. When fonts are resolved
+    // asynchronously by the host, we still need a conservative non-zero fallback
+    // measure so Yoga layout doesn't collapse (stacking/overlap). MeasureTextFn
+    // handles the atlas-missing case.
+    const bool allowMeasure = el->GetChildren().empty();
+    if (allowMeasure)
     {
-        RemoveAllYogaChildren(n);
-        el->ClearDirty(UIElement::ChildrenDirty);
-        // Invalidate the subtree-skip gate — children are detached; on
-        // re-show the element re-cascades from scratch and would otherwise
-        // serve a stale fast-path skip if no descendant re-dirties.
-        retained->CachedSubtreeValid = false;
-        retained->CachedStylesheetContentGen = 0;
-        // Clear SubtreeDirty on self so ancestors can clear theirs next frame.
-        // Without this, a display:none element whose descendants were dirtied
-        // while visible keeps SubtreeDirty set forever — the ancestor-chain
-        // clear is gated on "no child still has SubtreeDirty", so one hidden
-        // dropdown/panel is enough to force the whole ancestor chain to
-        // slow-path every frame in perpetuity. Own StyleDirty/LayoutDirty
-        // stay as-is; a transition back to visible marks StyleDirty anyway,
-        // which re-enters the full slow path and re-cascades.
-        //
-        // INVARIANT CAVEAT: this clear makes "SubtreeDirty set => all DFS
-        // ancestors set" hold only for VISIBLE chains. Descendants (and
-        // Mount targets) of a hidden element keep their bits while the
-        // hidden ancestor's is cleared, so new dirt below it early-stops at
-        // the first stale bit and does not re-mark the chain. Safe today:
-        // un-hiding forces the slow path, which descends unconditionally
-        // and finds the persisted flags. Anything new that consumes
-        // SubtreeDirty (dirty-range uploads, O(changed) commit walks) must
-        // not assume the invariant holds through hidden subtrees.
-        el->ClearDirty(UIElement::SubtreeDirty);
-        return BuiltNode{n, cs.Layout.Order, isFreshNode, orderChangedSinceLastBuild};
+        if (auto* textMeasurable = el->GetTextMeasurable())
+        {
+            ITextMeasurable::TextMeasureInfo tm{};
+            textMeasurable->GetTextMeasureInfo(tm, cs);
+            if (tm.HasText)
+            {
+                // Defensive: the retained Yoga node may still have children (e.g. from a stale
+                // entry). Yoga forbids children on nodes with measure functions.
+                if (YGNodeGetChildCount(n) > 0)
+                {
+                    RemoveAllYogaChildren(n);
+                }
+
+                measureTextHash = Hashing::Fnv1a64(tm.Text);
+                const bool tmHasNewlines = (tm.Text.find('\n') != std::string::npos);
+                allowWrapForMeasure = textMeasurable->AllowWrapForMeasure();
+                if (cs.Visual.WhiteSpace == WhiteSpace::NoWrap ||
+                    cs.Visual.WhiteSpace == WhiteSpace::Pre)
+                {
+                    allowWrapForMeasure = false;
+                }
+
+                // Stable per-element measure context.
+                // Lives on the RetainedYogaNode; its address doesn't
+                // move across frames so YGNodeSetContext stays valid
+                // even if the fast path skips re-binding next frame.
+                if (!retainedNode.MeasureCtx)
+                    retainedNode.MeasureCtx = std::make_unique<TextMeasureCtx>();
+                TextMeasureCtx* mctx = retainedNode.MeasureCtx.get();
+
+                FontAtlas* measureAtlas = ResolveMeasureFontAtlas(cs);
+                if (mctx)
+                {
+                    mctx->Atlas = measureAtlas; // may be null; MeasureTextFn handles fallback
+                    mctx->Text = std::move(tm.Text);
+                    mctx->LineHeight = cs.Visual.LineHeight;
+                    // Device px, like PixelSize — the FontAtlas unit.
+                    mctx->LetterSpacingPx = cs.Visual.LetterSpacing * ctx.contentScale;
+                    mctx->TextHash = measureTextHash;
+                    mctx->HasNewlines = tmHasNewlines;
+                    mctx->AllowWrap = allowWrapForMeasure;
+                    mctx->BreakPolicy =
+                        allowWrapForMeasure
+                            ? ResolveTextBreakPolicy(cs.Visual.WordBreak, cs.Visual.OverflowWrap)
+                            : WordBreak::Normal;
+                }
+                // Measure using either an explicit size from the control or
+                // the same font-size the element will render with.
+                measureFontSize = tm.ExplicitFontSize > 0.0f ? tm.ExplicitFontSize : cs.Visual.FontSize;
+                measureLineHeight = cs.Visual.LineHeight;
+                if (mctx)
+                {
+                    // pixelSize is physical so the font atlas is queried at the
+                    // correct resolution. MeasureTextFn divides results by
+                    // contentScale to return logical dimensions to Yoga.
+                    mctx->PixelSize = std::max(1.0f, measureFontSize * ctx.contentScale);
+                    mctx->ContentScale = ctx.contentScale;
+                    // A control's explicit size overrides the visual font-size
+                    // for measurement; unitless line-height must resolve
+                    // against the size actually measured with. Every control
+                    // currently reports 0 here (meaning "use the style"), so
+                    // this equals Visual.FontSize and matches what primitive
+                    // generation resolves against. A control that starts
+                    // reporting a real explicit size must also carry it into
+                    // EmitTextPrimitives, or layout and rendering would size
+                    // the same text differently.
+                    mctx->FontSize = measureFontSize;
+                }
+                YGNodeSetContext(n, mctx);
+                YGNodeSetMeasureFunc(n, MeasureTextFn);
+                YGNodeSetBaselineFunc(n, BaselineTextFn);
+                hasMeasure = true;
+            }
+        }
     }
+    // Clear any stale measurement callback/context when measurement is not active.
+    if (!hasMeasure)
+    {
+        YGNodeSetMeasureFunc(n, nullptr);
+        YGNodeSetBaselineFunc(n, nullptr);
+        YGNodeSetContext(n, nullptr);
+    }
+
+    MeasureInputs curMeasure{};
+    curMeasure.HasMeasure = hasMeasure;
+    if (hasMeasure)
+    {
+        curMeasure.TextHash = measureTextHash;
+        curMeasure.FontSize = measureFontSize;
+        curMeasure.LineHeight = measureLineHeight;
+        curMeasure.LetterSpacing = cs.Visual.LetterSpacing;
+        curMeasure.VisualFontSize = cs.Visual.FontSize;
+        curMeasure.VisualLineHeight = cs.Visual.LineHeight;
+        curMeasure.AllowWrap = allowWrapForMeasure;
+        curMeasure.BreakPolicy =
+            allowWrapForMeasure
+                ? ResolveTextBreakPolicy(cs.Visual.WordBreak, cs.Visual.OverflowWrap)
+                : WordBreak::Normal;
+        curMeasure.AtlasId = (retainedNode.MeasureCtx && retainedNode.MeasureCtx->Atlas)
+                                 ? retainedNode.MeasureCtx->Atlas->GetAtlasId()
+                                 : 0;
+        curMeasure.LayoutRevision = (retainedNode.MeasureCtx && retainedNode.MeasureCtx->Atlas)
+                                         ? retainedNode.MeasureCtx->Atlas->GetLayoutRevision() : 0;
+    }
+    return curMeasure;
+}
+
+// The atlas text measurement shapes with: the first font-family entry that
+// resolves (GetOrRequestFontFamilyInternal requests the ones it passes over),
+// else the default atlas or, without one, the first loaded atlas.
+FontAtlas* UIManager::ResolveMeasureFontAtlas(const ResolvedStyle& cs)
+{
+    FontAtlas* measureAtlas = m_FontAtlas.get();
+    if (!measureAtlas && !m_FontAtlases.empty())
+    {
+        measureAtlas = m_FontAtlases.begin()->second.get();
+    }
+    if (cs.Visual.FontFamily && !cs.Visual.FontFamily->empty())
+    {
+        for (const auto& fam : *cs.Visual.FontFamily)
+        {
+            if (auto* fa = GetOrRequestFontFamilyInternal(fam, cs.Visual.FontWeight, cs.Visual.FontStyle, cs.Visual.FontVariant))
+            {
+                measureAtlas = fa;
+                break;
+            }
+        }
+    }
+    return measureAtlas;
+}
+
+void UIManager::BuildYogaChildren(UIElement* el, const YogaBuildItem& item, bool becomingVisible,
+                                  UpdateContext& ctx, CascadeShareContext* shareCtx)
+{
+    const ResolvedStyle& cs = el->GetResolvedStyle();
+    YGNodeRef n = item.Node;
 
     const auto& ch = el->GetChildren();
     // Record start offset into the shared flat buffer; our entries live at
@@ -2158,7 +1955,7 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
 
     // Cascade each child in order. Donor-first sibling sharing flows through the
     // shared cascade context (shareCtx) — a same-key sibling copies the donor's
-    // snapshot rather than re-resolving (P4d).
+    // snapshot rather than re-resolving.
     const bool propagateSiblingDirty = m_StyleAnalysis.UsesSiblingCombinators;
     bool anyPriorSiblingStyleDirty = false;
     for (size_t i = 0; i < ch.size(); ++i)
@@ -2183,27 +1980,23 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
         // Build the child's node and use its already-computed CSS 'order'
         // (computed with the child's effective stylesheet list, including
         // its own attached sheets) to drive insertion order.
-        BuiltNode childBuilt = BuildYogaRecursive(childEl, &cs, i, localSheetSetIdx, ctx, shareCtx);
+        BuiltNode childBuilt = BuildYogaRecursive(childEl, &cs, i, item.LocalSheetSetIdx, ctx, shareCtx);
         if (childBuilt.node)
             s_OrderedChildrenBuf.push_back({childBuilt.node, childBuilt.order, i});
         if (childStyleDirtyBefore || childBuilt.structureDirty || childBuilt.orderChanged)
             anyChildStructureChange = true;
     }
     // Include Mount portal target as a Yoga child (always after normal children).
-    if (el->Kind() == UIElementKind::Mount)
+    if (UIElement* tgt = el->GetMountTarget())
     {
-        auto* m = static_cast<Mount*>(el);
-        if (UIElement* tgt = m->GetTarget())
+        const bool tgtStyleDirtyBefore = tgt->IsDirty(UIElement::StyleDirty);
+        BuiltNode tgtBuilt = BuildYogaRecursive(tgt, &cs, ch.size(), item.LocalSheetSetIdx, ctx, shareCtx);
+        if (tgtBuilt.node)
         {
-            const bool tgtStyleDirtyBefore = tgt->IsDirty(UIElement::StyleDirty);
-            BuiltNode tgtBuilt = BuildYogaRecursive(tgt, &cs, ch.size(), localSheetSetIdx, ctx, shareCtx);
-            if (tgtBuilt.node)
-            {
-                s_OrderedChildrenBuf.push_back({tgtBuilt.node, std::numeric_limits<int>::max(), ch.size()});
-            }
-            if (tgtStyleDirtyBefore || tgtBuilt.structureDirty || tgtBuilt.orderChanged)
-                anyChildStructureChange = true;
+            s_OrderedChildrenBuf.push_back({tgtBuilt.node, std::numeric_limits<int>::max(), ch.size()});
         }
+        if (tgtStyleDirtyBefore || tgtBuilt.structureDirty || tgtBuilt.orderChanged)
+            anyChildStructureChange = true;
     }
 
     // Only re-attach the Yoga child list if something that could affect it
@@ -2213,7 +2006,7 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
     // children were detached on the hide pass (RemoveAllYogaChildren) and must
     // be re-attached now — ChildrenDirty was already cleared by that hide pass.
     const bool needInsert =
-        hadChildrenDirty || isFreshNode || ctx.forceGlobalStyle || anyChildStructureChange || becomingVisible;
+        item.HadChildrenDirty || item.IsFreshNode || ctx.forceGlobalStyle || anyChildStructureChange || becomingVisible;
     if (needInsert)
     {
         YogaAdapter::InsertChildrenSortedByOrder(
@@ -2225,68 +2018,12 @@ BuiltNode UIManager::ApplyElementBuild(UIElement* el, const ResolvedStyle* paren
     // Pop our entries (shared buffer acts as a stack across recursion levels).
     s_OrderedChildrenBuf.resize(childStart);
     el->ClearDirty(UIElement::ChildrenDirty);
-
-    // Slow-path exit: prime the subtree-skip gate so the next visit can
-    // early-out. We commit the freshly-observed sheet hashes + content
-    // generation here so the gate's equality checks pass on the next
-    // clean frame. CachedSubtreeValid is the load-bearing flag that
-    // refuses to skip until at least one slow-path build has run.
-    retained->CachedSubtreeValid = true;
-    retained->CachedStylesheetContentGen = m_StylesheetContentGeneration;
-    retained->PrevLocalSheetsHash = localSheetsHashNow;
-    retained->PrevParentSheetsHash = parentSheetsHashNow;
-
-    // Clear SubtreeDirty on this element if the whole subtree rooted here is
-    // now clean. Without this clear the summary bit becomes "sticky": once any
-    // descendant dirties, every ancestor keeps SubtreeDirty forever and the
-    // fast path never fires. Eligibility: self has no layout-affecting dirty
-    // flags remaining AND no UIElement child still has SubtreeDirty.
-    {
-        const unsigned kLayoutAffecting =
-            UIElement::StyleDirty | UIElement::LayoutDirty | UIElement::ChildrenDirty;
-        const bool selfClean =
-            (el->IsDirty(kLayoutAffecting) == false) &&
-            !el->Overrides().NeedsCascadeRerun() &&
-            !el->Overrides().IsLayoutDirty() &&
-            !el->Overrides().IsVisualDirty();
-        if (selfClean)
-        {
-            bool anyChildSubtreeDirty = false;
-            for (const auto& childEntry : el->GetChildren())
-            {
-                if (childEntry && childEntry->IsDirty(UIElement::SubtreeDirty))
-                {
-                    anyChildSubtreeDirty = true;
-                    break;
-                }
-            }
-            // Portal-aware: a Mount's summary bit also covers its target
-            // subtree. The target was visited above (post-order), so its
-            // SubtreeDirty is already cleared when it converged — this only
-            // holds the bit when the target genuinely didn't.
-            if (!anyChildSubtreeDirty && el->Kind() == UIElementKind::Mount)
-            {
-                if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                    anyChildSubtreeDirty = tgt->IsDirty(UIElement::SubtreeDirty);
-            }
-            if (!anyChildSubtreeDirty)
-            {
-                el->ClearDirty(UIElement::SubtreeDirty);
-            }
-        }
-    }
-
-    return BuiltNode{n, cs.Layout.Order, isFreshNode, orderChangedSinceLastBuild};
 }
 
 
 // ---------------------------------------------------------------------------
 // Clip / z-index / scroll helper methods (extracted from Update lambdas)
 // ---------------------------------------------------------------------------
-
-// Stage 7 step 7.2: RebuildNodeIndices was a write-only nop after every
-// reader of nodeIndexByYG / nodeIndexByElement / nodesByInstanceId was
-// retired. Function and forward declaration deleted.
 
 void UIManager::RebuildTypedNodeLists(UpdateContext& ctx)
 {
@@ -2334,11 +2071,7 @@ void UIManager::RebuildTypedNodeLists(UpdateContext& ctx)
         Mathematics::Rect absoluteRect{};
         if (UI::Layout::TryGetAbsolutePosition(*el, absoluteRect))
             ctx.layoutOverrideNodes.push_back({el});
-        for (const auto& ch : el->GetChildren())
-            walk(ch.get());
-        if (el->Kind() == UIElementKind::Mount)
-            if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                walk(tgt);
+        el->ForEachLogicalChild(walk);
     };
     walk(m_Root.get());
 }
@@ -2346,9 +2079,9 @@ void UIManager::RebuildTypedNodeLists(UpdateContext& ctx)
 void UIManager::CommitLayoutRects(UIElement* root, bool incremental)
 {
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
-    // The single Yoga->element rect commit (slice E2 — replaces five
-    // hand-rolled copies). Walks visible elements (children + Mount
-    // targets), commits the absolute rect; skips display:none subtrees
+    // The single Yoga->element rect commit. Walks visible elements
+    // (children + Mount targets), commits the absolute rect; skips
+    // display:none subtrees
     // (Yoga doesn't solve them; their stale rects are correct to keep).
     //
     // Incremental mode (the steady-state SolveAndApplyLayout caller)
@@ -2401,7 +2134,7 @@ void UIManager::CommitLayoutRects(UIElement* root, bool incremental)
                 snappedH = std::max(0.0f, bottom - top) / cs;
             }
 
-            // E3 prune. hasNewLayout=false proves the node's RELATIVE
+            // Prune. hasNewLayout=false proves the node's RELATIVE
             // layout (and its subtree's) is unchanged — Yoga repositions
             // clean cache-hit children from the parent side without
             // descending, so a false flag says nothing about ABSOLUTE
@@ -2459,10 +2192,7 @@ void UIManager::CommitLayoutRects(UIElement* root, bool incremental)
             childAbsX = lx;
             childAbsY = ly;
         }
-        for (const auto& ch : el->GetChildren())
-            self(self, ch.get(), childAbsX, childAbsY);
-        if (UIElement* tgt = el->GetMountTarget())
-            self(self, tgt, childAbsX, childAbsY);
+        el->ForEachLogicalChild([&](UIElement* child) { self(self, child, childAbsX, childAbsY); });
     };
     commit(commit, root, 0.0f, 0.0f);
     if (needsFullForLayout)
@@ -2540,15 +2270,14 @@ void WalkDebugClipRecursive(UIElement* el, DebugClipWalkState inherited,
     if (el->GetOverlayLayer() != OverlayLayer::None)
         inherited = DebugClipWalkState{};
 
-    // Record the clip applied TO this element (matches NodeRec.hasClip
-    // semantics: parent's effective clip after the parent-overflow + own
-    // overlay-reset steps).
+    // Record the clip applied TO this element: the parent's effective clip
+    // after the parent-overflow + own overlay-reset steps.
     if (inherited.has)
         out.insert_or_assign(el, UIManager::DebugClipRect{inherited.x, inherited.y, inherited.w, inherited.h});
 
     // Compute the clip propagated to children: inherit + own overflow:hidden
     // contribution. Mount portal target inherits the Mount host's child
-    // clip — the same edge BuildYogaRecursive baked into NodeRec.parentIndex.
+    // clip.
     DebugClipWalkState childClip = inherited;
     if (rs.Layout.Overflow == Overflow::Hidden)
     {
@@ -2579,13 +2308,8 @@ void WalkDebugClipRecursive(UIElement* el, DebugClipWalkState inherited,
         }
     }
 
-    for (const auto& ch : el->GetChildren())
-    {
-        if (ch)
-            WalkDebugClipRecursive(ch.get(), childClip, out);
-    }
-    if (UIElement* tgt = el->GetMountTarget())
-        WalkDebugClipRecursive(tgt, childClip, out);
+    el->ForEachLogicalChild(
+        [&](UIElement* child) { WalkDebugClipRecursive(child, childClip, out); });
 }
 } // namespace
 
@@ -2613,8 +2337,7 @@ void UIManager::ApplyLayoutOverrideRects(UpdateContext& ctx, bool /*allOverrides
         // GridView / TreeView) are direct children of regular UIElement
         // parents (scroll content containers). Mount portal targets are
         // not used with the position:absolute override path in practice,
-        // so the UIElement parent edge is the right anchor — same value
-        // the legacy NodeRec.parentIndex chain produced for these calls.
+        // so the UIElement parent edge is the right anchor.
         const UIElement* parentEl = element->GetParent();
         if (!parentEl)
             continue;
@@ -2704,17 +2427,7 @@ void UIManager::MarkSubtreeForDrainReEmit(UIElement* root)
         if (!EmitWalkEntersSubtree(*cur))
             continue;
         cur->MarkDirty(UIElement::VisualDirty);
-        for (const auto& ch : cur->GetChildren())
-        {
-            if (ch)
-                stack.push_back(ch.get());
-        }
-        if (cur->Kind() == UIElementKind::Mount)
-        {
-            auto* m = static_cast<Mount*>(cur);
-            if (UIElement* tgt = m->GetTarget())
-                stack.push_back(tgt);
-        }
+        cur->ForEachLogicalChild([](UIElement* child) { stack.push_back(child); });
     }
 }
 
@@ -2725,7 +2438,7 @@ void UIManager::TranslateLayoutSubtree(UIElement* rootToTranslate, float dx, flo
         return;
     if (dx == 0.0f && dy == 0.0f)
         return;
-    // Marks only feed the E1 drain; a pending full regen clears the queue
+    // Marks only feed the primitive drain; a pending full regen clears the queue
     // wholesale, so the queue pushes would be pure discarded work.
     if (markForDrain && m_PrimitivesNeedRegen.load(std::memory_order_relaxed))
         markForDrain = false;
@@ -2764,17 +2477,7 @@ void UIManager::TranslateLayoutSubtree(UIElement* rootToTranslate, float dx, flo
             if (mark)
                 cur->MarkDirty(UIElement::VisualDirty);
         }
-        for (const auto& ch : cur->GetChildren())
-        {
-            if (ch)
-                stack.push_back({ch.get(), mark});
-        }
-        if (cur->Kind() == UIElementKind::Mount)
-        {
-            auto* m = static_cast<Mount*>(cur);
-            if (UIElement* tgt = m->GetTarget())
-                stack.push_back({tgt, mark});
-        }
+        cur->ForEachLogicalChild([&](UIElement* child) { stack.push_back({child, mark}); });
     }
 }
 
@@ -2845,21 +2548,13 @@ void UIManager::ConvergePostLayout(YGNodeRef& rootNode, UpdateContext& ctx)
         if (el->GetResolvedStyle().Layout.DisplayMode == DisplayMode::None)
             return;
         visitor(el);
-        for (const auto& ch : el->GetChildren())
-            self(self, ch.get(), visitor);
-        if (el->Kind() == UIElementKind::Mount)
-            if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                self(self, tgt, visitor);
+        el->ForEachLogicalChild([&](UIElement* child) { self(self, child, visitor); });
     };
     auto walkPostOrderVisible = [&](auto& self, UIElement* el, auto&& visitor) -> void {
         if (!el) return;
         if (el->GetResolvedStyle().Layout.DisplayMode == DisplayMode::None)
             return;
-        for (const auto& ch : el->GetChildren())
-            self(self, ch.get(), visitor);
-        if (el->Kind() == UIElementKind::Mount)
-            if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                self(self, tgt, visitor);
+        el->ForEachLogicalChild([&](UIElement* child) { self(self, child, visitor); });
         visitor(el);
     };
 
@@ -2955,7 +2650,6 @@ void UIManager::ConvergePostLayout(YGNodeRef& rootNode, UpdateContext& ctx)
                     YogaAdapter::ApplyStyle(node, cs2);
                     ApplyBlockFlowShrinkDefault(node, cs2, parentStyle);
                 }
-                ApplyWeightedPaneFlexGrowOverride(el, node);
 
                 const DisplayMode nextDisplay = cs2.Layout.DisplayMode;
                 const uint32_t yogaChildCount = (uint32_t)YGNodeGetChildCount(node);
@@ -3001,17 +2695,13 @@ void UIManager::ConvergePostLayout(YGNodeRef& rootNode, UpdateContext& ctx)
                     // Mount portal target: GetChildren() excludes the
                     // Mount target; append it after children with max
                     // order to mirror BuildYogaRecursive.
-                    if (el->Kind() == UIElementKind::Mount)
+                    if (UIElement* tgt = el->GetMountTarget())
                     {
-                        auto* m = static_cast<Mount*>(el);
-                        if (UIElement* tgt = m->GetTarget())
+                        if (tgt->m_YogaState && tgt->m_YogaState->Node)
                         {
-                            if (tgt->m_YogaState && tgt->m_YogaState->Node)
-                            {
-                                s_ReattachBuf.push_back({tgt->m_YogaState->Node,
-                                                         std::numeric_limits<int>::max(),
-                                                         el->GetChildren().size()});
-                            }
+                            s_ReattachBuf.push_back({tgt->m_YogaState->Node,
+                                                     std::numeric_limits<int>::max(),
+                                                     el->GetChildren().size()});
                         }
                     }
                     if (!s_ReattachBuf.empty())
@@ -3028,11 +2718,11 @@ void UIManager::ConvergePostLayout(YGNodeRef& rootNode, UpdateContext& ctx)
         return res;
     };
 
-    // Retry path: rebuild ctx.nodes + Yoga from scratch and re-solve layout.
+    // Retry path: rebuild the Yoga tree from scratch and re-solve layout.
     // Triggered when OnPostLayout mutates the tree (ChildrenDirty) OR when
     // applyDirtyStylesToYoga detects a display:none flip to None that leaves
-    // descendants in ctx.nodes with orphaned Yoga positions. Both cases need
-    // identical handling: wipe ctx.nodes, rebuild, re-solve, commit rects.
+    // descendants with orphaned Yoga positions. Both cases need identical
+    // handling: rebuild, re-solve, commit rects.
     // computeLayoutSignaturesThisFrame is forced on so newly created nodes
     // receive styles/measure funcs even on frames that initially skipped them.
     auto rebuildYogaTreeAndResolveLayout = [&]() {
@@ -3064,7 +2754,7 @@ void UIManager::ConvergePostLayout(YGNodeRef& rootNode, UpdateContext& ctx)
         {
             // Let controls observe layout and potentially mutate style/
             // visibility. Post-order so children see settled rects before
-            // their parents — preserves the legacy reverse-DFS semantics.
+            // their parents.
             ScopedSectionTimer _tDispatch(ctx.profEnabled, &ctx.prof->OnPostLayoutDispatchMs);
             // Scoped, not a matched pair: OnPostLayout runs control code, and one of them
             // throwing past a bare SetInEventDispatch(false) would leave the depth raised for
@@ -3093,11 +2783,7 @@ void UIManager::ConvergePostLayout(YGNodeRef& rootNode, UpdateContext& ctx)
             }
             if (!el->IsDirty(UIElement::SubtreeDirty))
                 return;
-            for (const auto& ch : el->GetChildren())
-                self(self, ch.get());
-            if (el->Kind() == UIElementKind::Mount)
-                if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                    self(self, tgt);
+            el->ForEachLogicalChild([&](UIElement* child) { self(self, child); });
         };
         probeImpl(probeImpl, m_Root.get());
         if (postLayoutChildrenDirty)

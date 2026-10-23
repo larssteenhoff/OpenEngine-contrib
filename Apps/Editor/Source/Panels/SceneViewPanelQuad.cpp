@@ -76,7 +76,17 @@ void SceneViewPanel::SetSceneControllerForSlot(ViewportSlot slot, SceneViewContr
     const bool controllerChanged = m_SceneControllers[index] != controller;
     m_SceneControllers[index] = controller;
     if (controllerChanged && controller)
+    {
+        controller->SetOnActiveToolChangedCallback(
+            [this, controller](SceneViewController::ToolKind) { OnSceneControllerToolChanged(controller); });
+        if (Editor::SceneTools::MeasureTool* tool = controller->GetMeasureTool())
+        {
+            tool->SetOnMeasured([this](const std::array<float, 3>& start, const std::array<float, 3>& end, bool is2D) {
+                OnMeasured(start, end, is2D);
+            });
+        }
         ApplyQuadViewKind(FindSlotForQuadViewKind(static_cast<QuadViewKind>(index)));
+    }
 
     // Panel yaw/pitch are pushed into SceneViewController every frame via SetCameraAnglesDeg.
     // When the binding changes, copy the controller pose so we do not overwrite seeded defaults
@@ -581,10 +591,13 @@ void SceneViewPanel::RefreshViewportMeasureOverlays()
             HeldViewportOverlay(m_HeldMeasureOverlays[i], m_ViewportSlots[i], *this, kMeasureOverlayIds[i]);
 
         m_MeasureOverlays[i] = overlay;
+        SceneViewController* controller = GetSceneControllerForSlot(slot);
+        if (Editor::SceneTools::MeasureTool* tool = controller ? controller->GetMeasureTool() : nullptr)
+            tool->SetOverlay(overlay);
         if (!overlay)
             continue;
 
-        overlay->SetSceneController(GetSceneControllerForSlot(slot));
+        overlay->SetSceneController(controller);
         overlay->SetMeasureToolEnabled(m_MeasureToolEnabled);
         overlay->SetUnitSystem(m_MeasureUnitSystem);
         overlay->SetTwoDMode(m_MeasureTwoDMode);
@@ -942,11 +955,9 @@ void SceneViewPanel::RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot
         }
 
         m_LmbDragIsToolMode = (ev.Button == 0 && !m_IsAltOrbiting && !m_IsPanning);
-        if (m_LmbDragIsToolMode && HandleMeasurePointerDown(controller, viewport, slot, ev))
-            return;
         if (m_LmbDragIsToolMode && m_MeasureToolEnabled)
         {
-            ev.Stop();
+            DispatchMeasurePointer(controller, viewport, Editor::SceneTools::PointerPhase::Down, ev);
             return;
         }
         if (m_LmbDragIsToolMode)
@@ -1038,11 +1049,9 @@ void SceneViewPanel::RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot
 
         m_RmbCandidateMenu = false;
 
-        if (HandleMeasurePointerUp(controller, viewport, slot, ev))
-            return;
         if (m_MeasureToolEnabled && ev.Button == 0)
         {
-            ev.Stop();
+            DispatchMeasurePointer(controller, viewport, Editor::SceneTools::PointerPhase::Up, ev);
             return;
         }
 
@@ -1124,8 +1133,11 @@ void SceneViewPanel::RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot
                 ruler->SetCursor(localX, localY, true);
         }
 
-        if (HandleMeasurePointerMove(controller, viewport, slot, ev))
+        if (m_MeasureToolEnabled && IsMeasureDragging(controller))
+        {
+            DispatchMeasurePointer(controller, viewport, Editor::SceneTools::PointerPhase::Move, ev);
             return;
+        }
 
         if (ApplyImmediatePan(controller, viewport, ev))
             return;
@@ -1179,15 +1191,9 @@ void SceneViewPanel::RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot
             if (SceneViewRulerOverlay* ruler = m_RulerOverlays[slotIndex])
                 ruler->SetCursor(0.0f, 0.0f, false);
         }
-        if (m_MeasureDragActive && m_MeasureDragSlot == slot)
-        {
-            if (slotIndex < m_MeasureOverlays.size())
-            {
-                if (SceneViewMeasureOverlay* measure = m_MeasureOverlays[slotIndex])
-                    measure->EndMeasure();
-            }
-            m_MeasureDragActive = false;
-        }
+        SceneViewController* controller = GetSceneControllerForSlot(slot);
+        if (Editor::SceneTools::MeasureTool* tool = controller ? controller->GetMeasureTool() : nullptr)
+            tool->AbandonDrag();
     });
     viewport->RegisterEventHandler(kEventKeyDown, [this, slot](UIEvent& ev) {
         if (Editor::MatchesCatalogShortcut("Scene View", "Pan Hold (2D)", ev.Key, ev.Mods))
@@ -1215,6 +1221,8 @@ void SceneViewPanel::RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot
         keyEv.alt = (ev.Mods & Input::kModAlt) != 0;
         keyEv.ctrl = (ev.Mods & Input::kModControl) != 0;
         keyEv.shift = (ev.Mods & Input::kModShift) != 0;
+        keyEv.primary = Input::IsPrimaryShortcutModifier(static_cast<int>(ev.Mods));
+        keyEv.mods = static_cast<std::uint32_t>(ev.Mods);
         controller->GetToolContext().HandleKeyEvent(keyEv);
     });
     viewport->RegisterEventHandler(kEventScroll, [this, viewport, slot](UIEvent& ev) {
@@ -1246,7 +1254,8 @@ void SceneViewPanel::RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot
 
         if (controller->Is2DMode() && Editor::SceneViewSettings::Get().GetPixelPerfect2D())
         {
-            int step = (dy > 0.0f) ? 1 : -1;
+            // Same sign as the 2D dolly below: a positive delta zooms out.
+            int step = (dy > 0.0f) ? -1 : 1;
             if (Editor::SceneViewSettings::Get().GetScrollWheelDollyReversed())
                 step = -step;
             controller->ZoomPixelPerfectAtCursor(step, localX, localY, viewW, viewH);
@@ -1351,6 +1360,8 @@ void SceneViewPanel::RegisterAuxViewportEvents(UIElement* viewport, ViewportSlot
         keyEv.alt = (ev.Mods & Input::kModAlt) != 0;
         keyEv.ctrl = (ev.Mods & Input::kModControl) != 0;
         keyEv.shift = (ev.Mods & Input::kModShift) != 0;
+        keyEv.primary = Input::IsPrimaryShortcutModifier(static_cast<int>(ev.Mods));
+        keyEv.mods = static_cast<std::uint32_t>(ev.Mods);
         controller->GetToolContext().HandleKeyEvent(keyEv);
     });
 }

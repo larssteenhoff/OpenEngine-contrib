@@ -50,10 +50,10 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 
 #include "CBTTerrain/CBTLayout.h"      // kMaxDecodeSubdiv
 #include "CBTTerrain/CBTSphereRoots.h" // CBTSphereRoot (exact integer root corners)
+#include "Platform/Environment.h"
 
 // The error-free transforms below are correct ONLY without FP contraction (see header
 // note). MSVC: float_control(push) saves the includer's fp_contract state so this
@@ -86,17 +86,14 @@ inline constexpr uint32_t kDeepDecodeSubdiv = 50u;
 inline constexpr float kSectorSizeMeters = 1024.0f;
 
 // The env-gated cap the arc's probes exercise: kMaxDecodeSubdiv (the shipped 40) unless
-// GE_CBT_DEEP_DECODE is set truthy. Read per call, uncached, so tests can toggle the
+// the GE_CBT_DEEP_DECODE environment switch is on. Read per call, uncached, so tests can toggle the
 // flag in-process. The LIVE pipeline does not read this: CBTUpdateSystem reads the same
 // env var once (static-cached) and feeds ONE bool into both CBTClassifyDesc::DeepDecode
 // and ResolveTerrainMaxDepth (TerrainProvisioning SubdivCapFor — the S2b flag->cap
 // coupling), so storage mode and depth cap cannot desync mid-session.
 inline uint32_t SubdivCap()
 {
-    if (const char* v = std::getenv("GE_CBT_DEEP_DECODE"))
-        if (v[0] != '\0' && v[0] != '0')
-            return kDeepDecodeSubdiv;
-    return kMaxDecodeSubdiv;
+    return Platform::EnvironmentSwitchEnabled("GE_CBT_DEEP_DECODE", false) ? kDeepDecodeSubdiv : kMaxDecodeSubdiv;
 }
 
 // ---------------------------------------------------------------------------

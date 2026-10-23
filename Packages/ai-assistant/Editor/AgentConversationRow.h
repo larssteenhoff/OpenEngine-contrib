@@ -68,7 +68,7 @@ public:
 
 private:
     void BuildReplyActions(const std::vector<std::string>& actionIds);
-    void BuildMarkupChips(const std::vector<MarkupChip>& chips);
+    void BuildChips(const std::vector<MarkupChip>& markups, const std::vector<std::string>& files);
     void ShowStatus(const AgentConversationRowModel& model);
     void ShowCalls(const std::vector<AgentCallRowModel>& calls);
 
@@ -96,6 +96,7 @@ private:
     /// One label per part of the status ("5 undo steps", "1 failed"), so the footer wraps
     /// between parts and never inside one.
     UIElement* m_Status = nullptr;
+    TextArea* m_StatusText = nullptr;
     UIElement* m_Actions = nullptr;
     bool m_ReplyActionsBuilt = false;
     /// The chips of the mark-ups a user message names; hidden without any.

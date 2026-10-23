@@ -1,5 +1,5 @@
 /* --prompt_text_scale: the conversation's text size over its 14 px default. Each conversation
-   font size is its 1.0 size times this; the input and the status line keep their sizes.
+   font size is its 1.0 size times this; the input follows it and the status line keeps its size.
    PromptPanel::ApplyTextSize sets it on the panel from the size slider's value; without it
    every use falls back to 1. */
 .prompt-panel-root {
@@ -14,6 +14,17 @@
 	background-color: var(--ui_color_bg_tabbar);
 }
 
+/* The bar under the panel's tab and, when open, the settings row under it: one block in the
+   active tab's color, rounded at its bottom only, wherever that bottom is. */
+.prompt-panel-header {
+	display: flex;
+	flex-direction: column;
+	flex-shrink: 0;
+	background-color: var(--ui_color_bg_panel);
+	border-bottom-left-radius: 6px;
+	border-bottom-right-radius: 6px;
+}
+
 .prompt-panel-toolbar {
 	display: flex;
 	flex-direction: row;
@@ -22,8 +33,6 @@
 	padding: 5px 8px;
 	min-height: 34px;
 	flex-shrink: 0;
-	background-color: var(--ui_color_bg_grid);
-	border-bottom: 1px solid var(--ui_color_border);
 	box-sizing: border-box;
 	flex-wrap: wrap;
 }
@@ -652,11 +661,20 @@
 }
 
 .agent-row-status-part {
-	flex-shrink: 1;
+	width: 100%;
 	min-width: 0;
+	min-height: 0;
+	flex-shrink: 1;
+	padding: 0;
+	border-width: 0;
+	background-color: transparent;
+	box-shadow: none;
+	outline: none;
+	font-family: var(--ui_font_family);
 	font-size: calc(12px * var(--prompt_text_scale, 1));
 	color: var(--ui_color_text_secondary);
 	white-space: normal;
+	overflow-wrap: break-word;
 }
 
 /* A narrow panel (AgentConversationRow::SetCallsStacked): the footer stacks, the status on
@@ -700,6 +718,17 @@
 	flex-wrap: wrap;
 	gap: 6px;
 	margin: 4px 12px 4px 12px;
+}
+
+/* A file sent with the message: its name, inset like the mark-up chips beside it. */
+.agent-row-file-chip {
+	font-size: 12px;
+	color: var(--ui_color_text_secondary);
+	padding: 2px 8px 2px 8px;
+	border-width: 1px;
+	border-color: var(--ui_color_border);
+	border-radius: 4px;
+	white-space: nowrap;
 }
 
 .agent-row-retried {
@@ -779,6 +808,101 @@
 	min-height: 0;
 	overflow: hidden;
 	background-color: transparent;
+}
+
+/* The files picked for the next prompt, at the foot of the history above the splitter: one
+   item each, an image's with its thumbnail. Hidden while there is none. */
+.prompt-panel-files {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	flex-shrink: 0;
+	min-width: 0;
+	min-height: 48px;
+	margin: 4px 8px 4px 8px;
+	padding: 8px;
+	border-radius: 6px;
+	background-color: var(--ui_color_bg_tabbar);
+}
+
+.prompt-panel-file-items {
+	display: flex;
+	flex-direction: row;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	flex-grow: 1;
+	min-width: 0;
+}
+
+.prompt-panel-file-item {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	padding: 4px 6px 4px 4px;
+	border-radius: 6px;
+	background-color: var(--ui_color_bg_panel);
+}
+
+/* A text file's item has no thumbnail: its name sits as far from the left edge as the x's icon
+   from the right (the item's 6px padding plus the 4px around the x's 16px icon). */
+.prompt-panel-file-item-text {
+	padding-left: 10px;
+}
+
+/* A file still being read: its name, dimmed, until the read lands. */
+.prompt-panel-file-item-loading {
+	opacity: 0.6;
+}
+
+.prompt-panel-file-preview {
+	width: 40px;
+	height: 40px;
+	min-width: 40px;
+	flex-shrink: 0;
+	background-size: contain;
+	background-repeat: no-repeat;
+	background-position: center;
+	border-radius: 4px;
+}
+
+.prompt-panel-file-label {
+	flex-shrink: 1;
+	min-width: 0;
+	max-width: 180px;
+	font-size: 12px;
+	color: var(--ui_color_text_primary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.prompt-panel-file-remove {
+	margin-left: 2px;
+}
+
+/* A drag of files over the input row or the file strip. */
+.prompt-panel-drop-active {
+	background-color: var(--ui_color_bg_selected);
+}
+
+/* The + that picks files for the prompt, left of the field in a wide panel or immediately
+   before the mode control below a narrow field. It also shows the file-drop feedback. */
+.prompt-panel-attach-button {
+	align-self: center;
+	flex-shrink: 0;
+	margin: 0 0 0 6px;
+}
+
+.prompt-panel-drop-allowed-icon {
+	background-image-tint: var(--ui_color_accent_green);
+}
+
+.prompt-panel-drop-invalid-icon {
+	background-image: url("ai-assistant:Editor/Icons/prohibited.svg");
+	background-image-tint: var(--ui_color_axis_x);
 }
 
 .prompt-panel-input-row {
@@ -969,7 +1093,7 @@
 	align-items: center;
 	min-width: 0;
 	font-family: var(--ui_font_script);
-	font-size: 14px;
+	font-size: calc(16px * var(--prompt_text_scale, 1));
 	line-height: var(--script_line_height, 1.0);
 	/* Instructions: the dimmest text tier that reads as text (6.8:1 on the plate),
 	   still below the typed text. */
@@ -988,7 +1112,7 @@
 .prompt-panel-input {
 	text-align: left;
 	font-family: var(--ui_font_script);
-	font-size: 16px;
+	font-size: calc(16px * var(--prompt_text_scale, 1));
 	line-height: var(--script_line_height, 1.0);
 	padding: 10px 12px;
 	min-height: 100%;
@@ -1112,7 +1236,6 @@
 	gap: 6px;
 	padding: 8px;
 	flex-shrink: 0;
-	background-color: var(--ui_color_bg_panel);
 }
 
 .prompt-panel-input-task {

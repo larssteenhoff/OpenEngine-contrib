@@ -137,8 +137,9 @@ TEST(HotReloadPipelineTestHooks, ServerSuccessButNoPayloadFailsPipeline)
 
 TEST(HotReloadPipelineTestHooks, ServerConnectFailsTriggersPipelineFailure) {
 #ifdef _WIN32
-    std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_Pipeline_Seam_ConnFail";
-    std::error_code ec; std::filesystem::create_directories(ws, ec);
+    const TestUtils::ScopedTempDir workspace(TestUtils::MakeUniqueTempDirectory("GE_Pipeline_Seam_ConnFail"));
+    std::filesystem::path ws = workspace.Path();
+    std::error_code ec;
     auto sourcePath = ws / "Foo.cs";
     {
         std::ofstream f(sourcePath);
@@ -492,9 +493,8 @@ void ConfigureMockStages(HotReloadPipeline& pipeline, std::shared_ptr<RecordingC
 }
 
 std::filesystem::path MakeSupersedeWorkspace(const char* name) {
-    auto ws = std::filesystem::temp_directory_path() / name;
+    auto ws = TestUtils::MakeUniqueTempDirectory(name);
     std::error_code ec;
-    std::filesystem::remove_all(ws, ec);
     std::filesystem::create_directories(ws, ec);
     return ws;
 }

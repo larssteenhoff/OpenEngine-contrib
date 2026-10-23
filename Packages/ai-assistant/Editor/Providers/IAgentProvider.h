@@ -46,6 +46,10 @@ struct AgentTurnRequest
     std::span<const ConversationMessage> History;
     /// The user's new message.
     std::string UserText;
+    /// The images picked with the new message, sent with it as images (its text files are in
+    /// UserText). Only the new message's: earlier messages resend their text alone. Must outlive
+    /// RunTurn().
+    std::span<const PromptFile> Images;
     /// The model to answer with, as named in settings; empty selects the provider's default.
     std::string Model;
     /// The reasoning effort to answer with, one of the levels the provider offers

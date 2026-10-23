@@ -175,23 +175,6 @@ void SetEditorBackgroundPath(UIElement& element, std::string_view path)
     element.MarkDirty(UIElement::VisualDirty);
 }
 
-std::array<float, 3> MeasurePointFromPointer(SceneViewController* controller,
-                                             const Editor::SceneTools::ScenePointerEvent& ev)
-{
-    std::array<float, 3> out{ev.ray.origin.x, ev.ray.origin.y, ev.ray.origin.z};
-    if (!controller || controller->Is2DMode() || controller->IsOrthographic())
-        return out;
-
-    const auto pose = controller->GetCameraPose();
-    const Mathematics::Vector3 planePoint = ev.cameraPos + ev.cameraForward * pose.Distance;
-
-    float t = 0.0f;
-    Mathematics::Vector3 hit;
-    if (Mathematics::IntersectRayPlane(ev.ray, planePoint, ev.cameraForward, t, hit))
-        out = {hit.x, hit.y, hit.z};
-    return out;
-}
-
 static std::string FormatHoverHighlightPillText(ECS::World& world,
                                                  ECS::EntityHandle root,
                                                  const std::vector<ECS::EntityHandle>& descendants)
@@ -606,8 +589,6 @@ UIElement* SceneViewPanel::GetFpsLabelElement() const
 
 Engine::Renderer::RenderServices* SceneViewPanel::ResolveRenderServices() const
 {
-    if (m_RenderServices)
-        return m_RenderServices;
     if (m_Controller)
     {
         if (Engine::Renderer::RenderServices* rs = m_Controller->GetRenderServices())
@@ -1061,20 +1042,7 @@ void SceneViewPanel::RegisterViewportEvents()
 {
     // should only be called after m_Viewport is bound to UI
     RegisterQuadSplitHandleEvents();
-
-    if (!m_AuxViewportEventsBound)
-    {
-        bool boundAnyAux = false;
-        for (size_t i = 1; i < m_ViewportSlots.size(); ++i)
-        {
-            if (m_ViewportSlots[i])
-            {
-                RegisterAuxViewportEvents(m_ViewportSlots[i], static_cast<ViewportSlot>(i));
-                boundAnyAux = true;
-            }
-        }
-        m_AuxViewportEventsBound = boundAnyAux;
-    }
+    RegisterAuxViewportSlotEvents();
 
     if (m_ViewportEventsBound)
     {
@@ -1089,6 +1057,46 @@ void SceneViewPanel::RegisterViewportEvents()
     m_ViewportEventsBound = true;
 
     UIElement* overlayHost = GetViewportForOverlay();
+    CreateFpsAndCompileStatusLabels(overlayHost);
+    CreateHoverHighlightLabel(overlayHost);
+
+    if (!m_ToolStatusLabel && overlayHost)
+    {
+        // Bottom edge, clear of the FPS counter's default corner: the active
+        // tool's one-line status, hidden while it has nothing to say.
+        auto statusLabel = std::make_unique<Label>();
+        statusLabel->SetId("SceneViewToolStatusLabel");
+        statusLabel->AddClass("scene-view-tool-status");
+        statusLabel->AddClass("hidden");
+        statusLabel->SetText("");
+        m_ToolStatusLabel = statusLabel.get();
+        overlayHost->AddChild(std::move(statusLabel));
+    }
+
+    SyncViewportOverlays();
+
+    RegisterPerspectiveViewportHandlers();
+}
+
+void SceneViewPanel::RegisterAuxViewportSlotEvents()
+{
+    if (!m_AuxViewportEventsBound)
+    {
+        bool boundAnyAux = false;
+        for (size_t i = 1; i < m_ViewportSlots.size(); ++i)
+        {
+            if (m_ViewportSlots[i])
+            {
+                RegisterAuxViewportEvents(m_ViewportSlots[i], static_cast<ViewportSlot>(i));
+                boundAnyAux = true;
+            }
+        }
+        m_AuxViewportEventsBound = boundAnyAux;
+    }
+}
+
+void SceneViewPanel::CreateFpsAndCompileStatusLabels(UIElement* overlayHost)
+{
     if (!m_FpsLabel && overlayHost)
     {
         auto fpsLabel = std::make_unique<Label>();
@@ -1151,119 +1159,129 @@ void SceneViewPanel::RegisterViewportEvents()
 
         // Drag-to-reposition with LMB. Label lives inside the active viewport, so the
         // final Left/Top values are viewport-local.
-        m_FpsLabel->RegisterEventHandler(kEventMouseDown, [this](UIEvent& e) {
-            if (e.Button == 1)
-            {
-                m_FpsContextMenuArmed = true;
-                if (m_FpsLabel)
-                    e.Capture(m_FpsLabel);
-                e.Stop();
-                return;
-            }
-            if (e.Button != 0) return;
-            if (!m_FpsLabel) return;
-            m_FpsLabelDrag.pressed     = true;
-            m_FpsLabelDrag.active      = false;
-            m_FpsLabelDrag.startMouseX = e.X;
-            m_FpsLabelDrag.startMouseY = e.Y;
-            m_FpsLabelDrag.startLabelX = m_FpsLabel->GetLayoutX();
-            m_FpsLabelDrag.startLabelY = m_FpsLabel->GetLayoutY();
+        m_FpsLabel->RegisterEventHandler(kEventMouseDown, [this](UIEvent& e) { OnFpsLabelMouseDown(e); });
+        m_FpsLabel->RegisterEventHandler(kEventMouseMove, [this](UIEvent& e) { OnFpsLabelMouseMove(e); });
+        m_FpsLabel->RegisterEventHandler(kEventMouseUp, [this](UIEvent& e) { OnFpsLabelMouseUp(e); });
+    }
+}
+
+void SceneViewPanel::OnFpsLabelMouseDown(UIEvent& e)
+{
+    if (e.Button == 1)
+    {
+        m_FpsContextMenuArmed = true;
+        if (m_FpsLabel)
             e.Capture(m_FpsLabel);
-            e.Stop();
-        });
+        e.Stop();
+        return;
+    }
+    if (e.Button != 0) return;
+    if (!m_FpsLabel) return;
+    m_FpsLabelDrag.pressed     = true;
+    m_FpsLabelDrag.active      = false;
+    m_FpsLabelDrag.startMouseX = e.X;
+    m_FpsLabelDrag.startMouseY = e.Y;
+    m_FpsLabelDrag.startLabelX = m_FpsLabel->GetLayoutX();
+    m_FpsLabelDrag.startLabelY = m_FpsLabel->GetLayoutY();
+    e.Capture(m_FpsLabel);
+    e.Stop();
+}
 
-        m_FpsLabel->RegisterEventHandler(kEventMouseMove, [this](UIEvent& e) {
-            if (m_FpsContextMenuArmed)
-            {
-                e.Stop();
-                return;
-            }
-            if (!m_FpsLabelDrag.pressed) return;
-            if (!m_FpsLabel) return;
-            UIElement* fpsViewport = m_FpsLabel->GetParent();
-            if (!fpsViewport) return;
+void SceneViewPanel::OnFpsLabelMouseMove(UIEvent& e)
+{
+    if (m_FpsContextMenuArmed)
+    {
+        e.Stop();
+        return;
+    }
+    if (!m_FpsLabelDrag.pressed) return;
+    if (!m_FpsLabel) return;
+    UIElement* fpsViewport = m_FpsLabel->GetParent();
+    if (!fpsViewport) return;
 
-            const float dx = e.X - m_FpsLabelDrag.startMouseX;
-            const float dy = e.Y - m_FpsLabelDrag.startMouseY;
+    const float dx = e.X - m_FpsLabelDrag.startMouseX;
+    const float dy = e.Y - m_FpsLabelDrag.startMouseY;
 
-            if (!m_FpsLabelDrag.active)
-            {
-                constexpr float kDragThresholdPx = 5.0f;
-                if ((dx * dx + dy * dy) < (kDragThresholdPx * kDragThresholdPx))
-                    return;
-                m_FpsLabelDrag.active = true;
-            }
-
-            // Convert absolute drag delta into viewport-local absolute
-            // position. The label anchors via Left/Top once dragging starts,
-            // so clear the default Right anchor.
-            float newX = (m_FpsLabelDrag.startLabelX + dx) - fpsViewport->GetLayoutX();
-            float newY = (m_FpsLabelDrag.startLabelY + dy) - fpsViewport->GetLayoutY();
-
-            const float vw  = fpsViewport->GetLayoutWidth();
-            const float vh  = fpsViewport->GetLayoutHeight();
-            const float lw  = m_FpsLabel->GetLayoutWidth();
-            const float lh  = m_FpsLabel->GetLayoutHeight();
-            const float maxX = std::max(0.0f, vw - lw);
-            const float maxY = std::max(0.0f, vh - lh);
-            newX = std::clamp(newX, 0.0f, maxX);
-            newY = std::clamp(newY, 0.0f, maxY);
-
-            {
-                auto& ov = m_FpsLabel->Overrides();
-                ov.Reset(Style::PositionRight);
-                ov.Reset(Style::PositionBottom);
-                ov.Reset(Style::MarginLeft);
-                ov.Set(Style::Position,     PositionType::Absolute)
-                  .Set(Style::PositionLeft, StyleLength::Px(newX))
-                  .Set(Style::PositionTop,  StyleLength::Px(newY));
-            }
-            /* Same as SceneToolOverlay drag: captured-move fast path can skip Yoga without this. */
-            m_FpsLabel->RequestRelayout();
-            e.Stop();
-        });
-
-        m_FpsLabel->RegisterEventHandler(kEventMouseUp, [this](UIEvent& e) {
-            if (e.Button == 1)
-            {
-                const bool shouldOpen = m_FpsContextMenuArmed &&
-                                        m_FpsLabel &&
-                                        m_FpsLabel->ContainsPoint(e.X, e.Y);
-                m_FpsContextMenuArmed = false;
-                if (shouldOpen)
-                    ShowFpsContextMenu(e.X, e.Y);
-                e.Stop();
-                return;
-            }
-            if (e.Button != 0) return;
-            const bool wasDragActive = m_FpsLabelDrag.active;
-            m_FpsLabelDrag.pressed = false;
-            m_FpsLabelDrag.active  = false;
-
-            if (!wasDragActive || !m_FpsLabel)
-                return;
-            UIElement* fpsViewport = m_FpsLabel->GetParent();
-            if (!fpsViewport)
-                return;
-
-            e.Stop();
-
-            const float localX = m_FpsLabel->GetLayoutX() - fpsViewport->GetLayoutX();
-            const float localY = m_FpsLabel->GetLayoutY() - fpsViewport->GetLayoutY();
-
-            // User has now manually positioned the label — stop auto-shifting
-            // it to avoid the rotation gizmo on subsequent frames.
-            m_FpsUsingDefaultPosition = false;
-
-            Editor::SettingsStore prefs = Editor::OpenEditorPreferences();
-            std::string err;
-            (void)prefs.Load(&err);
-            prefs.SetDouble("sceneView.fpsLabel.x", static_cast<double>(localX));
-            prefs.SetDouble("sceneView.fpsLabel.y", static_cast<double>(localY));
-            (void)prefs.Save(&err);
-        });
+    if (!m_FpsLabelDrag.active)
+    {
+        constexpr float kDragThresholdPx = 5.0f;
+        if ((dx * dx + dy * dy) < (kDragThresholdPx * kDragThresholdPx))
+            return;
+        m_FpsLabelDrag.active = true;
     }
 
+    // Convert absolute drag delta into viewport-local absolute
+    // position. The label anchors via Left/Top once dragging starts,
+    // so clear the default Right anchor.
+    float newX = (m_FpsLabelDrag.startLabelX + dx) - fpsViewport->GetLayoutX();
+    float newY = (m_FpsLabelDrag.startLabelY + dy) - fpsViewport->GetLayoutY();
+
+    const float vw  = fpsViewport->GetLayoutWidth();
+    const float vh  = fpsViewport->GetLayoutHeight();
+    const float lw  = m_FpsLabel->GetLayoutWidth();
+    const float lh  = m_FpsLabel->GetLayoutHeight();
+    const float maxX = std::max(0.0f, vw - lw);
+    const float maxY = std::max(0.0f, vh - lh);
+    newX = std::clamp(newX, 0.0f, maxX);
+    newY = std::clamp(newY, 0.0f, maxY);
+
+    {
+        auto& ov = m_FpsLabel->Overrides();
+        ov.Reset(Style::PositionRight);
+        ov.Reset(Style::PositionBottom);
+        ov.Reset(Style::MarginLeft);
+        ov.Set(Style::Position,     PositionType::Absolute)
+          .Set(Style::PositionLeft, StyleLength::Px(newX))
+          .Set(Style::PositionTop,  StyleLength::Px(newY));
+    }
+    /* Same as SceneToolOverlay drag: captured-move fast path can skip Yoga without this. */
+    m_FpsLabel->RequestRelayout();
+    e.Stop();
+}
+
+void SceneViewPanel::OnFpsLabelMouseUp(UIEvent& e)
+{
+    if (e.Button == 1)
+    {
+        const bool shouldOpen = m_FpsContextMenuArmed &&
+                                m_FpsLabel &&
+                                m_FpsLabel->ContainsPoint(e.X, e.Y);
+        m_FpsContextMenuArmed = false;
+        if (shouldOpen)
+            ShowFpsContextMenu(e.X, e.Y);
+        e.Stop();
+        return;
+    }
+    if (e.Button != 0) return;
+    const bool wasDragActive = m_FpsLabelDrag.active;
+    m_FpsLabelDrag.pressed = false;
+    m_FpsLabelDrag.active  = false;
+
+    if (!wasDragActive || !m_FpsLabel)
+        return;
+    UIElement* fpsViewport = m_FpsLabel->GetParent();
+    if (!fpsViewport)
+        return;
+
+    e.Stop();
+
+    const float localX = m_FpsLabel->GetLayoutX() - fpsViewport->GetLayoutX();
+    const float localY = m_FpsLabel->GetLayoutY() - fpsViewport->GetLayoutY();
+
+    // User has now manually positioned the label — stop auto-shifting
+    // it to avoid the rotation gizmo on subsequent frames.
+    m_FpsUsingDefaultPosition = false;
+
+    Editor::SettingsStore prefs = Editor::OpenEditorPreferences();
+    std::string err;
+    (void)prefs.Load(&err);
+    prefs.SetDouble("sceneView.fpsLabel.x", static_cast<double>(localX));
+    prefs.SetDouble("sceneView.fpsLabel.y", static_cast<double>(localY));
+    (void)prefs.Save(&err);
+}
+
+void SceneViewPanel::CreateHoverHighlightLabel(UIElement* overlayHost)
+{
     if (!m_HoverHighlightLabel && overlayHost)
     {
         auto hoverLabel = std::make_unique<Label>();
@@ -1278,9 +1296,10 @@ void SceneViewPanel::RegisterViewportEvents()
         m_HoverHighlightLabel = hoverLabel.get();
         overlayHost->AddChild(std::move(hoverLabel));
     }
+}
 
-    SyncViewportOverlays();
-
+void SceneViewPanel::RegisterPerspectiveViewportHandlers()
+{
     // Mouse down: start dragging and capture pointer
     // Editor camera controls:
     // - RMB = FPS look
@@ -1288,303 +1307,83 @@ void SceneViewPanel::RegisterViewportEvents()
     // - Alt + LMB = orbit
     // - Alt + Ctrl/Cmd + LMB = pan
     // - Alt + RMB = dolly (zoom)
-    m_Viewport->RegisterEventHandler(kEventMouseDown, [this](UIEvent& ev){
-        SetHoveredViewportSlot(ViewportSlot::Perspective);
-        SetActiveViewportSlot(ViewportSlot::Perspective);
-        FocusViewport(m_Viewport);
-        m_Dragging = true;
-        m_DragButton = ev.Button; // 0=LMB, 1=RMB, 2=MMB
-        BeginCameraDragTracking(ev.X, ev.Y);
-        ev.Capture(m_Viewport);
-
-        const bool alt = (ev.Mods & Input::kModAlt) != 0;
-        const bool primaryMod = Input::IsPrimaryShortcutModifier(ev.Mods);
-
-        // Detect camera modes (Ctrl on Windows/Linux, Cmd on Mac).
-        // 2D and fixed-axis views use pan/zoom controls instead of tumble/orbit.
-        const bool fixedControls = m_Controller && m_Controller->UsesFixedViewPanControls();
-        const bool spacePan = (ev.Button == 0 && m_SpaceHeld);
-        if (spacePan)
-            m_SpacePanDragStarted = true;
-        const bool rmbPanFixed = (ev.Button == 1 && fixedControls && !alt);
-        const bool mmbPanFixed = (ev.Button == 2 && fixedControls && !alt);
-        m_IsAltOrbiting = (ev.Button == 0 && alt && !primaryMod && !fixedControls); // Alt + LMB = orbit (free 3D views)
-        m_IsPanning = (ev.Button == 0 && alt && primaryMod)                // Alt + Ctrl/Cmd + LMB = pan
-                    || (ev.Button == 0 && alt && !primaryMod && fixedControls)
-                    || spacePan                                             // Space + LMB = pan
-                    || rmbPanFixed
-                    || mmbPanFixed;
-        m_IsDollying = (ev.Button == 1 && alt);                            // Alt + RMB = dolly
-
-        // RMB context menu (click-without-drag) - only if not in a camera mode
-        if (ev.Button == 1 && !m_IsDollying && !m_IsPanning)
-        {
-            m_RmbCandidateMenu = true;
-            m_RmbDownX = ev.X;
-            m_RmbDownY = ev.Y;
-        }
-        else
-        {
-            m_RmbCandidateMenu = false;
-        }
-
-        // Forward LMB presses into the SceneToolContext as pointer-down events
-        // (but not if we're in a camera control mode)
-        m_LmbDragIsToolMode = (ev.Button == 0 && !m_IsAltOrbiting && !m_IsPanning);
-        if (m_LmbDragIsToolMode && HandleMeasurePointerDown(m_Controller, m_Viewport, ViewportSlot::Perspective, ev))
-            return;
-        if (m_LmbDragIsToolMode && m_MeasureToolEnabled)
-        {
-            ev.Stop();
-            return;
-        }
-        if (m_LmbDragIsToolMode && m_Controller)
-        {
-            using namespace Editor::SceneTools;
-            ScenePointerEvent toolEv{};
-            if (m_Viewport)
-            {
-                const float localX = ev.X - m_Viewport->GetLayoutX();
-                const float localY = ev.Y - m_Viewport->GetLayoutY();
-                toolEv.viewX = localX;
-                toolEv.viewY = localY;
-
-                const float viewW = m_Viewport->GetLayoutWidth();
-                const float viewH = m_Viewport->GetLayoutHeight();
-                toolEv.viewW = viewW;
-                toolEv.viewH = viewH;
-                toolEv.ray = m_Controller->MakeGizmoRay(localX, localY, viewW, viewH);
-                m_Controller->PopulatePointerCameraState(toolEv);
-            }
-
-            toolEv.button = PointerButton::Left;
-            toolEv.phase  = PointerPhase::Down;
-            Editor::SceneTools::PopulateScenePointerMods(toolEv, ev.Mods);
-
-            m_Controller->GetToolContext().HandlePointerEvent(toolEv);
-        }
-    });
+    m_Viewport->RegisterEventHandler(kEventMouseDown, [this](UIEvent& ev) { OnViewportMouseDown(ev); });
 
     // Mouse up: stop dragging when releasing the active button
-    m_Viewport->RegisterEventHandler(kEventMouseUp, [this](UIEvent& ev){
-        const bool showSceneContextMenu = (ev.Button == 1 && m_RmbCandidateMenu && m_Dragging && m_DragButton == 1);
-
-        if (m_Dragging && ev.Button == m_DragButton) {
-            m_Dragging = false;
-            m_DragButton = -1;
-            m_IsAltOrbiting = false;
-            m_IsPanning = false;
-            m_IsDollying = false;
-            EndCameraDragTracking();
-        }
-
-        if (showSceneContextMenu)
-        {
-            if (m_Window)
-            {
-                if (!m_ContextMenu)
-                    m_ContextMenu = CreateContextMenu();
-
-                if (m_ContextMenu)
-                {
-                    const uint32_t mask = static_cast<uint32_t>(Editor::EditorContextMenuTarget::SceneView);
-                    auto scriptItems = Editor::ScriptMenuRegistry::Get().GetContextItems(mask);
-
-                    int scriptEntryCount = 0;
-                    for (const auto& si : scriptItems)
-                    {
-                        if (si.commandId == 0 || si.path.empty())
-                            continue;
-                        ++scriptEntryCount;
-                    }
-                    // Post-process toggles live on the toolbar sun control only; viewport RMB is script hooks only.
-                    if (scriptEntryCount > 0)
-                    {
-                        // Always (re)install the handler: m_ContextMenu is shared with the
-                        // toolbar icon-toggle menu, which replaces the handler when opened.
-                        m_ContextMenu->SetCommandHandler([](uint32_t cmd) {
-                            uint64_t dom = 0;
-                            std::string method;
-                            if (Editor::ScriptMenuRegistry::Get().TryResolveCommand(cmd, dom, method) && !method.empty())
-                            {
-                                try
-                                {
-                                    auto& clr = EngineCore::GetInstance().GetScriptManager().GetCLRHost();
-                                    int32_t out = 0;
-                                    (void)clr.InvokeInDomain(dom, method.c_str(), (uint32_t)method.size(), &out);
-                                }
-                                catch (...)
-                                {
-                                }
-                            }
-                        });
-
-                        m_ContextMenu->Clear();
-                        ContextMenuBuilder builder;
-                        for (const auto& si : scriptItems)
-                        {
-                            if (si.commandId == 0 || si.path.empty())
-                                continue;
-                            builder.AddItem(si.path, si.commandId, MenuItemFlag_None, si.priority,
-                                            EditorIcons::kScript);
-                        }
-                        builder.Build(m_ContextMenu.get());
-                        m_ContextMenu->Show(m_Window, (int)ev.X, (int)ev.Y);
-                        ev.Stop();
-                    }
-                }
-            }
-        }
-
-        m_RmbCandidateMenu = false;
-
-        if (HandleMeasurePointerUp(m_Controller, m_Viewport, ViewportSlot::Perspective, ev))
-            return;
-        if (m_MeasureToolEnabled && ev.Button == 0)
-        {
-            ev.Stop();
-            return;
-        }
-
-        // Forward LMB releases into the SceneToolContext as pointer-up events.
-        if (ev.Button == 0 && m_Controller)
-        {
-            using namespace Editor::SceneTools;
-            ScenePointerEvent toolEv{};
-            if (m_Viewport)
-            {
-                const float localX = ev.X - m_Viewport->GetLayoutX();
-                const float localY = ev.Y - m_Viewport->GetLayoutY();
-                toolEv.viewX = localX;
-                toolEv.viewY = localY;
-
-                const float viewW = m_Viewport->GetLayoutWidth();
-                const float viewH = m_Viewport->GetLayoutHeight();
-                toolEv.viewW = viewW;
-                toolEv.viewH = viewH;
-                toolEv.ray = m_Controller->MakeGizmoRay(localX, localY, viewW, viewH);
-                m_Controller->PopulatePointerCameraState(toolEv);
-            }
-
-            toolEv.button = PointerButton::Left;
-            toolEv.phase  = PointerPhase::Up;
-            Editor::SceneTools::PopulateScenePointerMods(toolEv, ev.Mods);
-
-            m_Controller->GetToolContext().HandlePointerEvent(toolEv);
-        }
-    });
+    m_Viewport->RegisterEventHandler(kEventMouseUp, [this](UIEvent& ev) { OnViewportMouseUp(ev); });
 
     // Mouse move: while dragging, update camera mode flags from current modifiers and
     // while dragging with LMB, forward motion as pointer-move events.
-    m_Viewport->RegisterEventHandler(kEventMouseMove, [this](UIEvent& ev){
+    m_Viewport->RegisterEventHandler(kEventMouseMove, [this](UIEvent& ev) { OnViewportMouseMove(ev); });
+
+    m_Viewport->RegisterEventHandler(kEventMouseEnter, [this](UIEvent&) {
         SetHoveredViewportSlot(ViewportSlot::Perspective);
-        if (m_Dragging)
-            SetActiveViewportSlot(ViewportSlot::Perspective);
-        if (m_Viewport)
-        {
-            m_SceneViewportPointerInside = true;
-            m_SceneViewportPointerLocalX = ev.X - m_Viewport->GetLayoutX();
-            m_SceneViewportPointerLocalY = ev.Y - m_Viewport->GetLayoutY();
-        }
+    });
 
-        if (!m_Controller)
-            return;
+    // Clear the ruler overlay's cursor indicator when the mouse leaves the
+    // viewport so the lines don't get stuck at the last hover position.
+    m_Viewport->RegisterEventHandler(kEventMouseLeave, [this](UIEvent& /*ev*/) { OnViewportMouseLeave(); });
 
-        // Push cursor position to the ruler overlay so its position indicator
-        // tracks the mouse. The overlay fills the viewport rect, so localX/Y
-        // are pixels from the viewport top-left.
-        SceneViewRulerOverlay* perspectiveRuler =
-            m_RulerOverlays[static_cast<size_t>(ViewportSlot::Perspective)];
-        if (perspectiveRuler && m_Viewport)
-        {
-            const float lx = ev.X - m_Viewport->GetLayoutX();
-            const float ly = ev.Y - m_Viewport->GetLayoutY();
-            perspectiveRuler->SetCursor(lx, ly, true);
-        }
+    // Scroll wheel: dolly Scene View camera in/out when hovering the viewport (when enabled in settings).
+    // Ctrl/Cmd+scroll cycles through pick candidates under the cursor instead of zooming.
+    m_Viewport->RegisterEventHandler(kEventScroll, [this](UIEvent& ev) { OnViewportScroll(ev); });
 
-        // RMB click vs drag detection (context menu only on click-without-drag)
-        if (m_RmbCandidateMenu && m_Dragging && m_DragButton == 1)
-        {
-            const float dx = ev.X - m_RmbDownX;
-            const float dy = ev.Y - m_RmbDownY;
-            const float dist2 = dx * dx + dy * dy;
-            constexpr float kThresholdPx = 4.0f;
-            if (dist2 > (kThresholdPx * kThresholdPx))
-            {
-                m_RmbCandidateMenu = false;
-            }
-        }
+    // Key down/up on the Scene View viewport: route to the active Scene tool as SceneKeyEvent.
+    m_Viewport->RegisterEventHandler(kEventKeyDown, [this](UIEvent& ev) { OnViewportKeyDown(ev); });
+    m_Viewport->RegisterEventHandler(kEventKeyUp, [this](UIEvent& ev) { OnViewportKeyUp(ev); });
+}
 
-        // While dragging, keep Alt-based camera modes (orbit/pan/dolly) in sync with the
-        // *current* modifier state so Alt can be pressed or released after mouse-down.
-        // Exception: if the drag started as a tool interaction (gizmo/marquee), don't let
-        // Alt mid-drag switch to camera mode — the marquee should continue uninterrupted.
-        if (m_Dragging && !m_LmbDragIsToolMode)
-        {
-            const bool alt  = (ev.Mods & Input::kModAlt) != 0;
-            const bool primaryMod = Input::IsPrimaryShortcutModifier(ev.Mods);
+void SceneViewPanel::OnViewportMouseDown(UIEvent& ev)
+{
+    SetHoveredViewportSlot(ViewportSlot::Perspective);
+    SetActiveViewportSlot(ViewportSlot::Perspective);
+    FocusViewport(m_Viewport);
+    m_Dragging = true;
+    m_DragButton = ev.Button; // 0=LMB, 1=RMB, 2=MMB
+    BeginCameraDragTracking(ev.X, ev.Y);
+    ev.Capture(m_Viewport);
 
-            if (m_DragButton == 0)
-            {
-                // LMB drag: Alt toggles orbit/pan depending on primary modifier.
-                const bool fixedControls = m_Controller->UsesFixedViewPanControls();
-                m_IsAltOrbiting = alt && !primaryMod && !fixedControls;        // Alt + LMB (free 3D views)
-                m_IsPanning     = (alt && primaryMod)                         // Alt + Ctrl/Cmd + LMB
-                               || (alt && !primaryMod && fixedControls)
-                               || m_SpaceHeld;                                // Space + LMB
-            }
-            else if (m_DragButton == 1)
-            {
-                // RMB drag: Alt toggles dolly (zoom). In fixed-axis views, plain RMB pans.
-                const bool fixedControls = m_Controller->UsesFixedViewPanControls();
-                m_IsDollying = alt;                     // Alt + RMB
-                m_IsPanning  = !alt && fixedControls;
-            }
-            else if (m_DragButton == 2)
-            {
-                m_IsAltOrbiting = false;
-                m_IsPanning = m_Controller->UsesFixedViewPanControls() && !alt;
-            }
-        }
+    const bool alt = (ev.Mods & Input::kModAlt) != 0;
+    const bool primaryMod = Input::IsPrimaryShortcutModifier(ev.Mods);
 
-        if (HandleMeasurePointerMove(m_Controller, m_Viewport, ViewportSlot::Perspective, ev))
-            return;
+    // Detect camera modes (Ctrl on Windows/Linux, Cmd on Mac).
+    // 2D and fixed-axis views use pan/zoom controls instead of tumble/orbit.
+    const bool fixedControls = m_Controller && m_Controller->UsesFixedViewPanControls();
+    const bool spacePan = (ev.Button == 0 && m_SpaceHeld);
+    if (spacePan)
+        m_SpacePanDragStarted = true;
+    const bool rmbPanFixed = (ev.Button == 1 && fixedControls && !alt);
+    const bool mmbPanFixed = (ev.Button == 2 && fixedControls && !alt);
+    m_IsAltOrbiting = (ev.Button == 0 && alt && !primaryMod && !fixedControls); // Alt + LMB = orbit (free 3D views)
+    m_IsPanning = (ev.Button == 0 && alt && primaryMod)                // Alt + Ctrl/Cmd + LMB = pan
+                || (ev.Button == 0 && alt && !primaryMod && fixedControls)
+                || spacePan                                             // Space + LMB = pan
+                || rmbPanFixed
+                || mmbPanFixed;
+    m_IsDollying = (ev.Button == 1 && alt);                            // Alt + RMB = dolly
 
-        if (ApplyImmediatePan(m_Controller, m_Viewport, ev))
-            return;
-        if (m_MeasureToolEnabled)
-            return;
+    // RMB context menu (click-without-drag) - only if not in a camera mode
+    if (ev.Button == 1 && !m_IsDollying && !m_IsPanning)
+    {
+        m_RmbCandidateMenu = true;
+        m_RmbDownX = ev.X;
+        m_RmbDownY = ev.Y;
+    }
+    else
+    {
+        m_RmbCandidateMenu = false;
+    }
 
-        // Hover preview: when not dragging, let the controller do lightweight hover picking.
-        if (!m_Dragging)
-        {
-            using namespace Editor::SceneTools;
-            ScenePointerEvent hoverEv{};
-            if (m_Viewport)
-            {
-                const float localX = ev.X - m_Viewport->GetLayoutX();
-                const float localY = ev.Y - m_Viewport->GetLayoutY();
-                hoverEv.viewX = localX;
-                hoverEv.viewY = localY;
-
-                const float viewW = m_Viewport->GetLayoutWidth();
-                const float viewH = m_Viewport->GetLayoutHeight();
-                hoverEv.viewW = viewW;
-                hoverEv.viewH = viewH;
-                hoverEv.ray = m_Controller->MakeGizmoRay(localX, localY, viewW, viewH);
-                m_Controller->PopulatePointerCameraState(hoverEv);
-            }
-            hoverEv.button = PointerButton::None;
-            hoverEv.phase  = PointerPhase::Move;
-            Editor::SceneTools::PopulateScenePointerMods(hoverEv, ev.Mods);
-
-            m_Controller->HandleHoverDetection(hoverEv);
-            m_Controller->GetToolContext().HandlePointerEvent(hoverEv);
-        }
-
-        if (!m_Dragging || m_DragButton != 0)
-            return;
-
+    // Forward LMB presses into the SceneToolContext as pointer-down events
+    // (but not if we're in a camera control mode)
+    m_LmbDragIsToolMode = (ev.Button == 0 && !m_IsAltOrbiting && !m_IsPanning);
+    if (m_LmbDragIsToolMode && m_MeasureToolEnabled)
+    {
+        DispatchMeasurePointer(m_Controller, m_Viewport, Editor::SceneTools::PointerPhase::Down, ev);
+        return;
+    }
+    if (m_LmbDragIsToolMode && m_Controller)
+    {
         using namespace Editor::SceneTools;
         ScenePointerEvent toolEv{};
         if (m_Viewport)
@@ -1603,257 +1402,508 @@ void SceneViewPanel::RegisterViewportEvents()
         }
 
         toolEv.button = PointerButton::Left;
-        toolEv.phase  = PointerPhase::Move;
+        toolEv.phase  = PointerPhase::Down;
         Editor::SceneTools::PopulateScenePointerMods(toolEv, ev.Mods);
 
-        GE_CPU_PROFILE_SCOPE("SceneViewPanel.DragMouseMove");
         m_Controller->GetToolContext().HandlePointerEvent(toolEv);
-    });
+    }
+}
 
-    m_Viewport->RegisterEventHandler(kEventMouseEnter, [this](UIEvent&) {
-        SetHoveredViewportSlot(ViewportSlot::Perspective);
-    });
+void SceneViewPanel::OnViewportMouseUp(UIEvent& ev)
+{
+    const bool showSceneContextMenu = (ev.Button == 1 && m_RmbCandidateMenu && m_Dragging && m_DragButton == 1);
 
-    // Clear the ruler overlay's cursor indicator when the mouse leaves the
-    // viewport so the lines don't get stuck at the last hover position.
-    m_Viewport->RegisterEventHandler(kEventMouseLeave, [this](UIEvent& /*ev*/){
-        if (m_HasHoveredViewportSlot && m_HoveredViewportSlot == ViewportSlot::Perspective)
-            m_HasHoveredViewportSlot = false;
-        m_SceneViewportPointerInside = false;
-        if (SceneViewRulerOverlay* perspectiveRuler =
-                m_RulerOverlays[static_cast<size_t>(ViewportSlot::Perspective)])
-            perspectiveRuler->SetCursor(0.0f, 0.0f, false);
-        // Keep active measure drags alive across the viewport edge. The mouse
-        // down path captures the pointer, so the real mouse-up should be the
-        // thing that commits/cancels the drag instead of mouse-leave.
-    });
+    if (m_Dragging && ev.Button == m_DragButton) {
+        m_Dragging = false;
+        m_DragButton = -1;
+        m_IsAltOrbiting = false;
+        m_IsPanning = false;
+        m_IsDollying = false;
+        EndCameraDragTracking();
+    }
 
-    // Scroll wheel: dolly Scene View camera in/out when hovering the viewport (when enabled in settings).
-    // Ctrl/Cmd+scroll cycles through pick candidates under the cursor instead of zooming.
-    m_Viewport->RegisterEventHandler(kEventScroll, [this](UIEvent& ev){
+    if (showSceneContextMenu)
+        ShowViewportScriptContextMenu(ev);
+
+    m_RmbCandidateMenu = false;
+
+    if (m_MeasureToolEnabled && ev.Button == 0)
+    {
+        DispatchMeasurePointer(m_Controller, m_Viewport, Editor::SceneTools::PointerPhase::Up, ev);
+        return;
+    }
+
+    // Forward LMB releases into the SceneToolContext as pointer-up events.
+    if (ev.Button == 0 && m_Controller)
+    {
+        using namespace Editor::SceneTools;
+        ScenePointerEvent toolEv{};
+        if (m_Viewport)
+        {
+            const float localX = ev.X - m_Viewport->GetLayoutX();
+            const float localY = ev.Y - m_Viewport->GetLayoutY();
+            toolEv.viewX = localX;
+            toolEv.viewY = localY;
+
+            const float viewW = m_Viewport->GetLayoutWidth();
+            const float viewH = m_Viewport->GetLayoutHeight();
+            toolEv.viewW = viewW;
+            toolEv.viewH = viewH;
+            toolEv.ray = m_Controller->MakeGizmoRay(localX, localY, viewW, viewH);
+            m_Controller->PopulatePointerCameraState(toolEv);
+        }
+
+        toolEv.button = PointerButton::Left;
+        toolEv.phase  = PointerPhase::Up;
+        Editor::SceneTools::PopulateScenePointerMods(toolEv, ev.Mods);
+
+        m_Controller->GetToolContext().HandlePointerEvent(toolEv);
+    }
+}
+
+// RMB click-without-drag on the viewport: the script-registered Scene View context items.
+void SceneViewPanel::ShowViewportScriptContextMenu(UIEvent& ev)
+{
+    if (m_Window)
+    {
+        if (!m_ContextMenu)
+            m_ContextMenu = CreateContextMenu();
+
+        if (m_ContextMenu)
+        {
+            const uint32_t mask = static_cast<uint32_t>(Editor::EditorContextMenuTarget::SceneView);
+            auto scriptItems = Editor::ScriptMenuRegistry::Get().GetContextItems(mask);
+
+            int scriptEntryCount = 0;
+            for (const auto& si : scriptItems)
+            {
+                if (si.commandId == 0 || si.path.empty())
+                    continue;
+                ++scriptEntryCount;
+            }
+            // Post-process toggles live on the toolbar sun control only; viewport RMB is script hooks only.
+            if (scriptEntryCount > 0)
+            {
+                // Always (re)install the handler: m_ContextMenu is shared with the
+                // toolbar icon-toggle menu, which replaces the handler when opened.
+                m_ContextMenu->SetCommandHandler([](uint32_t cmd) {
+                    uint64_t dom = 0;
+                    std::string method;
+                    if (Editor::ScriptMenuRegistry::Get().TryResolveCommand(cmd, dom, method) && !method.empty())
+                    {
+                        try
+                        {
+                            auto& clr = EngineCore::GetInstance().GetScriptManager().GetCLRHost();
+                            int32_t out = 0;
+                            (void)clr.InvokeInDomain(dom, method.c_str(), (uint32_t)method.size(), &out);
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                });
+
+                m_ContextMenu->Clear();
+                ContextMenuBuilder builder;
+                for (const auto& si : scriptItems)
+                {
+                    if (si.commandId == 0 || si.path.empty())
+                        continue;
+                    builder.AddItem(si.path, si.commandId, MenuItemFlag_None, si.priority,
+                                    EditorIcons::kScript);
+                }
+                builder.Build(m_ContextMenu.get());
+                m_ContextMenu->Show(m_Window, (int)ev.X, (int)ev.Y);
+                ev.Stop();
+            }
+        }
+    }
+}
+
+void SceneViewPanel::OnViewportMouseMove(UIEvent& ev)
+{
+    SetHoveredViewportSlot(ViewportSlot::Perspective);
+    if (m_Dragging)
         SetActiveViewportSlot(ViewportSlot::Perspective);
-        if (!m_Controller)
-            return;
+    if (m_Viewport)
+    {
+        m_SceneViewportPointerInside = true;
+        m_SceneViewportPointerLocalX = ev.X - m_Viewport->GetLayoutX();
+        m_SceneViewportPointerLocalY = ev.Y - m_Viewport->GetLayoutY();
+    }
 
-        const float dy = ev.ScrollY;
-        if (dy == 0.0f)
-            return;
+    if (!m_Controller)
+        return;
 
-        // Ctrl/Cmd+scroll: cycle through pick candidates under the cursor.
-        const bool ctrlOrCmd = (ev.Mods & Input::kModControl) != 0 || (ev.Mods & Input::kModSuper) != 0;
-        if (ctrlOrCmd)
+    // Push cursor position to the ruler overlay so its position indicator
+    // tracks the mouse. The overlay fills the viewport rect, so localX/Y
+    // are pixels from the viewport top-left.
+    SceneViewRulerOverlay* perspectiveRuler =
+        m_RulerOverlays[static_cast<size_t>(ViewportSlot::Perspective)];
+    if (perspectiveRuler && m_Viewport)
+    {
+        const float lx = ev.X - m_Viewport->GetLayoutX();
+        const float ly = ev.Y - m_Viewport->GetLayoutY();
+        perspectiveRuler->SetCursor(lx, ly, true);
+    }
+
+    // RMB click vs drag detection (context menu only on click-without-drag)
+    if (m_RmbCandidateMenu && m_Dragging && m_DragButton == 1)
+    {
+        const float dx = ev.X - m_RmbDownX;
+        const float dy = ev.Y - m_RmbDownY;
+        const float dist2 = dx * dx + dy * dy;
+        constexpr float kThresholdPx = 4.0f;
+        if (dist2 > (kThresholdPx * kThresholdPx))
+        {
+            m_RmbCandidateMenu = false;
+        }
+    }
+
+    // While dragging, keep Alt-based camera modes (orbit/pan/dolly) in sync with the
+    // *current* modifier state so Alt can be pressed or released after mouse-down.
+    // Exception: if the drag started as a tool interaction (gizmo/marquee), don't let
+    // Alt mid-drag switch to camera mode — the marquee should continue uninterrupted.
+    if (m_Dragging && !m_LmbDragIsToolMode)
+    {
+        const bool alt  = (ev.Mods & Input::kModAlt) != 0;
+        const bool primaryMod = Input::IsPrimaryShortcutModifier(ev.Mods);
+
+        if (m_DragButton == 0)
+        {
+            // LMB drag: Alt toggles orbit/pan depending on primary modifier.
+            const bool fixedControls = m_Controller->UsesFixedViewPanControls();
+            m_IsAltOrbiting = alt && !primaryMod && !fixedControls;        // Alt + LMB (free 3D views)
+            m_IsPanning     = (alt && primaryMod)                         // Alt + Ctrl/Cmd + LMB
+                           || (alt && !primaryMod && fixedControls)
+                           || m_SpaceHeld;                                // Space + LMB
+        }
+        else if (m_DragButton == 1)
+        {
+            // RMB drag: Alt toggles dolly (zoom). In fixed-axis views, plain RMB pans.
+            const bool fixedControls = m_Controller->UsesFixedViewPanControls();
+            m_IsDollying = alt;                     // Alt + RMB
+            m_IsPanning  = !alt && fixedControls;
+        }
+        else if (m_DragButton == 2)
+        {
+            m_IsAltOrbiting = false;
+            m_IsPanning = m_Controller->UsesFixedViewPanControls() && !alt;
+        }
+    }
+
+    if (m_MeasureToolEnabled && IsMeasureDragging(m_Controller))
+    {
+        DispatchMeasurePointer(m_Controller, m_Viewport, Editor::SceneTools::PointerPhase::Move, ev);
+        return;
+    }
+
+    if (ApplyImmediatePan(m_Controller, m_Viewport, ev))
+        return;
+    if (m_MeasureToolEnabled)
+        return;
+
+    // Hover preview: when not dragging, let the controller do lightweight hover picking.
+    if (!m_Dragging)
+    {
+        using namespace Editor::SceneTools;
+        ScenePointerEvent hoverEv{};
+        if (m_Viewport)
         {
             const float localX = ev.X - m_Viewport->GetLayoutX();
             const float localY = ev.Y - m_Viewport->GetLayoutY();
+            hoverEv.viewX = localX;
+            hoverEv.viewY = localY;
+
             const float viewW = m_Viewport->GetLayoutWidth();
             const float viewH = m_Viewport->GetLayoutHeight();
-            int direction = (dy > 0.0f) ? 1 : -1;
-            m_Controller->CycleEntityUnderCursor(localX, localY, viewW, viewH, direction);
-            ev.Stop();
-            return;
+            hoverEv.viewW = viewW;
+            hoverEv.viewH = viewH;
+            hoverEv.ray = m_Controller->MakeGizmoRay(localX, localY, viewW, viewH);
+            m_Controller->PopulatePointerCameraState(hoverEv);
         }
+        hoverEv.button = PointerButton::None;
+        hoverEv.phase  = PointerPhase::Move;
+        Editor::SceneTools::PopulateScenePointerMods(hoverEv, ev.Mods);
 
-        if (!Editor::SceneViewSettings::Get().GetScrollWheelDollyEnabled())
-            return;
+        m_Controller->HandleHoverDetection(hoverEv);
+        m_Controller->GetToolContext().HandlePointerEvent(hoverEv);
+    }
 
-        // Pixel-perfect 2D: every wheel event advances one discrete scale step
-        // while keeping the world point under the cursor anchored on screen.
-        if (m_Controller->Is2DMode() && Editor::SceneViewSettings::Get().GetPixelPerfect2D())
-        {
-            // 2D: invert versus 3D scroll-to-zoom — scroll toward content zooms out.
-            int step = (dy > 0.0f) ? 1 : -1;
-            if (Editor::SceneViewSettings::Get().GetScrollWheelDollyReversed())
-                step = -step;
-            const float localX = ev.X - m_Viewport->GetLayoutX();
-            const float localY = ev.Y - m_Viewport->GetLayoutY();
-            const float viewW = m_Viewport->GetLayoutWidth();
-            const float viewH = m_Viewport->GetLayoutHeight();
-            m_Controller->ZoomPixelPerfectAtCursor(step, localX, localY, viewW, viewH);
-            ev.Stop();
-            return;
-        }
+    if (!m_Dragging || m_DragButton != 0)
+        return;
 
-        if (m_Controller->IsOrthographic() && !m_Controller->Is2DMode())
-        {
-            int step = dy > 0.0f ? 1 : -1;
-            if (Editor::SceneViewSettings::Get().GetScrollWheelDollyReversed()) step = -step;
-            m_Controller->ZoomOrthographicStep(step);
-            ev.Stop();
-            return;
-        }
+    using namespace Editor::SceneTools;
+    ScenePointerEvent toolEv{};
+    if (m_Viewport)
+    {
+        const float localX = ev.X - m_Viewport->GetLayoutX();
+        const float localY = ev.Y - m_Viewport->GetLayoutY();
+        toolEv.viewX = localX;
+        toolEv.viewY = localY;
 
-        // Positive scrollY typically means scrolling down; invert so wheel up = zoom in.
-        // User can reverse this in settings.
-        const float kScrollToDollyScale = 0.25f;
-        float deltaY = -dy * kScrollToDollyScale;
-        if (Editor::SceneViewSettings::Get().GetScrollWheelDollyReversed())
-            deltaY = -deltaY;
-        // 2D (non-pixel-perfect): reverse scroll-vs-zoom versus the 3D viewport.
-        if (m_Controller->Is2DMode())
-            deltaY = -deltaY;
-        m_Controller->UpdateDolly(deltaY);
+        const float viewW = m_Viewport->GetLayoutWidth();
+        const float viewH = m_Viewport->GetLayoutHeight();
+        toolEv.viewW = viewW;
+        toolEv.viewH = viewH;
+        toolEv.ray = m_Controller->MakeGizmoRay(localX, localY, viewW, viewH);
+        m_Controller->PopulatePointerCameraState(toolEv);
+    }
 
-        // Consume the event so parent ScrollViews do not also scroll.
+    toolEv.button = PointerButton::Left;
+    toolEv.phase  = PointerPhase::Move;
+    Editor::SceneTools::PopulateScenePointerMods(toolEv, ev.Mods);
+
+    GE_CPU_PROFILE_SCOPE("SceneViewPanel.DragMouseMove");
+    m_Controller->GetToolContext().HandlePointerEvent(toolEv);
+}
+
+void SceneViewPanel::OnViewportMouseLeave()
+{
+    if (m_HasHoveredViewportSlot && m_HoveredViewportSlot == ViewportSlot::Perspective)
+        m_HasHoveredViewportSlot = false;
+    m_SceneViewportPointerInside = false;
+    if (SceneViewRulerOverlay* perspectiveRuler =
+            m_RulerOverlays[static_cast<size_t>(ViewportSlot::Perspective)])
+        perspectiveRuler->SetCursor(0.0f, 0.0f, false);
+    // Keep active measure drags alive across the viewport edge. The mouse
+    // down path captures the pointer, so the real mouse-up should be the
+    // thing that commits/cancels the drag instead of mouse-leave.
+}
+
+void SceneViewPanel::OnViewportScroll(UIEvent& ev)
+{
+    SetActiveViewportSlot(ViewportSlot::Perspective);
+    if (!m_Controller)
+        return;
+
+    const float dy = ev.ScrollY;
+    if (dy == 0.0f)
+        return;
+
+    // Ctrl/Cmd+scroll: cycle through pick candidates under the cursor.
+    const bool ctrlOrCmd = (ev.Mods & Input::kModControl) != 0 || (ev.Mods & Input::kModSuper) != 0;
+    if (ctrlOrCmd)
+    {
+        const float localX = ev.X - m_Viewport->GetLayoutX();
+        const float localY = ev.Y - m_Viewport->GetLayoutY();
+        const float viewW = m_Viewport->GetLayoutWidth();
+        const float viewH = m_Viewport->GetLayoutHeight();
+        int direction = (dy > 0.0f) ? 1 : -1;
+        m_Controller->CycleEntityUnderCursor(localX, localY, viewW, viewH, direction);
         ev.Stop();
-    });
+        return;
+    }
 
-    // Key down/up on the Scene View viewport: route to the active Scene tool as SceneKeyEvent.
-    m_Viewport->RegisterEventHandler(kEventKeyDown, [this](UIEvent& ev){
-        // Track spacebar for space+LMB panning in 2D mode.
-        if (Editor::MatchesCatalogShortcut("Scene View", "Pan Hold (2D)", ev.Key, ev.Mods))
+    if (!Editor::SceneViewSettings::Get().GetScrollWheelDollyEnabled())
+        return;
+
+    // Pixel-perfect 2D: every wheel event advances one discrete scale step
+    // while keeping the world point under the cursor anchored on screen.
+    if (m_Controller->Is2DMode() && Editor::SceneViewSettings::Get().GetPixelPerfect2D())
+    {
+        // 2D: invert versus 3D scroll-to-zoom — scroll toward content zooms out.
+        int step = (dy > 0.0f) ? 1 : -1;
+        if (Editor::SceneViewSettings::Get().GetScrollWheelDollyReversed())
+            step = -step;
+        const float localX = ev.X - m_Viewport->GetLayoutX();
+        const float localY = ev.Y - m_Viewport->GetLayoutY();
+        const float viewW = m_Viewport->GetLayoutWidth();
+        const float viewH = m_Viewport->GetLayoutHeight();
+        m_Controller->ZoomPixelPerfectAtCursor(step, localX, localY, viewW, viewH);
+        ev.Stop();
+        return;
+    }
+
+    if (m_Controller->IsOrthographic() && !m_Controller->Is2DMode())
+    {
+        int step = dy > 0.0f ? 1 : -1;
+        if (Editor::SceneViewSettings::Get().GetScrollWheelDollyReversed()) step = -step;
+        m_Controller->ZoomOrthographicStep(step);
+        ev.Stop();
+        return;
+    }
+
+    // Positive scrollY typically means scrolling down; invert so wheel up = zoom in.
+    // User can reverse this in settings.
+    const float kScrollToDollyScale = 0.25f;
+    float deltaY = -dy * kScrollToDollyScale;
+    if (Editor::SceneViewSettings::Get().GetScrollWheelDollyReversed())
+        deltaY = -deltaY;
+    // 2D (non-pixel-perfect): reverse scroll-vs-zoom versus the 3D viewport.
+    if (m_Controller->Is2DMode())
+        deltaY = -deltaY;
+    m_Controller->UpdateDolly(deltaY);
+
+    // Consume the event so parent ScrollViews do not also scroll.
+    ev.Stop();
+}
+
+void SceneViewPanel::OnViewportKeyDown(UIEvent& ev)
+{
+    // Track spacebar for space+LMB panning in 2D mode.
+    if (Editor::MatchesCatalogShortcut("Scene View", "Pan Hold (2D)", ev.Key, ev.Mods))
+    {
+        BeginViewportSpaceToggle(ViewportSlot::Perspective, ev);
+        return;
+    }
+
+    SetActiveViewportSlot(ViewportSlot::Perspective);
+    if (!m_Controller)
+        return;
+
+    if (HandleSceneViewCommandShortcut(m_Controller, ev))
+        return;
+
+    // Suppress hotkeys while any camera mode is active (RMB look, Alt orbit,
+    // pan, dolly) so WASD + Shift speed-modifier don't conflict with shortcuts.
+    const bool cameraActive = IsLooking() || IsOrbiting() || IsPanning() || IsDollying();
+
+    // [ / ]: navigate camera position history (auto-captured when the camera
+    // settles). No modifier — camera-only, doesn't conflict with transform tools.
+    if (!cameraActive && ev.Mods == 0)
+    {
+        if (ev.Key == Input::kKeyCode_LeftBracket)
         {
-            BeginViewportSpaceToggle(ViewportSlot::Perspective, ev);
-            return;
-        }
-
-        SetActiveViewportSlot(ViewportSlot::Perspective);
-        if (!m_Controller)
-            return;
-
-        if (HandleSceneViewCommandShortcut(m_Controller, ev))
-            return;
-
-        // Suppress hotkeys while any camera mode is active (RMB look, Alt orbit,
-        // pan, dolly) so WASD + Shift speed-modifier don't conflict with shortcuts.
-        const bool cameraActive = IsLooking() || IsOrbiting() || IsPanning() || IsDollying();
-
-        // [ / ]: navigate camera position history (auto-captured when the camera
-        // settles). No modifier — camera-only, doesn't conflict with transform tools.
-        if (!cameraActive && ev.Mods == 0)
-        {
-            if (ev.Key == Input::kKeyCode_LeftBracket)
-            {
-                if (m_Controller->StepCameraHistoryBack())
-                    ev.Stop();
-                return;
-            }
-            if (ev.Key == Input::kKeyCode_RightBracket)
-            {
-                if (m_Controller->StepCameraHistoryForward())
-                    ev.Stop();
-                return;
-            }
-        }
-
-        // F: frame selected entity. Shift+F: frame all.
-        if (!cameraActive && ev.Key == Input::kKeyCode_F)
-        {
-            if ((ev.Mods & Input::kModShift) && !(ev.Mods & (Input::kModControl | Input::kModAlt | Input::kModSuper)))
-            {
-                m_Controller->FrameAll();
+            if (m_Controller->StepCameraHistoryBack())
                 ev.Stop();
-                return;
-            }
-            if (ev.Mods == 0)
-            {
-                m_Controller->FrameOrigin();
-                ev.Stop();
-                return;
-            }
-        }
-
-        // Transform tool hotkeys: Q for Selection, W for Move, E for Rotate, R for Scale.
-        // Pressing any of these activates the corresponding tool and mode.
-        if (!cameraActive)
-        {
-            if (Editor::MatchesCatalogShortcut("Transform Tool", "Select Mode", ev.Key, ev.Mods))
-            {
-                if (m_MeasureToolEnabled)
-                    SetMeasureToolEnabled(false);
-                m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Select);
-                UpdateToolOverlayModeButtons();
-                return;
-            }
-            if (Editor::MatchesCatalogShortcut("Transform Tool", "Translate Mode", ev.Key, ev.Mods))
-            {
-                if (m_MeasureToolEnabled)
-                    SetMeasureToolEnabled(false);
-                m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Translate);
-                UpdateToolOverlayModeButtons();
-                return;
-            }
-            if (Editor::MatchesCatalogShortcut("Transform Tool", "Rotate Mode", ev.Key, ev.Mods))
-            {
-                if (m_MeasureToolEnabled)
-                    SetMeasureToolEnabled(false);
-                m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Rotate);
-                UpdateToolOverlayModeButtons();
-                return;
-            }
-            if (Editor::MatchesCatalogShortcut("Transform Tool", "Scale Mode", ev.Key, ev.Mods))
-            {
-                if (m_MeasureToolEnabled)
-                    SetMeasureToolEnabled(false);
-                m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Scale);
-                UpdateToolOverlayModeButtons();
-                return;
-            }
-            if (ev.Mods == 0 && ev.Key == Input::kKeyCode_M)
-            {
-                ToggleMeasureTool();
-                ev.Stop();
-                return;
-            }
-            if (ev.Mods == 0 && ev.Key == Input::kKeyCode_P)
-            {
-                // Toggle FPS visibility in the combined perf label and overlay.
-                m_FpsVisible = !m_FpsVisible;
-                if (m_FpsLabel)
-                {
-                    auto& style = m_FpsLabel->Overrides();
-                    if (m_FpsVisible)
-                    {
-                        style.Reset(Style::Opacity);
-                        style.Reset(Style::PointerEvents);
-                    }
-                    else
-                    {
-                        style.Set(Style::Opacity, 0.0f);
-                        style.Set(Style::PointerEvents, false);
-                    }
-                }
-                {
-                    Editor::SettingsStore prefs = Editor::OpenEditorPreferences();
-                    std::string err;
-                    (void)prefs.Load(&err);
-                    prefs.SetBool("sceneView.fpsLabel.visible", m_FpsVisible);
-                    (void)prefs.Save(&err);
-                }
-                return;
-            }
-        }
-
-        using namespace Editor::SceneTools;
-        SceneKeyEvent keyEv{};
-        keyEv.keyCode = static_cast<std::uint32_t>(ev.Key);
-        keyEv.pressed = true;
-        keyEv.alt   = (ev.Mods & Input::kModAlt) != 0;
-        keyEv.ctrl  = (ev.Mods & Input::kModControl) != 0;
-        keyEv.shift = (ev.Mods & Input::kModShift) != 0;
-
-        m_Controller->GetToolContext().HandleKeyEvent(keyEv);
-    });
-
-    m_Viewport->RegisterEventHandler(kEventKeyUp, [this](UIEvent& ev){
-        if (Editor::MatchesCatalogShortcutKeyOnly("Scene View", "Pan Hold (2D)", ev.Key))
-        {
-            EndViewportSpaceToggle(ViewportSlot::Perspective, ev);
             return;
         }
-
-        if (!m_Controller)
+        if (ev.Key == Input::kKeyCode_RightBracket)
+        {
+            if (m_Controller->StepCameraHistoryForward())
+                ev.Stop();
             return;
+        }
+    }
 
-        using namespace Editor::SceneTools;
-        SceneKeyEvent keyEv{};
-        keyEv.keyCode = static_cast<std::uint32_t>(ev.Key);
-        keyEv.pressed = false;
-        keyEv.alt   = (ev.Mods & Input::kModAlt) != 0;
-        keyEv.ctrl  = (ev.Mods & Input::kModControl) != 0;
-        keyEv.shift = (ev.Mods & Input::kModShift) != 0;
+    // F: frame selected entity. Shift+F: frame all.
+    if (!cameraActive && ev.Key == Input::kKeyCode_F)
+    {
+        if ((ev.Mods & Input::kModShift) && !(ev.Mods & (Input::kModControl | Input::kModAlt | Input::kModSuper)))
+        {
+            m_Controller->FrameAll();
+            ev.Stop();
+            return;
+        }
+        if (ev.Mods == 0)
+        {
+            m_Controller->FrameOrigin();
+            ev.Stop();
+            return;
+        }
+    }
 
-        m_Controller->GetToolContext().HandleKeyEvent(keyEv);
-    });
+    // Transform tool hotkeys: Q for Selection, W for Move, E for Rotate, R for Scale.
+    // Pressing any of these activates the corresponding tool and mode.
+    if (!cameraActive && HandleViewportToolHotkey(ev))
+        return;
+
+    using namespace Editor::SceneTools;
+    SceneKeyEvent keyEv{};
+    keyEv.keyCode = static_cast<std::uint32_t>(ev.Key);
+    keyEv.pressed = true;
+    keyEv.alt   = (ev.Mods & Input::kModAlt) != 0;
+    keyEv.ctrl  = (ev.Mods & Input::kModControl) != 0;
+    keyEv.shift = (ev.Mods & Input::kModShift) != 0;
+    keyEv.primary = Input::IsPrimaryShortcutModifier(static_cast<int>(ev.Mods));
+    keyEv.mods = static_cast<std::uint32_t>(ev.Mods);
+
+    m_Controller->GetToolContext().HandleKeyEvent(keyEv);
+}
+
+bool SceneViewPanel::HandleViewportToolHotkey(UIEvent& ev)
+{
+    if (Editor::MatchesCatalogShortcut("Transform Tool", "Select Mode", ev.Key, ev.Mods))
+    {
+        if (m_MeasureToolEnabled)
+            SetMeasureToolEnabled(false);
+        m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Select);
+        UpdateToolOverlayModeButtons();
+        return true;
+    }
+    if (Editor::MatchesCatalogShortcut("Transform Tool", "Translate Mode", ev.Key, ev.Mods))
+    {
+        if (m_MeasureToolEnabled)
+            SetMeasureToolEnabled(false);
+        m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Translate);
+        UpdateToolOverlayModeButtons();
+        return true;
+    }
+    if (Editor::MatchesCatalogShortcut("Transform Tool", "Rotate Mode", ev.Key, ev.Mods))
+    {
+        if (m_MeasureToolEnabled)
+            SetMeasureToolEnabled(false);
+        m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Rotate);
+        UpdateToolOverlayModeButtons();
+        return true;
+    }
+    if (Editor::MatchesCatalogShortcut("Transform Tool", "Scale Mode", ev.Key, ev.Mods))
+    {
+        if (m_MeasureToolEnabled)
+            SetMeasureToolEnabled(false);
+        m_Controller->SetTransformMode(Editor::SceneTools::TransformMode::Scale);
+        UpdateToolOverlayModeButtons();
+        return true;
+    }
+    if (ev.Mods == 0 && ev.Key == Input::kKeyCode_M)
+    {
+        ToggleMeasureTool();
+        ev.Stop();
+        return true;
+    }
+    if (ev.Mods == 0 && ev.Key == Input::kKeyCode_P)
+    {
+        // Toggle FPS visibility in the combined perf label and overlay.
+        m_FpsVisible = !m_FpsVisible;
+        if (m_FpsLabel)
+        {
+            auto& style = m_FpsLabel->Overrides();
+            if (m_FpsVisible)
+            {
+                style.Reset(Style::Opacity);
+                style.Reset(Style::PointerEvents);
+            }
+            else
+            {
+                style.Set(Style::Opacity, 0.0f);
+                style.Set(Style::PointerEvents, false);
+            }
+        }
+        {
+            Editor::SettingsStore prefs = Editor::OpenEditorPreferences();
+            std::string err;
+            (void)prefs.Load(&err);
+            prefs.SetBool("sceneView.fpsLabel.visible", m_FpsVisible);
+            (void)prefs.Save(&err);
+        }
+        return true;
+    }
+    return false;
+}
+
+void SceneViewPanel::OnViewportKeyUp(UIEvent& ev)
+{
+    if (Editor::MatchesCatalogShortcutKeyOnly("Scene View", "Pan Hold (2D)", ev.Key))
+    {
+        EndViewportSpaceToggle(ViewportSlot::Perspective, ev);
+        return;
+    }
+
+    if (!m_Controller)
+        return;
+
+    using namespace Editor::SceneTools;
+    SceneKeyEvent keyEv{};
+    keyEv.keyCode = static_cast<std::uint32_t>(ev.Key);
+    keyEv.pressed = false;
+    keyEv.alt   = (ev.Mods & Input::kModAlt) != 0;
+    keyEv.ctrl  = (ev.Mods & Input::kModControl) != 0;
+    keyEv.shift = (ev.Mods & Input::kModShift) != 0;
+    keyEv.primary = Input::IsPrimaryShortcutModifier(static_cast<int>(ev.Mods));
+    keyEv.mods = static_cast<std::uint32_t>(ev.Mods);
+
+    m_Controller->GetToolContext().HandleKeyEvent(keyEv);
 }
 
 
@@ -1924,20 +1974,10 @@ void SceneViewPanel::SetMeasureToolEnabled(bool enabled)
     if (m_MeasureToolEnabled == enabled)
         return;
 
-    m_MeasureToolEnabled = enabled;
-    m_MeasureDragActive = false;
-    ApplyMeasureSoloMode(enabled);
-    for (SceneViewMeasureOverlay* overlay : m_MeasureOverlays)
-    {
-        if (!overlay)
-            continue;
-        overlay->SetMeasureToolEnabled(enabled);
-        overlay->SetTwoDMode(m_MeasureTwoDMode);
-        if (!enabled)
-            overlay->CancelMeasure();
-    }
-    UpdateMeasureToolButtons();
-    UpdateToolOverlayModeButtons();
+    if (enabled)
+        BeginMeasureMode();
+    else
+        EndMeasureMode(nullptr);
 }
 
 void SceneViewPanel::ToggleMeasureTool()
@@ -1964,32 +2004,84 @@ void SceneViewPanel::UpdateMeasureToolButtons()
     }
 }
 
-void SceneViewPanel::ApplyMeasureSoloMode(bool enabled)
+void SceneViewPanel::BeginMeasureMode()
 {
+    // Set before the tools switch: OnSceneControllerToolChanged ends the mode
+    // when a controller leaves Measure.
+    m_MeasureToolEnabled = true;
     for (size_t i = 0; i < m_MeasureSavedControllerState.size(); ++i)
     {
         SceneViewController* controller = GetSceneControllerForSlot(static_cast<ViewportSlot>(i));
         if (!controller)
             continue;
 
-        if (enabled)
+        if (!m_MeasureSavedControllerState[i])
         {
-            if (!m_MeasureSavedControllerState[i])
-            {
-                m_MeasureSavedToolKinds[i] = static_cast<std::uint8_t>(controller->GetActiveToolKind());
-                m_MeasureSavedTransformGizmosVisible[i] = controller->AreTransformGizmosVisible();
-                m_MeasureSavedControllerState[i] = true;
-            }
-            controller->SetActiveTool(SceneViewController::ToolKind::Selection);
-            controller->SetTransformGizmosVisible(false);
+            m_MeasureSavedToolKinds[i] = static_cast<std::uint8_t>(controller->GetActiveToolKind());
+            m_MeasureSavedTransformGizmosVisible[i] = controller->AreTransformGizmosVisible();
+            m_MeasureSavedControllerState[i] = true;
+        }
+        controller->SetActiveTool(SceneViewController::ToolKind::Measure);
+        controller->SetTransformGizmosVisible(false);
+    }
+    for (SceneViewMeasureOverlay* overlay : m_MeasureOverlays)
+    {
+        if (!overlay)
+            continue;
+        overlay->SetMeasureToolEnabled(true);
+        overlay->SetTwoDMode(m_MeasureTwoDMode);
+    }
+    UpdateMeasureToolButtons();
+    UpdateToolOverlayModeButtons();
+}
+
+void SceneViewPanel::EndMeasureMode(SceneViewController* leftBy)
+{
+    m_MeasureToolEnabled = false;
+    for (SceneViewMeasureOverlay* overlay : m_MeasureOverlays)
+    {
+        if (!overlay)
+            continue;
+        overlay->SetMeasureToolEnabled(false);
+        overlay->CancelMeasure();
+    }
+
+    using ToolKind = SceneViewController::ToolKind;
+    for (size_t i = 0; i < m_MeasureSavedControllerState.size(); ++i)
+    {
+        SceneViewController* controller = GetSceneControllerForSlot(static_cast<ViewportSlot>(i));
+        if (!controller)
+            continue;
+
+        if (controller == leftBy)
+        {
+            controller->SetTransformGizmosVisible(true);
         }
         else if (m_MeasureSavedControllerState[i])
         {
+            // A controller bound while measuring can have saved Measure itself.
+            const auto saved = static_cast<ToolKind>(m_MeasureSavedToolKinds[i]);
             controller->SetTransformGizmosVisible(m_MeasureSavedTransformGizmosVisible[i]);
-            controller->SetActiveTool(static_cast<SceneViewController::ToolKind>(m_MeasureSavedToolKinds[i]));
-            m_MeasureSavedControllerState[i] = false;
+            controller->SetActiveTool(saved == ToolKind::Measure ? ToolKind::Selection : saved);
         }
+        else if (controller->GetActiveToolKind() == ToolKind::Measure)
+        {
+            controller->SetActiveTool(ToolKind::Selection);
+        }
+        m_MeasureSavedControllerState[i] = false;
     }
+    UpdateMeasureToolButtons();
+    UpdateToolOverlayModeButtons();
+}
+
+void SceneViewPanel::OnSceneControllerToolChanged(SceneViewController* controller)
+{
+    if (m_MeasureToolEnabled && controller &&
+        controller->GetActiveToolKind() != SceneViewController::ToolKind::Measure)
+    {
+        EndMeasureMode(controller);
+    }
+    UpdateToolOverlayModeButtons();
 }
 
 void SceneViewPanel::SetMeasureUnitSystem(SceneViewMeasureOverlay::UnitSystem unitSystem)
@@ -2140,191 +2232,58 @@ ECS::EntityHandle SceneViewPanel::CreateMeasureEntity(const std::array<float, 3>
     return entity;
 }
 
-void SceneViewPanel::FinishMeasureDrag(bool allowCreateEntity)
+void SceneViewPanel::OnMeasured(const std::array<float, 3>& start, const std::array<float, 3>& end, bool is2D)
 {
-    if (!m_MeasureDragActive)
-        return;
-
-    const size_t slotIndex = static_cast<size_t>(m_MeasureDragSlot);
-    if (slotIndex < m_MeasureOverlays.size() && m_MeasureOverlays[slotIndex])
-        m_MeasureOverlays[slotIndex]->EndMeasure();
-    if (allowCreateEntity && m_MeasureCreateEntitiesMode)
-        CreateMeasureEntity(m_MeasureDragStartWorld, m_MeasureDragEndWorld, m_MeasureDragIs2D);
-    m_MeasureDragActive = false;
+    if (m_MeasureCreateEntitiesMode)
+        CreateMeasureEntity(start, end, is2D);
 }
 
 void SceneViewPanel::FinishMeasureDragIfReleased()
 {
-    if (!m_MeasureDragActive)
-        return;
-
-    if (Platform::Window::IsLeftMouseButtonDown())
-        return;
-
-    FinishMeasureDrag(true);
-}
-
-bool SceneViewPanel::HandleMeasurePointerDown(SceneViewController* controller,
-                                              UIElement* viewport,
-                                              ViewportSlot slot,
-                                              UIEvent& ev)
-{
-    if (!m_MeasureToolEnabled || !controller || !viewport || ev.Button != 0)
-        return false;
-
-    const size_t slotIndex = static_cast<size_t>(slot);
-    if (slotIndex >= m_MeasureOverlays.size() || !m_MeasureOverlays[slotIndex])
-        return false;
-
-    using namespace Editor::SceneTools;
-    float localX = ev.X - viewport->GetLayoutX();
-    float localY = ev.Y - viewport->GetLayoutY();
-    const float viewW = viewport->GetLayoutWidth();
-    const float viewH = viewport->GetLayoutHeight();
-    ClampPointerToViewport(localX, localY, viewW, viewH);
-
-    ScenePointerEvent toolEv{};
-    toolEv.viewX = localX;
-    toolEv.viewY = localY;
-    toolEv.viewW = viewW;
-    toolEv.viewH = viewH;
-    toolEv.ray = controller->MakeGizmoRay(localX, localY, viewW, viewH);
-    controller->PopulatePointerCameraState(toolEv);
-    toolEv.button = PointerButton::Left;
-    toolEv.phase = PointerPhase::Down;
-    PopulateScenePointerMods(toolEv, ev.Mods);
-
-    if (controller->HasMeasureEndpointAtPointer(toolEv))
+    for (size_t i = 0; i < static_cast<size_t>(ViewportSlot::Count); ++i)
     {
-        m_MeasureToolEnabled = false;
-        m_MeasureDragActive = false;
-        for (SceneViewMeasureOverlay* overlay : m_MeasureOverlays)
-        {
-            if (!overlay)
-                continue;
-            overlay->SetMeasureToolEnabled(false);
-            overlay->CancelMeasure();
-        }
-
-        for (size_t i = 0; i < m_MeasureSavedControllerState.size(); ++i)
-        {
-            SceneViewController* savedController = GetSceneControllerForSlot(static_cast<ViewportSlot>(i));
-            if (!savedController || !m_MeasureSavedControllerState[i])
-                continue;
-
-            if (savedController == controller)
-            {
-                savedController->SetTransformGizmosVisible(true);
-                savedController->SetTransformMode(Editor::SceneTools::TransformMode::Translate);
-            }
-            else
-            {
-                savedController->SetTransformGizmosVisible(m_MeasureSavedTransformGizmosVisible[i]);
-                savedController->SetActiveTool(static_cast<SceneViewController::ToolKind>(m_MeasureSavedToolKinds[i]));
-            }
-            m_MeasureSavedControllerState[i] = false;
-        }
-
-        controller->SetTransformGizmosVisible(true);
-        controller->SetTransformMode(Editor::SceneTools::TransformMode::Translate);
-        UpdateMeasureToolButtons();
-        UpdateToolOverlayModeButtons();
-        controller->GetToolContext().HandlePointerEvent(toolEv);
-        ev.Stop();
-        return true;
+        SceneViewController* controller = GetSceneControllerForSlot(static_cast<ViewportSlot>(i));
+        if (Editor::SceneTools::MeasureTool* tool = controller ? controller->GetMeasureTool() : nullptr)
+            tool->FinishDragIfReleased();
     }
-
-    m_MeasureDragActive = true;
-    m_MeasureDragSlot = slot;
-    m_MeasureDragStartWorld = MeasurePointFromPointer(controller, toolEv);
-    m_MeasureDragEndWorld = m_MeasureDragStartWorld;
-    m_MeasureDragIs2D = controller->Is2DMode();
-    m_MeasureOverlays[slotIndex]->BeginMeasure(localX,
-                                               localY,
-                                               m_MeasureDragStartWorld,
-                                               m_MeasureDragIs2D,
-                                               toolEv.shift);
-    ev.Stop();
-    return true;
 }
 
-bool SceneViewPanel::HandleMeasurePointerMove(SceneViewController* controller,
-                                              UIElement* viewport,
-                                              ViewportSlot slot,
-                                              UIEvent& ev)
+bool SceneViewPanel::IsMeasureDragging(SceneViewController* controller)
 {
-    if (!m_MeasureToolEnabled || !m_MeasureDragActive || m_MeasureDragSlot != slot ||
-        !controller || !viewport)
-        return false;
-
-    const size_t slotIndex = static_cast<size_t>(slot);
-    if (slotIndex >= m_MeasureOverlays.size() || !m_MeasureOverlays[slotIndex])
-        return false;
-
-    using namespace Editor::SceneTools;
-    float localX = ev.X - viewport->GetLayoutX();
-    float localY = ev.Y - viewport->GetLayoutY();
-    const float viewW = viewport->GetLayoutWidth();
-    const float viewH = viewport->GetLayoutHeight();
-    ClampPointerToViewport(localX, localY, viewW, viewH);
-
-    ScenePointerEvent toolEv{};
-    toolEv.viewX = localX;
-    toolEv.viewY = localY;
-    toolEv.viewW = viewW;
-    toolEv.viewH = viewH;
-    toolEv.ray = controller->MakeGizmoRay(localX, localY, viewW, viewH);
-    controller->PopulatePointerCameraState(toolEv);
-    toolEv.button = PointerButton::Left;
-    toolEv.phase = PointerPhase::Move;
-    PopulateScenePointerMods(toolEv, ev.Mods);
-
-    m_MeasureDragEndWorld = MeasurePointFromPointer(controller, toolEv);
-    m_MeasureOverlays[slotIndex]->UpdateMeasure(localX,
-                                                localY,
-                                                m_MeasureDragEndWorld,
-                                                toolEv.shift);
-    ev.Stop();
-    return true;
+    Editor::SceneTools::MeasureTool* tool = controller ? controller->GetMeasureTool() : nullptr;
+    return tool && tool->IsDragging();
 }
 
-bool SceneViewPanel::HandleMeasurePointerUp(SceneViewController* controller,
+void SceneViewPanel::DispatchMeasurePointer(SceneViewController* controller,
                                             UIElement* viewport,
-                                            ViewportSlot slot,
+                                            Editor::SceneTools::PointerPhase phase,
                                             UIEvent& ev)
 {
-    if (!m_MeasureToolEnabled || !m_MeasureDragActive || ev.Button != 0 || m_MeasureDragSlot != slot)
-        return false;
-
-    const size_t slotIndex = static_cast<size_t>(slot);
-    bool haveReleasePoint = false;
-    if (controller && viewport)
-    {
-        using namespace Editor::SceneTools;
-        float localX = ev.X - viewport->GetLayoutX();
-        float localY = ev.Y - viewport->GetLayoutY();
-        const float viewW = viewport->GetLayoutWidth();
-        const float viewH = viewport->GetLayoutHeight();
-        ClampPointerToViewport(localX, localY, viewW, viewH);
-        haveReleasePoint = true;
-        ScenePointerEvent toolEv{};
-        toolEv.viewX = localX;
-        toolEv.viewY = localY;
-        toolEv.viewW = viewW;
-        toolEv.viewH = viewH;
-        toolEv.ray = controller->MakeGizmoRay(localX, localY, viewW, viewH);
-        controller->PopulatePointerCameraState(toolEv);
-        toolEv.button = PointerButton::Left;
-        toolEv.phase = PointerPhase::Up;
-        PopulateScenePointerMods(toolEv, ev.Mods);
-        m_MeasureDragEndWorld = MeasurePointFromPointer(controller, toolEv);
-        if (slotIndex < m_MeasureOverlays.size() && m_MeasureOverlays[slotIndex])
-            m_MeasureOverlays[slotIndex]->UpdateMeasure(localX, localY, m_MeasureDragEndWorld, toolEv.shift);
-    }
-
-    FinishMeasureDrag(haveReleasePoint);
     ev.Stop();
-    return true;
+    if (!controller || !viewport)
+        return;
+
+    using namespace Editor::SceneTools;
+    float localX = ev.X - viewport->GetLayoutX();
+    float localY = ev.Y - viewport->GetLayoutY();
+    const float viewW = viewport->GetLayoutWidth();
+    const float viewH = viewport->GetLayoutHeight();
+    ClampPointerToViewport(localX, localY, viewW, viewH);
+
+    ScenePointerEvent toolEv{};
+    toolEv.viewX = localX;
+    toolEv.viewY = localY;
+    toolEv.viewW = viewW;
+    toolEv.viewH = viewH;
+    toolEv.ray = controller->MakeGizmoRay(localX, localY, viewW, viewH);
+    controller->PopulatePointerCameraState(toolEv);
+    toolEv.button = PointerButton::Left;
+    toolEv.phase = phase;
+    PopulateScenePointerMods(toolEv, ev.Mods);
+    // A press on a measure endpoint reaches the endpoint gizmo first: it
+    // selects the point for the transform tool, which ends measure mode
+    // (OnSceneControllerToolChanged).
+    controller->GetToolContext().HandlePointerEvent(toolEv);
 }
 
 // ─── Scene Tool Overlay (floating over viewport) ────────────────────────────
@@ -2337,10 +2296,6 @@ void SceneViewPanel::WireToolOverlay()
     ApplySceneToolIconBackgrounds();
     PopulateRegisteredToolStripEntries();
     PrepareToolOverlayReveal();
-
-    m_Controller->SetOnActiveToolChangedCallback([this](SceneViewController::ToolKind) {
-        UpdateToolOverlayModeButtons();
-    });
 
     // Wire selection tool button (Q)
     if (auto* btn = dynamic_cast<Button*>(FindById("SelectionToolBtn"_sid)))
@@ -3141,6 +3096,46 @@ void SceneViewPanel::UpdatePerformanceOverlay(double deltaSeconds, const PerfBre
     (void)perf;
 }
 
+void SceneViewPanel::UpdateToolStatusLabel()
+{
+    if (!m_ToolStatusLabel || m_ToolStatusLabel->GetOwnerManager() == nullptr)
+        m_ToolStatusLabel = dynamic_cast<Label*>(FindById("SceneViewToolStatusLabel"_sid));
+    if (!m_ToolStatusLabel)
+        return;
+    const std::string_view status = m_Controller ? m_Controller->ActiveToolStatusText()
+                                                 : std::string_view{};
+    if (status != m_ToolStatusShown)
+    {
+        m_ToolStatusShown.assign(status);
+        m_ToolStatusLabel->SetText(m_ToolStatusShown);
+        if (m_ToolStatusShown.empty())
+            m_ToolStatusLabel->AddClass("hidden");
+        else
+            m_ToolStatusLabel->RemoveClass("hidden");
+    }
+    if (m_ToolStatusShown.empty())
+        return;
+
+    // Centred at the bottom edge the way the hover pill is: the sheet cannot
+    // centre an absolutely placed box of unknown width, so the panel sets the
+    // left inset from the two widths and only when one of them moved.
+    UIElement* viewport = m_ToolStatusLabel->GetParent();
+    if (!viewport)
+        return;
+    const float viewportWidth = viewport->GetLayoutWidth();
+    const float labelWidth = m_ToolStatusLabel->GetLayoutWidth();
+    if (viewportWidth <= 0.0f || labelWidth <= 0.0f)
+        return;
+    constexpr float kReanchorEpsilonPx = 1.0f;
+    if (std::fabs(viewportWidth - m_ToolStatusViewportWidth) < kReanchorEpsilonPx &&
+        std::fabs(labelWidth - m_ToolStatusLabelWidth) < kReanchorEpsilonPx)
+        return;
+    m_ToolStatusViewportWidth = viewportWidth;
+    m_ToolStatusLabelWidth = labelWidth;
+    const float centerX = std::max(0.0f, std::round((viewportWidth - labelWidth) * 0.5f));
+    m_ToolStatusLabel->Overrides().Set(Style::PositionLeft, StyleLength::Px(centerX));
+}
+
 void SceneViewPanel::UpdateHoverHighlightPill()
 {
     if (!m_HoverHighlightLabel || m_HoverHighlightLabel->GetOwnerManager() == nullptr)
@@ -3491,6 +3486,7 @@ void SceneViewPanel::UpdateFPS(float deltaTime)
     }
 
     UpdateHoverHighlightPill();
+    UpdateToolStatusLabel();
 
     // Robustness: re-acquire on demand if the tree was reconciled.
     if (!m_FpsLabel || m_FpsLabel->GetOwnerManager() == nullptr)
@@ -4422,7 +4418,6 @@ void SceneViewPanel::PerformDrop(const UI::Interaction::DropRequest& request)
 
         Components::SceneBlueprintInstance inst{};
         std::memset(inst.sourcePath, 0, sizeof(inst.sourcePath));
-        std::memset(inst.sourceGuid, 0, sizeof(inst.sourceGuid));
         // Drop payloads carry registry paths, which are folded on
         // case-insensitive platforms while the root carries its own spelling;
         // a lexical subtraction compares case and would persist an absolute

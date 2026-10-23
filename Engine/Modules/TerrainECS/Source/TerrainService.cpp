@@ -15,12 +15,12 @@
 #include "Assets/BinaryAsset.h"
 #include "JobSystem/JobChannel.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -1691,8 +1691,7 @@ bool TerrainService::AnalyticModifiersEnabled()
     // Read fresh (not static-once) deliberately: the flag folds into the terrain-state hash, so a
     // mid-session flip is a state change (TerrainModifierSystem forces the clearing full re-bake)
     // — and the in-process A/B is what the dark-ship oracles toggle.
-    const char* v = std::getenv("GE_TERRAIN_ANALYTIC_MODIFIERS");
-    return v != nullptr && v[0] != '\0' && v[0] != '0';
+    return Platform::EnvironmentSwitchEnabled("GE_TERRAIN_ANALYTIC_MODIFIERS", false);
 }
 
 CBTTerrain::SphereEditRegions TerrainService::ApplySphereSculptDabStroked(

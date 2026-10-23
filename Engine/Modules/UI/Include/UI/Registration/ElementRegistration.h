@@ -242,7 +242,7 @@ public:
     // Comparison is against the tag's canonical HASH rather than against a registered id, so
     // an element whose factory has since been unregistered still matches its own tag. That is
     // what lets an orphaned element survive a reconcile instead of being replaced (and it is
-    // also why an unknown tag now reconciles against itself rather than being rebuilt).
+    // also why an unknown tag reconciles against itself rather than being rebuilt).
     bool IsSameType(const UIElement& el, std::string_view tagLower) const;
 
     // The element's tag identity: its creation stamp, or the id registered for its C++ type

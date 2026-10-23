@@ -3,6 +3,7 @@
 #include "PlayMode/AnimationPlayModeHelpers.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
 
 #include "AssetCore/AssetTypes.h"
 #include "Assets/AssetManager.h"
@@ -137,6 +138,19 @@ std::string FormatValue(float v, const char* suffix)
 
 void RegisterAnimatorInspector()
 {
+    constexpr int kAnimatorSortKey = 33;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Animator";
+        traits.Category = "Animation";
+        traits.SortKey = kAnimatorSortKey;
+        traits.Tooltip = "Controls playback of skeletal animations on a mesh";
+        traits.InspectorIconClass = "inspector-section-icon-animator";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::Animator>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())

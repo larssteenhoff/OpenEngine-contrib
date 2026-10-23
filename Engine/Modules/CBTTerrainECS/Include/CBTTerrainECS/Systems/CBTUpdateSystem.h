@@ -9,6 +9,7 @@
 
 #include "ECS/ECS.h"     // EntityHandle (active-planet identity for the sculpt reset)
 #include "ECS/Systems.h"
+#include "Types/ScopedSubscription.h"
 #include "Types/Types.h"
 
 #include <array>
@@ -114,12 +115,24 @@ class CBTUpdateSystem : public ECS::ISystem
     // unrendered. Public + static so it is directly unit-testable (no RenderServices).
     static bool ComputeTerrainActive(ECS::World& world);
 
+    // The world's terrain term in the reflection-probe content digest: 0 without an
+    // active terrain, otherwise a hash of what identifies the rendered terrain —
+    // domain, source asset and base source, sphere sculpt asset, material library,
+    // shadow casting and render layers. Continuous shape values (size, height scale,
+    // planet radius, relief) and sculpt strokes are left out so an inspector drag or
+    // a brush stroke does not recapture a "Once" probe every frame. Public + static
+    // so it is directly unit-testable (no RenderServices).
+    static uint64 ComputeTerrainContentDigest(bool active, const Components::Terrain& terrain);
+
   private:
     // Emits the one-shot Terrain.Provision signal (domain + radius/size + derived
     // MaxDepth) once a config settles, silent otherwise (debounces inspector drags).
     void LogProvisionSignal(const Components::Terrain& tuning, uint32 resolvedMaxDepth);
 
     Engine::Renderer::RenderServices* m_RenderServices = nullptr;
+    // Keeps this world's entry in the feature's content-digest table while the
+    // system (and so its world) lives.
+    ScopedSubscription m_WorldContentTracking;
 
     // Provision-signal debounce keys (hash of domain + radius/size + depth). A real
     // key is always >= 2^33, so these small distinct sentinels never collide: Settled

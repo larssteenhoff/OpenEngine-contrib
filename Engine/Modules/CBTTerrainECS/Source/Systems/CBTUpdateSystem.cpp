@@ -17,10 +17,11 @@
 #include "ECS/Query.h"
 #include "Core/CpuProfiler.h"
 #include "Logger/Logger.h"
+#include "Types/Fnv1a.h"
+#include "Platform/Environment.h"
 
 #include <algorithm> // std::clamp
 #include <bit>       // std::bit_cast (provision-signal dedupe key)
-#include <cstdlib>   // std::getenv / std::atoi (GE_CBT_EDIT_RETESS A/B toggle)
 
 namespace GameEngine::CBTTerrainECS
 {
@@ -38,11 +39,7 @@ constexpr uint32 kSphereEditForceEvalFrames = 3u;
 // area-only metric for an A/B on the same build (and is a kill-switch if it ever regresses).
 bool EditRetessEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_EDIT_RETESS"))
-            return std::atoi(v) != 0;
-        return true;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_EDIT_RETESS", true);
     return enabled;
 }
 
@@ -55,11 +52,7 @@ bool EditRetessEnabled()
 // for an A/B on the same build (and is a kill-switch if it ever regresses).
 bool NearFieldGateEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_NEARFIELD_GATE"))
-            return std::atoi(v) != 0;
-        return true;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_NEARFIELD_GATE", true);
     return enabled;
 }
 
@@ -68,11 +61,7 @@ bool NearFieldGateEnabled()
 // setting: a pool that pins is never the better default.
 bool PoolPressureEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_POOL_PRESSURE"))
-            return std::atoi(v) != 0;
-        return true;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_POOL_PRESSURE", true);
     return enabled;
 }
 
@@ -84,11 +73,7 @@ bool PoolPressureEnabled()
 // pipeline reads it per frame — tests drive CBTClassifyDesc::DeepDecode directly instead).
 bool DeepDecodeEnabled()
 {
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("GE_CBT_DEEP_DECODE"))
-            return v[0] != '\0' && v[0] != '0';
-        return false;
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_CBT_DEEP_DECODE", false);
     return enabled;
 }
 
@@ -268,8 +253,29 @@ void CBTUpdateSystem::Update(ECS::World& world, float32 /*deltaTime*/)
     feature.SetActive(active, classify, tuning.TargetPixelError, tuning.SeaLevel, domain,
                       static_cast<uint32>(tuning.DebugView));
 
+    Engine::Renderer::WorldContentDigestTable& content = feature.GetWorldContent();
+    if (!m_WorldContentTracking)
+        m_WorldContentTracking = content.Track(world.GetWorldId());
+    content.Set(world.GetWorldId(), ComputeTerrainContentDigest(active, tuning));
+
     if (active)
         LogProvisionSignal(tuning, classify.TargetDepth);
+}
+
+uint64 CBTUpdateSystem::ComputeTerrainContentDigest(bool active, const Components::Terrain& terrain)
+{
+    if (!active)
+        return 0u;
+    uint64 digest = Hashing::Fnv1a64("CBTTerrain");
+    digest = Hashing::Fnv1a64Value(digest, terrain.Domain);
+    digest = Hashing::Fnv1a64Value(digest, terrain.TerrainAssetGuid.ToGuid());
+    digest = Hashing::Fnv1a64Value(digest, terrain.TerrainAssetType);
+    digest = Hashing::Fnv1a64Value(digest, terrain.BaseSource);
+    digest = Hashing::Fnv1a64Value(digest, terrain.SphereSculptGuid.ToGuid());
+    digest = Hashing::Fnv1a64Value(digest, terrain.MaterialLibraryGuid.ToGuid());
+    digest = Hashing::Fnv1a64Value(digest, terrain.CastShadows);
+    digest = Hashing::Fnv1a64Value(digest, terrain.RenderLayers.Bits);
+    return digest;
 }
 
 void CBTUpdateSystem::LogProvisionSignal(const Components::Terrain& tuning, uint32 resolvedMaxDepth)

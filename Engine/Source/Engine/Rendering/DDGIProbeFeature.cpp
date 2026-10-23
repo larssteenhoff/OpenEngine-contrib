@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <string>
@@ -19,6 +18,8 @@
 #include "Engine/Rendering/Pipeline/Nodes/PipelineNodeUtils.h"  // Pipeline::Nodes::Detail::BindStorageImageByName
 #include "Engine/Rendering/RenderServices.h"
 #include "Logger/Logger.h"
+#include "Types/Fnv1a.h"
+#include "Platform/Environment.h"
 #include "Rendering/Core/Device.h"
 #include "Rendering/Core/GPUScene.h"
 #include "Rendering/Core/NamedDescriptorWriter.h"
@@ -2452,11 +2453,7 @@ namespace
 // a different defect from one that records and still samples black.
 bool DDGIAtlasTraceEnabled()
 {
-    static const bool kOn = []
-    {
-        const char* v = std::getenv("GE_DDGI_ATLAS_TRACE");
-        return v && v[0] != '\0' && v[0] != '0';
-    }();
+    static const bool kOn = Platform::EnvironmentSwitchEnabled("GE_DDGI_ATLAS_TRACE", false);
     return kOn;
 }
 }  // namespace
@@ -2874,14 +2871,11 @@ bool DDGIProbeFeature::TickHardwareLane(Rendering::RenderGraph::RGFrame& frame, 
         }
         instanceCount = static_cast<uint32_t>(instanceScratch.size());
 
-        uint64_t refreshHash = 1469598103934665603ull ^ instanceCount;  // FNV-1a, count-seeded
-        const auto* bytes = reinterpret_cast<const uint8_t*>(instanceScratch.data());
-        const size_t byteCount = static_cast<size_t>(instanceCount) * sizeof(Rendering::TlasInstanceData);
-        for (size_t b = 0; b < byteCount; ++b)
-        {
-            refreshHash ^= bytes[b];
-            refreshHash *= 1099511628211ull;
-        }
+        // Count-seeded, so N zeroed records never alias N-1 of them.
+        const uint64_t refreshHash =
+            Hashing::Fnv1a64(instanceScratch.data(),
+                             static_cast<size_t>(instanceCount) * sizeof(Rendering::TlasInstanceData),
+                             Hashing::kFnv1a64OffsetBasis ^ instanceCount);
         doTlasBuild = !m_TlasContentValid || refreshHash != m_BuiltInstanceHash || !skinned.Builds.empty();
 
         if (doTlasBuild && refreshHash != m_BuiltInstanceHash)
@@ -3028,11 +3022,7 @@ void DDGIProbeFeature::DeclareProbePasses(Rendering::RenderGraph::RGFrame& frame
     // page for what is fundamentally a developer/QA switch, not an end-user
     // setting). Decided ONCE per tick so C0/C1 and glossy never disagree
     // about which lane is active within the same frame.
-    const bool forceSoftware = []
-    {
-        const char* v = std::getenv("GE_DDGI_FORCE_SOFTWARE");
-        return v && v[0] != '\0' && v[0] != '0';
-    }();
+    const bool forceSoftware = Platform::EnvironmentSwitchEnabled("GE_DDGI_FORCE_SOFTWARE", false);
     // m_HardwareLaneFailed stays in the gate as permanent defence in depth:
     // a pipeline variant's compile is only provable at execution time, and a
     // backend that cannot build one must degrade to the software lane rather
@@ -3257,7 +3247,7 @@ void DDGIProbeFeature::DeclareProbePasses(Rendering::RenderGraph::RGFrame& frame
         }
     }
 
-    if (const char* v = std::getenv("GE_DDGI_EMITTER_TRACE"); v && v[0] != '\0' && v[0] != '0')
+    if (Platform::EnvironmentSwitchEnabled("GE_DDGI_EMITTER_TRACE", false))
     {
         uint32_t flagged = 0;
         for (const Rendering::GPUInstance& inst : instances)

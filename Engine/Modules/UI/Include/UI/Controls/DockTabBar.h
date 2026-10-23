@@ -66,8 +66,6 @@ public:
 
     float GetAnimatedOffsetForChild(const UIElement* child) const;
 
-    void SetAccentColor(uint32_t argb) { m_AccentColor = argb; }
-
     // Returns the base (non-animated) X position for a child, or its GetLayoutX() if not dragging.
     float GetBaseXForChild(const UIElement* child) const;
 
@@ -133,8 +131,6 @@ private:
     // Undock behavior config (read by DockTab)
     float m_UndockThresholdPx = 60.0f;
     float m_UndockDominance = 1.25f;
-
-    uint32_t m_AccentColor = 0xFF3A8FFF;
 
     // Live drag state
     UIElement* m_LiveDragTab = nullptr;

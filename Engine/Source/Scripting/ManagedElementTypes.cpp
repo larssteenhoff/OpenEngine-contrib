@@ -1,6 +1,7 @@
 #include "Scripting/ManagedElementTypes.h"
 
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Scripting/ManagedTypeOwners.h"
 #include "Types/StringUtils.h"
 #include "UI/Registration/ElementRegistration.h"
@@ -11,7 +12,6 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <cstdlib>
 #include <optional>
 #include <memory>
 
@@ -118,17 +118,12 @@ bool ManagedElementTypes::BadgeEnabled()
 {
     if (g_BadgeOverride.has_value())
         return *g_BadgeOverride;
-    static const bool kEnabled = []
-    {
-        const char* v = std::getenv("GE_UI_ORPHAN_BADGE");
-        if (v && (v[0] == '0' || v[0] == '1'))
-            return v[0] == '1';
 #if defined(GE_DEV_DIAG)
-        return true;
+    constexpr bool kDefault = true;
 #else
-        return false;
+    constexpr bool kDefault = false;
 #endif
-    }();
+    static const bool kEnabled = Platform::EnvironmentSwitchEnabled("GE_UI_ORPHAN_BADGE", kDefault);
     return kEnabled;
 }
 

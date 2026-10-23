@@ -232,15 +232,12 @@ bool TextureAsset::Load() {
     std::transform(extension.begin(), extension.end(), extension.begin(), [](char c) { return static_cast<char>(std::tolower(c)); });
 
     bool success = false;
-    if (extension == ".dds") {
-        success = LoadDDS();
-    }
 #if defined(GE_HAVE_KTX)
-    else if (extension == ".ktx" || extension == ".ktx2") {
+    if (extension == ".ktx" || extension == ".ktx2") {
         success = LoadWithKTX();
     }
 #else
-    else if (extension == ".ktx" || extension == ".ktx2") {
+    if (extension == ".ktx" || extension == ".ktx2") {
         Logger::Log::Error("KTX texture support not available at build time for '{}'", GetPath().string());
         success = false;
     }
@@ -297,15 +294,12 @@ bool TextureAsset::LoadFromData(const Vector<uint8>& data) {
     std::transform(extension.begin(), extension.end(), extension.begin(), [](char c) { return static_cast<char>(std::tolower(c)); });
 
     bool success = false;
-    if (extension == ".dds") {
-        success = LoadDDSFromData(data);
-    }
 #if defined(GE_HAVE_KTX)
-    else if (extension == ".ktx" || extension == ".ktx2") {
+    if (extension == ".ktx" || extension == ".ktx2") {
         success = LoadWithKTXFromData(data);
     }
 #else
-    else if (extension == ".ktx" || extension == ".ktx2") {
+    if (extension == ".ktx" || extension == ".ktx2") {
         Logger::Log::Error("KTX texture support not available at build time for '{}' (memory load)", GetName());
         success = false;
     }
@@ -901,18 +895,6 @@ bool TextureAsset::DecodeSourceBytes(const Vector<uint8>& data) {
     m_PixelData = new uint8[m_DataSize];
     std::memcpy(m_PixelData, decoded.Pixels.data(), static_cast<size_t>(m_DataSize));
     return true;
-}
-
-bool TextureAsset::LoadDDS() {
-    // TODO: Implement DDS loading
-    Logger::Log::Warning("DDS texture loading not yet implemented");
-    return false;
-}
-
-bool TextureAsset::LoadDDSFromData([[maybe_unused]] const Vector<uint8>& data) {
-    // TODO: Implement DDS loading from memory
-    Logger::Log::Warning("DDS texture loading from memory not yet implemented");
-    return false;
 }
 
 namespace

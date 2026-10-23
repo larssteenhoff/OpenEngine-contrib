@@ -19,6 +19,7 @@
 #include "UI/Interaction/FocusIsInside.h"
 #include "UI/UIEvents.h"
 #include "UI/UIManager.h"
+#include "TestTempDir.h"
 #include "UIRgTestHarness.h"
 
 #include <filesystem>
@@ -134,6 +135,14 @@ void ClaimByPolling(Input::InputSystem& sink, Input::KeyCode key)
     (void)sink.IsKeyDown(key);
 }
 
+// The stylesheets of this test process, removed at exit: a concurrent ctest process running the
+// same tests writes its own.
+const std::filesystem::path& StyleDirectory()
+{
+    static const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("router_styles")};
+    return directory.Path();
+}
+
 // A root with one Button laid out at a known rect, used by the pointer rows.
 // Returns the button, with the cursor already parked over it and hover resolved,
 // so a routed press lands on a control that acts.
@@ -147,7 +156,7 @@ Button* AttachHoveredButton(RouterFixture& f, const char* cssName)
     root->AddChild(std::move(btnOwned));
     f.ui->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / cssName;
+    const auto css = StyleDirectory() / cssName;
     {
         std::ofstream out(css);
         out << R"(
@@ -574,7 +583,7 @@ TEST(WindowInputRoutingTests, AHoveredPanelWithoutFocusLeavesTheChordToTheEditor
     root->AddChild(std::move(fieldOwned));
     f.ui->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / "router_hovered_panel.css";
+    const auto css = StyleDirectory() / "router_hovered_panel.css";
     {
         std::ofstream out(css);
         out << R"(
@@ -842,7 +851,7 @@ TEST(WindowInputRoutingTests, AHoveredUnfocusedTextFieldDoesNotStarveTheRuntimeS
     root->AddChild(std::move(fieldOwned));
     f.ui->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / "router_hovered_field.css";
+    const auto css = StyleDirectory() / "router_hovered_field.css";
     {
         std::ofstream out(css);
         out << R"(
@@ -1829,7 +1838,7 @@ TEST(WindowInputRoutingTests, ScrollAScrollViewConsumedStopsAtTheUi)
     root->AddChild(std::move(scrollOwned));
     f.ui->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / "router_scroll_consumed.css";
+    const auto css = StyleDirectory() / "router_scroll_consumed.css";
     {
         std::ofstream out(css);
         out << R"(
@@ -2123,7 +2132,7 @@ bool MakeHoveredHudButton(HudButtonSurface& hud, Rendering::IDevice* device, con
     root->AddChild(std::move(btnOwned));
     ui->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / cssName;
+    const auto css = StyleDirectory() / cssName;
     {
         std::ofstream out(css);
         out << R"(
@@ -2401,7 +2410,7 @@ bool MakeHudButton(HudButtonSurface& hud, Rendering::IDevice* device, const char
     root->AddChild(std::move(btnOwned));
     ui->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / cssName;
+    const auto css = StyleDirectory() / cssName;
     {
         std::ofstream out(css);
         out << R"(
@@ -2570,7 +2579,7 @@ TEST(WindowInputRoutingTests, AWheelTheHudTakesIsNotAlsoTheGames)
     root->AddChild(std::move(scrollOwned));
     hudUi->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / "router_player_hud_wheel.css";
+    const auto css = StyleDirectory() / "router_player_hud_wheel.css";
     {
         std::ofstream out(css);
         // Content taller than the list, so the wheel genuinely moves it.
@@ -2637,7 +2646,7 @@ TEST(WindowInputRoutingTests, AWheelOverBareGameBackgroundIsNotTheHudsToTake)
     root->AddChild(std::move(scrollOwned));
     hudUi->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / "router_player_hud_wheel_world.css";
+    const auto css = StyleDirectory() / "router_player_hud_wheel_world.css";
     {
         std::ofstream out(css);
         out << R"(
@@ -2708,7 +2717,7 @@ TEST(WindowInputRoutingTests, AWheelOverAHudListThatCannotMoveIsStillTheGames)
     root->AddChild(std::move(scrollOwned));
     hudUi->SetRoot(std::move(root));
 
-    const auto css = std::filesystem::temp_directory_path() / "router_player_hud_wheel_fits.css";
+    const auto css = StyleDirectory() / "router_player_hud_wheel_fits.css";
     {
         std::ofstream out(css);
         // Content shorter than the list: there is nowhere for the wheel to take it.

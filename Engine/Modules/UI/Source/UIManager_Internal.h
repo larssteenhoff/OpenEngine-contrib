@@ -30,11 +30,7 @@ namespace GameEngine::Rendering::Text
 class FontAtlas;
 }
 
-// TextMeasureCtx now lives on RetainedYogaNode — see UIManager.h. The old
-// thread_local pool was replaced in Slice 2 step 3 so fast-path element
-// appends don't need to re-set YGNodeSetContext each frame.
-
-// P4 sibling style sharing: per-build-pass donor snapshots. A hash hit must
+// Sibling style sharing: per-build-pass donor snapshots. A hash hit must
 // still prove full key equality against the verification fields (hash
 // collisions degrade to a miss, never to a wrong style). The snapshot is
 // taken immediately after the donor's cascade and BEFORE per-element
@@ -62,12 +58,10 @@ struct GameEngine::UIManager::CascadeShareCache
     };
     std::unordered_map<uint64_t, Entry> Entries;
     // Hover-ancestor set for the rightmost `:hover` share-key bit, rebuilt at
-    // each root pass on the ROOT cache. It is read-only for the whole pass, so
-    // MT-4.2 parallel chunks share it by pointer (CascadeShareContext::Hover)
-    // rather than each copying it (issue #215). It lives here — behind
-    // UIManager's unique_ptr<CascadeShareCache> — precisely so the fix does NOT
-    // change UIManager's member layout (chunk-private caches carry their own
-    // empty, unused HoverChain; no copy is ever made into it).
+    // each root pass on the ROOT cache. It is read-only for the whole pass and
+    // is read by pointer (CascadeShareContext::Hover), never copied (issue
+    // #215). Other CascadeShareCache instances (the cascade probe's lane
+    // caches) leave it empty.
     std::unordered_set<const GameEngine::UIElement*> HoverChain;
 };
 
@@ -88,20 +82,11 @@ float BaselineTextFn(YGNodeConstRef node, float width, float height);
 void DetachYogaFromParent(YGNodeRef node);
 void RemoveAllYogaChildren(YGNodeRef node);
 
-// A WeightedPane's flex-grow is a runtime value (its splitter weight), not a
-// CSS property, so YogaAdapter::ApplyStyle can't set it. Every site that pushes
-// resolved style into a Yoga node must re-assert the weight afterwards or the
-// pane collapses to the CSS default. Used by the incremental restyle and the
-// transition re-solve; the BuildYogaRecursive push already has the pane in hand
-// and applies the same clamp inline.
-void ApplyWeightedPaneFlexGrowOverride(GameEngine::UIElement* el, YGNodeRef node);
-
 // A child of a block-flow container (display: block / inline, and the omitted
 // default) does not shrink to fit: CSS block layout has no shrink step, so the
 // child keeps its size and overflows. That is a PARENT fact, which
 // YogaAdapter::ApplyStyle — one ResolvedStyle onto one node — cannot decide, so
-// every site that pushes resolved style into a Yoga node re-asserts it here,
-// exactly as it re-asserts the WeightedPane weight above.
+// every site that pushes resolved style into a Yoga node re-asserts it here.
 //
 // An authored flex-shrink still wins. Chrome ignores the whole flex triple on a
 // block-flow child (measured: `flex-shrink: 1` and `flex: 1` both leave an 80px
@@ -152,13 +137,14 @@ struct BuiltNode
     bool orderChanged = false;
 };
 
-// MT-4.0 cascade seam: per-element data handed collect -> compute -> apply
-// within a single BuildYogaRecursive visit. Today the three stages run
-// sequentially and immediately per element; making the hand-off explicit is
-// the whole point of this slice. MT-4.1 hoists the collect outputs onto the
-// retained node; MT-4.2 dispatches ComputeElementCascade to a worker thread
-// with just these inputs, then replays the apply stage on the UI thread in
-// DFS order. The stage boundaries are documented on each field group.
+// Cascade seam: per-element data handed collect -> compute -> apply within a
+// single BuildYogaRecursive visit. The three stages run sequentially per
+// element on the UI thread. The compute stage (ComputeElementCascade) mutates
+// no Yoga node and no manager container: its effects land on the element and
+// on this item, and the apply stage merges them in DFS order. Debug seam
+// asserts catch Yoga mutation, sheet-set interning and rule-index builds
+// inside the compute region. The stage boundaries are documented on each
+// field group.
 struct YogaBuildItem
 {
     // --- Collect stage outputs (UI thread) -----------------------------
@@ -181,9 +167,8 @@ struct YogaBuildItem
     bool NeedCascade = false;
     bool OverridesDirty = false;
 
-    // MT-4.1: deferred effects recorded by ComputeElementCascade, merged by
-    // ApplyElementBuild on the UI thread (sequential now; deterministically
-    // mergeable when MT-4.2 runs compute on a worker). Keeping these off the
+    // Deferred effects recorded by ComputeElementCascade, merged by
+    // ApplyElementBuild on the UI thread. Keeping these off the
     // shared UpdateContext/prof keeps the compute region mutation-free.
     //   DidShareCascade  — cascade was served from the sibling-share cache
     //                      (drives the CascadeShared counter). NeedCascade
@@ -233,8 +218,8 @@ struct UpdateContext
 {
     // Stylesheet resolution (flat table for per-element sheet sets)
     std::vector<const GameEngine::Stylesheet*>& flatSheets;
-    // Step 4: parallel-indexed handles. Mirrors flatSheets so the
-    // interner's Intern() (which now takes handle spans) can be fed
+    // Parallel-indexed handles. Mirrors flatSheets so the
+    // interner's Intern() (which takes handle spans) can be fed
     // from the full-rebuild's per-element resolved sheet set without
     // rebuilding handles from scratch. flatHandles[i].get() ==
     // flatSheets[i] is an invariant.
@@ -284,11 +269,10 @@ struct UpdateContext
     //     - content scale changed     (physical/logical conversion shifts)
     //     - global stylesheet set     (every selector chain can rematch)
     //   Do NOT add RequestRelayout() callers or per-element dirty flags here —
-    //   see the Fix A invariant below (commit a3355481). Scoped mutations go
+    //   see the relayoutRequestedPre invariant below. Scoped mutations go
     //   through MarkDirty / SubtreeDirty propagation, which the subtree-skip
     //   fast path honors. Turning on computeLayoutSignaturesAll from a scoped
-    //   trigger kills the fast path globally for that frame: on a 3k-element
-    //   tree this regressed entity_reselect_sweep peak from ~55ms to ~134ms.
+    //   trigger disables the fast path globally for that frame.
     bool computeLayoutSignaturesAll = false;
 
     // `relayoutRequestedPre`
@@ -298,9 +282,9 @@ struct UpdateContext
     //   signatures are recomputed, and into needInitialLayoutSolve so Yoga
     //   solves rather than skipping.
     //
-    //   INVARIANT (Fix A / commit a3355481): every RequestRelayout caller
-    //   already pairs with MarkDirty(LayoutDirty|VisualDirty) on the
-    //   requesting element. Don't merge this into computeLayoutSignaturesAll
+    //   INVARIANT (relied on, not enforced): a RequestRelayout caller pairs it
+    //   with MarkDirty(LayoutDirty|VisualDirty) on the requesting element.
+    //   Don't merge this into computeLayoutSignaturesAll
     //   — SubtreeDirty propagation handles the subtree invalidation and the
     //   untouched siblings continue to hit the subtree-skip fast path.
     bool relayoutRequestedPre = false;
@@ -316,9 +300,6 @@ struct UpdateContext
     // passed to Yoga are already divided by this; layout rects are multiplied
     // back to physical after CalculateLayout.
     float contentScale = 1.0f;
-
-    // Text measure pool usage (lives in UIManager_Layout.cpp, exposed for spike logging)
-    size_t& textMeasureCtxUsed;
 
     // Pseudo-state snapshots taken before event dispatch, used to detect
     // focus/active changes that need dirty marking after events complete.
@@ -365,7 +346,7 @@ struct UpdateContext
         const auto& ref = sheetSetRefs[(size_t)idx];
         return {flatIndices.data() + ref.offset, ref.count};
     }
-    // Step 4: handle span accessor mirroring GetSheetSpan.
+    // Handle span accessor mirroring GetSheetSpan.
     std::span<const GameEngine::StylesheetHandle> GetHandleSpan(int32_t idx) const
     {
         if (idx < 0)
@@ -446,17 +427,6 @@ inline uint64_t HashFloatBits(float f)
     return (uint64_t)bits;
 }
 
-inline uint64_t HashString64(const std::string& s)
-{
-    uint64_t h = 1469598103934665603ULL;
-    for (unsigned char c : s)
-    {
-        h ^= (uint64_t)c;
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
 // Merge local stylesheet handles into an output sheet list (append-or-move-to-end).
 template <typename HandleVec>
 inline void MergeSheets(std::vector<const GameEngine::Stylesheet*>& outSheets,
@@ -480,7 +450,7 @@ inline void MergeSheets(std::vector<const GameEngine::Stylesheet*>& outSheets,
     }
 }
 
-// Step 4: handle-vector variant. Same dedup-by-pointer-identity, but
+// Handle-vector variant of MergeSheets. Same dedup-by-pointer-identity, but
 // returns a handle vector so the result keeps the Stylesheets alive.
 template <typename HandleVec>
 inline void MergeSheetsHandles(std::vector<GameEngine::StylesheetHandle>& outHandles,
@@ -523,13 +493,4 @@ inline bool UIElementReachesRoot(const GameEngine::UIElement* el, const GameEngi
     return top == root && root != nullptr;
 }
 
-// Access the text-measure context pool usage counter (lives in UIManager_Layout.cpp).
-// Returned by reference so Update() can reset it and read it for spike logging.
-size_t& GetTextMeasureCtxUsed();
-
-// Periodically trim the text-measure context pool: releases text strings in
-// unused entries.
-void TrimTextMeasureCtxPool();
-
-void ConfigureUiFontAtlas(GameEngine::Rendering::Text::FontAtlas& atlas);
 std::chrono::milliseconds ComputeFontRequestBackoff(uint32_t failCount);

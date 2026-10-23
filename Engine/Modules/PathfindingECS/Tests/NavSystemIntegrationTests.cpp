@@ -285,6 +285,63 @@ TEST_F(NavSystemIntegrationTest, AgentReachesDestination)
 }
 
 // ---------------------------------------------------------------------------
+// IdleAgentDoesNotStampTransformColumns
+// ---------------------------------------------------------------------------
+// The movement scan reads NavigationAgent and takes Transform and
+// WorldTransform as Writable, writing them only when the agent moves, so an
+// agent that does not move leaves their write-grant versions alone and
+// Changed<> consumers stay quiet. A moving agent is granted both transform
+// columns.
+
+TEST_F(NavSystemIntegrationTest, IdleAgentDoesNotStampTransformColumns)
+{
+    auto gridEntity = CreateGridSource();
+    auto src = GetGridSource(gridEntity);
+
+    auto agentEntity = CreateAgent(2.5f, 2.5f, 4.5f, 4.5f,
+                                   src.NavMapIndex, src.NavMapGeneration);
+    const ECS::EntityHandle agent = agentEntity.GetHandle();
+    const auto transformType = ECS::GetComponentTypeId<Components::Transform>();
+    const auto worldTransformType = ECS::GetComponentTypeId<Components::WorldTransform>();
+    const auto agentType = ECS::GetComponentTypeId<Components::NavigationAgent>();
+
+    NavigationPathfindingSystem pathSystem;
+    pathSystem.Update(*world, kDeltaTime);
+    world->ProcessCommands();
+
+    // Positive control: a moving tick grants both transform columns.
+    NavigationMovementSystem moveSystem;
+    const uint64 gateBeforeMove = world->GetGlobalSystemVersion();
+    moveSystem.Update(*world, kDeltaTime);
+    world->ProcessCommands();
+    EXPECT_GT(world->GetEntityColumnVersion(agent, transformType), gateBeforeMove);
+    EXPECT_GT(world->GetEntityColumnVersion(agent, worldTransformType), gateBeforeMove);
+
+    constexpr int kMaxIterations = 600;
+    for (int i = 0; i < kMaxIterations && GetAgentState(agentEntity).HasDestination; ++i)
+    {
+        moveSystem.Update(*world, kDeltaTime);
+        world->ProcessCommands();
+    }
+    ASSERT_FALSE(GetAgentState(agentEntity).HasDestination) << "agent never arrived";
+
+    const uint64 transformStamp = world->GetEntityColumnVersion(agent, transformType);
+    const uint64 worldTransformStamp = world->GetEntityColumnVersion(agent, worldTransformType);
+    const uint64 agentStamp = world->GetEntityColumnVersion(agent, agentType);
+    for (int i = 0; i < 4; ++i)
+    {
+        moveSystem.Update(*world, kDeltaTime);
+        world->ProcessCommands();
+    }
+    EXPECT_EQ(world->GetEntityColumnVersion(agent, transformType), transformStamp)
+        << "an idle movement update write-granted Transform";
+    EXPECT_EQ(world->GetEntityColumnVersion(agent, worldTransformType), worldTransformStamp)
+        << "an idle movement update write-granted WorldTransform";
+    EXPECT_EQ(world->GetEntityColumnVersion(agent, agentType), agentStamp)
+        << "an idle movement update write-granted NavigationAgent";
+}
+
+// ---------------------------------------------------------------------------
 // BlockedPathFails
 // ---------------------------------------------------------------------------
 

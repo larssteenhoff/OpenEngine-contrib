@@ -135,6 +135,10 @@ struct ViewDesc
     ViewParticipation participation = ViewParticipation::Always;
     uint32 participationFrames = 0;
 
+    // A background-only view keeps its sky and post passes but draws no scene geometry: it
+    // takes part in the frame while its effective layers are None.
+    bool backgroundOnly = false;
+
     // Whether the view takes part in this frame: always for an Always view, while armed for an
     // OnDemand one. A view that takes part runs its pipeline even when its layers are None.
     bool Participates() const
@@ -143,7 +147,7 @@ struct ViewDesc
     }
     RenderLayerMask ActiveRenderLayerMask() const
     {
-        return Participates() ? renderLayerMask : RenderLayerMask::None();
+        return (Participates() && !backgroundOnly) ? renderLayerMask : RenderLayerMask::None();
     }
     // Optional association of this view to a specific ECS world.
     // When non-zero, render extraction should only submit entities from the

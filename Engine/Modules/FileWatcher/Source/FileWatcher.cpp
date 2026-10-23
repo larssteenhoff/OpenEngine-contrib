@@ -152,6 +152,7 @@ bool FileWatcher::StartWatching(const std::filesystem::path& directory, bool rec
     m_NormalizedWatchBase = m_NormalizedWatchBase.lexically_normal();
 
     // Start watching thread
+    m_Watching = true;
     m_WatchThread = std::thread(&FileWatcher::WatchingThread, this);
 
     Logger::Log::Debug("Started watching directory: {} (recursive: {})",
@@ -220,7 +221,6 @@ void FileWatcher::WatchingThread()
 {
     Platform::SetCurrentThreadName("File Watcher");
     Logger::Log::Debug("FileWatcher thread started for directory: {}", m_WatchDirectory.string());
-    m_Watching = true;
 
 #ifdef PLATFORM_WINDOWS
     WatchWindows();

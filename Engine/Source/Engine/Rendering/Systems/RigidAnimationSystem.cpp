@@ -26,8 +26,10 @@ void RigidAnimationSystem::Update(ECS::World& world, [[maybe_unused]] float32 de
                              ECS::Read<SkeletonRef>,
                              ECS::Read<AnimatedNodeRef>,
                              ECS::Write<Transform>>();
-    query.Each([&](ECS::EntityHandle, AnimatorRef& animator, const SkeletonRef& skeletonRef, const AnimatedNodeRef& nodeRef, Transform& transform)
+    query.Each([&](ECS::EntityHandle, ECS::Writable<AnimatorRef> animatorRow, const SkeletonRef& skeletonRef,
+                   const AnimatedNodeRef& nodeRef, ECS::Writable<Transform> transformRow)
     {
+        const AnimatorRef& animator = animatorRow.Get();
         if (animator.ClipIndex == 0 || skeletonRef.skeletonId == 0)
             return;
 
@@ -48,11 +50,13 @@ void RigidAnimationSystem::Update(ECS::World& world, [[maybe_unused]] float32 de
             {
                 if (animator.IsLooping())
                 {
-                    animator.Time = static_cast<float>(WrapClipTime(animator.Time, 0.0f, duration));
+                    const float wrapped = static_cast<float>(WrapClipTime(animator.Time, 0.0f, duration));
+                    if (wrapped != animator.Time)
+                        animatorRow.Mutable().Time = wrapped;
                 }
                 else if (animator.Time > duration)
                 {
-                    animator.Time = duration;
+                    animatorRow.Mutable().Time = duration;
                 }
             }
         }
@@ -62,7 +66,7 @@ void RigidAnimationSystem::Update(ECS::World& world, [[maybe_unused]] float32 de
         if (matrixOffset + 16u > m_NodeWorldMatrices.size())
             return;
 
-        std::memcpy(transform.matrix, m_NodeWorldMatrices.data() + matrixOffset, sizeof(float32) * 16u);
+        std::memcpy(transformRow.Mutable().matrix, m_NodeWorldMatrices.data() + matrixOffset, sizeof(float32) * 16u);
     });
 }
 

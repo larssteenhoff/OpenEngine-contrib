@@ -12,6 +12,17 @@ const kMaxTextLengthHelp =
 
 export const tools: ToolDef[] = [
   proxyTool({
+    name: "dock_panel",
+    category: "ui",
+    description:
+      "Move a docked panel into the same tab group as anchorPanelId, or show it without moving when no anchor is given. Closed panels use the editor's existing opening policy. Floating panels that remain outside the main dock report failure. Returns current dock leaf, activeTab, width and height after layout settles, plus movedFrom for a move. Opening a closed or floating panel may activate its window; do not use this operation for background-only validation.",
+    schema: {
+      panelId: z.string().min(1).describe("Registered panel ID, for example Assets"),
+      anchorPanelId: z.string().min(1).optional().describe("Panel already in the main dock whose tab group receives the moved panel"),
+    },
+  }),
+
+  proxyTool({
     name: "get_ui_tree",
     category: "ui",
     description:

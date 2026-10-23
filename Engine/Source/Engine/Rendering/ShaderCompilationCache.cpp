@@ -1,6 +1,5 @@
 #include "Engine/Rendering/ShaderCompilationCache.h"
 
-#include "Engine/Rendering/Material.h"
 #include "Engine/Rendering/MaterialShaderPackageBuilder.h"
 #include "Engine/Rendering/ShaderCompileErrorLog.h"
 #include "Logger/Logger.h"
@@ -210,73 +209,10 @@ std::shared_ptr<SharedShaderVariant> ShaderCompilationCache::GetOrCompile(
     return publish();
 }
 
-std::shared_ptr<SharedShaderVariant> ShaderCompilationCache::GetOrCompileVariant(
-    const Material& material,
-    Rendering::MaterialKeyword passKeywords,
-    const Rendering::MaterialBuildContext& buildContext,
-    Rendering::ShaderSourceKind kind,
-    Rendering::VertexAttributeFlags meshVertexFlags)
-{
-    VariantCacheKey lookupKey{passKeywords, meshVertexFlags};
-
-    uint64_t epochAtStart = 0;
-    {
-        std::lock_guard lock(m_Mutex);
-        epochAtStart = m_InvalidationEpoch;
-        auto outerIt = m_MaterialVariants.find(&material);
-        if (outerIt != m_MaterialVariants.end())
-        {
-            for (auto& [key, variant] : outerIt->second)
-            {
-                if (key == lookupKey)
-                    return variant;
-            }
-        }
-    }
-
-    Rendering::ShaderVariantKey mergedKey = material.GetVariantKey();
-    mergedKey.materialKeywords |= passKeywords;
-    if (meshVertexFlags != Rendering::VertexAttributeFlags::None)
-        mergedKey.vertexFlags = meshVertexFlags;
-    // Fully-procedural materials ignore mesh vertex flags entirely — without
-    // this the cache fragments into per-mesh-layout keys that all compile to
-    // the same clamped SPIR-V.
-    if (material.GetCompileSpec().customVertexShader)
-        Rendering::ApplyCustomVertexShaderClamp(mergedKey);
-
-    ShaderCacheKey cacheKey{};
-    cacheKey.VariantKey = mergedKey;
-    cacheKey.Source.SurfaceShaderPath = material.GetCompileSpec().surfaceShaderPath;
-    cacheKey.Source.VertexModifierPath = material.GetCompileSpec().vertexModifierPath;
-    cacheKey.Source.MaterialAssetPath = material.GetMaterialAssetPath();
-
-    auto variant =
-        GetOrCompile(cacheKey, material.GetCompileSpec(), buildContext, material.GetName(), kind);
-
-    // Don't memoize a transient not-ready result. A null with an empty
-    // AdapterShaderDir is the early-startup case (GetOrCompile returned null
-    // without caching); memoizing it here would defeat the retry and leave the
-    // material permanently dead once the context becomes ready. A null with a
-    // populated context is a genuine compile failure — keep memoizing it so we
-    // don't retry the same broken build every frame.
-    if (variant || !buildContext.AdapterShaderDir.empty())
-    {
-        std::lock_guard lock(m_Mutex);
-        // Mirror of the publish-side resurrection guard: the memo is a fast path
-        // ONTO the global entry, so memoizing a result whose compile started
-        // before an invalidation would keep serving pre-edit SPIR-V to this
-        // material even though m_Cache correctly dropped it.
-        if (m_InvalidationEpoch == epochAtStart)
-            m_MaterialVariants[&material].push_back({lookupKey, variant});
-    }
-    return variant;
-}
-
 void ShaderCompilationCache::Clear()
 {
     std::lock_guard lock(m_Mutex);
     m_Cache.clear();
-    m_MaterialVariants.clear();
     // Drop in-flight election so a post-clear request for a still-compiling key
     // starts a fresh compile rather than waiting on the pre-clear one. The old
     // compiler still releases its (now-orphaned) waiters with the pre-clear
@@ -292,23 +228,11 @@ void ShaderCompilationCache::Clear()
     // row strands it. See the declaration for the full argument.
     //
     // Bar the same resurrection the sweep bars: a compile that ELECTED before
-    // this call must not reinstate its entry or its per-material memo
-    // afterwards. A compile that only QUEUED before it and elects after
-    // snapshots this new value, compares equal, and does publish — see
-    // MaterialSystem::OnProjectSwitched for the residual that leaves.
+    // this call must not reinstate its entry afterwards. A compile that only
+    // QUEUED before it and elects after snapshots this new value, compares
+    // equal, and does publish — see MaterialSystem::OnProjectSwitched for the
+    // residual that leaves.
     ++m_InvalidationEpoch;
-}
-
-void ShaderCompilationCache::ClearAllMaterialVariants()
-{
-    std::lock_guard lock(m_Mutex);
-    m_MaterialVariants.clear();
-}
-
-void ShaderCompilationCache::ClearVariantsForMaterial(const Material* material)
-{
-    std::lock_guard lock(m_Mutex);
-    m_MaterialVariants.erase(material);
 }
 
 void ShaderCompilationCache::InvalidateGlobalEntry(const ShaderCacheKey& key)
@@ -320,23 +244,7 @@ void ShaderCompilationCache::InvalidateGlobalEntry(const ShaderCacheKey& key)
     // case the resurrection guard exists for. Without the bump, that compile's
     // publish() re-inserts SPIR-V built from the pre-edit source.
     ++m_InvalidationEpoch;
-    const auto it = m_Cache.find(key);
-    if (it == m_Cache.end())
-        return;
-    // Drop every per-material memo that resolved to this entry: the memo is a
-    // fast path onto the global entry, and a memo that outlives its entry keeps
-    // serving stale SPIR-V to EVERY material sharing the shader — not just the
-    // one the caller is about to recompile.
-    // dying may be null (a memoized compile failure) — the sweep below then
-    // drops every null memo, which is exactly right: invalidation means
-    // "something changed, recompile", and that includes retrying failures.
-    const std::shared_ptr<SharedShaderVariant> dying = it->second;
-    m_Cache.erase(it);
-    for (auto& [material, variants] : m_MaterialVariants)
-    {
-        std::erase_if(variants,
-                      [&dying](const VariantEntry& e) { return e.second == dying; });
-    }
+    m_Cache.erase(key);
 }
 
 ShaderFileDependents ShaderCompilationCache::InvalidateEntriesForShaderFile(
@@ -383,18 +291,11 @@ ShaderFileDependents ShaderCompilationCache::InvalidateEntriesForShaderFile(
     // Bump the epoch before the sweep and regardless of what the sweep finds:
     // the entry a compile currently in flight is about to publish is NOT in
     // m_Cache yet, so a zero-drop invalidation is precisely the case the
-    // resurrection guard exists for. publish() and the memo insert both compare
-    // against the snapshot they took, so any compile that started before this
-    // point is now barred from re-populating either cache. It does not cancel the
-    // in-flight ELECTION — see the m_InFlight declaration for why not.
+    // resurrection guard exists for. publish() compares against the snapshot it
+    // took, so any compile that started before this point is now barred from
+    // re-populating the cache. It does not cancel the in-flight ELECTION — see
+    // the m_InFlight declaration for why not.
     ++m_InvalidationEpoch;
-    // Same discipline as InvalidateGlobalEntry: every per-material memo that
-    // resolved to a dying entry must go with it, or it keeps serving stale
-    // SPIR-V to every material sharing the shader. A dying null (memoized
-    // compile failure) sweeps ALL null memos — over-broad but correct:
-    // invalidation means "something changed, retry", and that includes retrying
-    // failures.
-    std::vector<std::shared_ptr<SharedShaderVariant>> dying;
     for (auto it = m_Cache.begin(); it != m_Cache.end();)
     {
         // A probe into the identity set the rows just produced — the same
@@ -405,7 +306,7 @@ ShaderFileDependents ShaderCompilationCache::InvalidateEntriesForShaderFile(
             || references(it->first.Source.VertexModifierPath)
             || matched.count(it->first.Source) != 0)
         {
-            dying.push_back(it->second);
+            ++dependents.DroppedEntries;
             it = m_Cache.erase(it);
         }
         else
@@ -414,19 +315,9 @@ ShaderFileDependents ShaderCompilationCache::InvalidateEntriesForShaderFile(
         }
     }
 
-    dependents.DroppedEntries = dying.size();
     dependents.Identities.reserve(matched.size());
     while (!matched.empty())
         dependents.Identities.push_back(std::move(matched.extract(matched.begin()).value()));
-
-    if (dying.empty())
-        return dependents;
-    for (auto& [material, variants] : m_MaterialVariants)
-    {
-        std::erase_if(variants,
-                      [&dying](const VariantEntry& e)
-                      { return std::find(dying.begin(), dying.end(), e.second) != dying.end(); });
-    }
     return dependents;
 }
 

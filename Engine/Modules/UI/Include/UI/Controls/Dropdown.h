@@ -88,6 +88,11 @@ public:
 
     void SetNativeMenuInvoker(NativeMenuInvoker invoker);
 
+    /// Bound long menus to this height in logical pixels. Zero removes the bound.
+    void SetMaxPopupHeight(float height);
+    /// Use the available panel height, scrolling only when the list cannot fit.
+    void FitPopupToAvailableHeight();
+
     // When true, the popup list grows wider than the header to fit its
     // content. When false (default), the popup matches the header width
     // and clips overflow — unless the options declare icons, whose column
@@ -144,6 +149,8 @@ private:
     std::string             m_HeaderIconClass;
     UIElement*              m_Chevron{nullptr};
     UIElement*              m_ItemsContainer{nullptr};
+    UIElement*              m_ItemsContent{nullptr};
+    float                   m_MaxPopupHeight{0};
     NativeMenuInvoker       m_NativeMenuInvoker;
     bool                    m_AutoWidthPopup{false};
     // Any option declares an icon class: the whole control then reserves the

@@ -14,6 +14,7 @@
 namespace GameEngine {
 
 namespace Editor { class UndoRedoService; }
+namespace ECS { struct EntityHandle; }
 
 // Constants for bookmarks persistence (file name and SettingsStore keys).
 // Single place for names used in SaveBookmarks/LoadBookmarks/SaveRowHeight/LoadRowHeight.
@@ -110,7 +111,8 @@ public:
     void HandleAssetDrops(const std::vector<std::filesystem::path>& assetPaths);
     /** Add multiple assets at a specific insert index (first at insertIndex, then insertIndex+1, ...). */
     void HandleAssetDrops(const std::vector<std::filesystem::path>& assetPaths, int insertIndex);
-    void HandleEntityDrop(const std::string& scenePath, const std::string& entityId);
+    /** Add scene entities of the active scene at the top of the list; stale handles are skipped. */
+    void AddEntityBookmarks(const std::vector<ECS::EntityHandle>& entities);
     
     // Refresh bookmarks (reload from disk and rebuild UI)
     // Call after asset scanning completes to validate bookmarks against updated registry
@@ -145,6 +147,7 @@ private:
 
     // Drop handler for hierarchy entity drags
     void HandleEntityPayloadDrop(const std::vector<std::uint64_t>& treeIds, int insertIndex);
+    std::string GetCurrentScenePathString() const;
     
     // Icon helpers
     void UpdateBookmarkIcon(UIElement* iconEl, const Bookmark& bookmark);

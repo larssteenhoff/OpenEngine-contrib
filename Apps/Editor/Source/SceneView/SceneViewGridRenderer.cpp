@@ -32,7 +32,7 @@ struct GridPC
 struct Grid2DPC
 {
     float invVP[16];
-    float cameraPos[4]; // unused by 2D shader; kept for layout parity with GridPC
+    float cells[4]; // xy = grid origin, zw = cell size; z <= 0 selects zoom decades
     float gridColor[4]; // rgb = non-axis line color, a unused
     float opacity;
     float camDistance;
@@ -160,7 +160,8 @@ void SceneViewGridRenderer::RecordRG(const Rendering::RenderGraph::RGContext& ct
                                       float camDistance,
                                       float viewportH,
                                       float gridOpacity,
-                                      uint32_t gridColor)
+                                      uint32_t gridColor,
+                                      const float cells2D[4])
 {
     if (!cam)
         return;
@@ -196,8 +197,10 @@ void SceneViewGridRenderer::RecordRG(const Rendering::RenderGraph::RGContext& ct
     else
     {
         Grid2DPC pc{};
-        FillGridPCCommon(pc.invVP, pc.cameraPos, pc.gridColor, pc.opacity, *cam, camPos,
+        float unusedCameraPos[4];
+        FillGridPCCommon(pc.invVP, unusedCameraPos, pc.gridColor, pc.opacity, *cam, camPos,
                          gridOpacity, gridColor);
+        std::memcpy(pc.cells, cells2D, sizeof(pc.cells));
         pc.camDistance = camDistance;
         pc.viewportH = viewportH;
         cl->SetPushConstants(pc);

@@ -1,6 +1,7 @@
 #include "Assets/FileWatchingService.h"
 #include "Logger/Logger.h"
 #include "Platform/Capabilities.h"
+#include "Types/StringUtils.h"
 #include <algorithm>
 #include <atomic>
 #include <string>
@@ -35,18 +36,16 @@ static std::filesystem::path MakeAbsoluteLexical(const std::filesystem::path& p)
 static std::string NormalizeWatcherKey(const std::filesystem::path& directory)
 {
     std::filesystem::path abs = MakeAbsoluteLexical(directory);
-    std::string key = abs.string();
 #ifdef _WIN32
-    std::transform(key.begin(), key.end(), key.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ToLowerAscii(abs.string());
+#else
+    return abs.string();
 #endif
-    return key;
 }
 
-static std::string NormalizeExtensionLower(std::string ext)
+static std::string NormalizeExtensionLower(std::string_view extension)
 {
-    std::transform(ext.begin(), ext.end(), ext.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string ext = ToLowerAscii(extension);
     if (!ext.empty() && ext[0] != '.')
         ext.insert(ext.begin(), '.');
     return ext;
@@ -61,10 +60,7 @@ static std::filesystem::path NormalizeForMatching(const std::filesystem::path& p
         return {};
     std::filesystem::path abs = MakeAbsoluteLexical(p);
 #ifdef _WIN32
-    std::string s = abs.string();
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return std::filesystem::path(std::move(s));
+    return std::filesystem::path(ToLowerAscii(abs.string()));
 #else
     return abs;
 #endif
@@ -82,13 +78,8 @@ static bool IsStrictAncestor(const std::filesystem::path& ancestor,
                              const std::filesystem::path& descendant)
 {
 #ifdef _WIN32
-    auto toLower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return s;
-    };
-    const std::filesystem::path ancLower(toLower(ancestor.string()));
-    const std::filesystem::path descLower(toLower(descendant.string()));
+    const std::filesystem::path ancLower(ToLowerAscii(ancestor.string()));
+    const std::filesystem::path descLower(ToLowerAscii(descendant.string()));
     const auto rel = descLower.lexically_relative(ancLower);
 #else
     const auto rel = descendant.lexically_relative(ancestor);
@@ -221,9 +212,8 @@ FileWatchSubscription FileWatchingService::Subscribe(const FilePattern& pattern,
         return FileWatchSubscription(FileWatchSubscription::kInvalidSubscriptionId, nullptr);
     }
 
-    // Absorbed watchers from consolidation are stopped AFTER releasing the
-    // mutex — StopWatching joins the watcher thread, which may be blocked
-    // in OnFileChanged waiting for the same mutex we'd be holding.
+    // Absorbed watchers from consolidation are parked, and the ones whose
+    // threads have returned are stopped AFTER releasing the mutex.
     std::vector<std::unique_ptr<DirectoryWatcher>> deferredStops;
     SubscriptionId id = 0;
     {
@@ -269,9 +259,11 @@ FileWatchSubscription FileWatchingService::Subscribe(const FilePattern& pattern,
         CollectWatchersToStop(deferredStops);
     }
 
-    // Stop absorbed watchers outside the lock. Their threads may still deliver
-    // events through OnFileChanged until the join — harmless, since their
-    // subscriptions have already been rehomed under the lock.
+    // Absorbed watchers were asked to stop and parked. Their threads may still
+    // deliver events through OnFileChanged until they return — harmless, since
+    // their subscriptions have already been rehomed under the lock. What is
+    // left here are parked watchers whose threads have returned, so these
+    // joins do not wait.
     for (auto& w : deferredStops) {
         w->Watcher->StopWatching();
     }
@@ -348,16 +340,17 @@ void FileWatchingService::StopWatching() {
     // Flip m_Watching under the lock so OnFileChanged stops dispatching to
     // subscribers, then join the watcher threads OUTSIDE m_Mutex: a watcher
     // thread may be blocked on m_Mutex inside OnFileChanged, and joining it
-    // while holding the lock deadlocks (same hazard as the deferred-stop notes
-    // on GetOrCreateWatcher/Unsubscribe). Watchers stay in m_Watchers so
-    // StartWatching can re-arm them.
+    // while holding the lock deadlocks. Watchers stay in m_Watchers so
+    // StartWatching can re-arm them. Parked watchers are joined here whether
+    // or not their threads have returned.
     std::vector<FileWatcher*> toJoin;
     std::vector<std::unique_ptr<DirectoryWatcher>> retired;
     bool wasWatching = false;
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
 
-        CollectWatchersToStop(retired);
+        retired = std::move(m_RetiredWatchers);
+        m_RetiredWatchers.clear();
 
         wasWatching = m_Watching;
         if (wasWatching) {
@@ -409,8 +402,8 @@ FileWatchingService::WatchingStats FileWatchingService::GetStats() const {
 }
 
 void FileWatchingService::Unsubscribe(SubscriptionId id) {
-    // Same deferred-stop pattern as Subscribe: StopWatching joins the
-    // watcher thread, which may be blocked in OnFileChanged on m_Mutex.
+    // A watcher left empty is parked, not joined: its thread may be running
+    // another subscription's callback, which this call must not wait for.
     std::vector<std::unique_ptr<DirectoryWatcher>> toStop;
     // Destroyed after the lock is released, on this thread.
     FileChangeCallback releasedCallback;
@@ -440,8 +433,8 @@ void FileWatchingService::Unsubscribe(SubscriptionId id) {
             subscriptions.erase(std::remove(subscriptions.begin(), subscriptions.end(), id),
                                 subscriptions.end());
 
-            // Remove watcher if no subscriptions remain — hand the handle off
-            // to be stopped after releasing the lock.
+            // Remove watcher if no subscriptions remain; CollectWatchersToStop
+            // parks it.
             if (subscriptions.empty()) {
                 toStop.push_back(std::move(watcherIt->second));
                 m_Watchers.erase(watcherIt);
@@ -475,21 +468,23 @@ void FileWatchingService::Unsubscribe(SubscriptionId id) {
 }
 
 void FileWatchingService::CollectWatchersToStop(std::vector<std::unique_ptr<DirectoryWatcher>>& leaving) {
-    // Subscribe and Unsubscribe run on a watcher thread only from inside a
-    // callback, which is exactly when t_InvokingSubscription is set.
-    if (t_InvokingSubscription != FileWatchSubscription::kInvalidSubscriptionId) {
-        for (auto& w : leaving) {
-            w->Watcher->RequestStop();
-            m_RetiredWatchers.push_back(std::move(w));
-        }
-        leaving.clear();
-        return;
+    for (auto& w : leaving) {
+        w->Watcher->RequestStop();
+        m_RetiredWatchers.push_back(std::move(w));
     }
+    leaving.clear();
 
-    for (auto& w : m_RetiredWatchers) {
-        leaving.push_back(std::move(w));
+    // A parked watcher whose thread has returned joins at once. The caller's
+    // own thread, if it is a watcher thread, is still running, so it is never
+    // among these.
+    auto returned = std::partition(m_RetiredWatchers.begin(), m_RetiredWatchers.end(),
+                                  [](const std::unique_ptr<DirectoryWatcher>& w) {
+                                      return w->Watcher->IsThreadRunning();
+                                  });
+    for (auto it = returned; it != m_RetiredWatchers.end(); ++it) {
+        leaving.push_back(std::move(*it));
     }
-    m_RetiredWatchers.clear();
+    m_RetiredWatchers.erase(returned, m_RetiredWatchers.end());
 }
 
 void FileWatchingService::OnFileChanged(const FileChangeEvent& event) {
@@ -612,10 +607,9 @@ FileWatchingService::DirectoryWatcher* FileWatchingService::GetOrCreateWatcher(
 
     // 3) Consolidation — if the new subscription is recursive, any existing
     //    watchers strictly under this directory become redundant: their
-    //    subscriptions move to the new wider watcher and their OS handles
-    //    are deferred for shutdown outside the lock (StopWatching joins the
-    //    watcher thread, which may be blocked in OnFileChanged waiting for
-    //    the same mutex we hold).
+    //    subscriptions move to the new wider watcher and the absorbed
+    //    watchers are handed to the caller, which parks them (see
+    //    CollectWatchersToStop).
     std::vector<std::string> toAbsorb;
     if (recursive) {
         for (auto& [existingKey, w] : m_Watchers) {

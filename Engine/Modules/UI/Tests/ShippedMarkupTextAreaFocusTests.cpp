@@ -43,7 +43,7 @@ constexpr char kGeometryCss[] = R"(
 )";
 
 // --ui_color_accent in theme/tokens.css.
-constexpr std::uint32_t kAccentArgb = 0xFF006FFFu;
+constexpr std::uint32_t kAccentArgb = 0xFF3A8FFFu;
 
 } // namespace
 

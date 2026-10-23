@@ -7,9 +7,11 @@
 #include "Editor/Entities/EditorECSHelpers.h"
 
 #include "Assets/AssetRegistry.h" // AssetIndexRecord — the lens-dirt metadata filter
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorUIHelpers.h"
+#include "Types/ColorUtils.h"
 #include "Types/StringUtils.h"
 #include "UI/Controls/CurveField.h"
 #include "UI/Controls/EnumField.h"
@@ -43,54 +45,6 @@ constexpr float kBloomRadiusMin = 1.0f;
 constexpr float kBloomRadiusMax = 7.0f;
 constexpr float kBloomRadiusDefault = 2.5f;
 
-constexpr float kVignetteSwatchSize = 20.0f;
-constexpr float kVignetteSwatchBorderRadius = 3.0f;
-constexpr uint32_t kVignetteSwatchBorderColor = 0xFF555555u;
-
-uint32_t VignetteColorToArgb(const float (&color)[3])
-{
-    const auto channel = [](float value)
-    {
-        return static_cast<uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
-    };
-    return (0xFFu << 24) |
-           (static_cast<uint32_t>(channel(color[0])) << 16) |
-           (static_cast<uint32_t>(channel(color[1])) << 8) |
-           static_cast<uint32_t>(channel(color[2]));
-}
-
-void ArgbToVignetteColor(uint32_t argb, float (&out)[3])
-{
-    out[0] = ((argb >> 16) & 0xFF) / 255.0f;
-    out[1] = ((argb >> 8) & 0xFF) / 255.0f;
-    out[2] = (argb & 0xFF) / 255.0f;
-}
-
-std::string FormatVignetteColor(const float (&color)[3])
-{
-    char buffer[48];
-    std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", color[0], color[1], color[2]);
-    return buffer;
-}
-
-void StyleVignetteSwatch(UIElement* swatch, uint32_t argb)
-{
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(kVignetteSwatchSize))
-        .Set(Style::Height, StyleLength::Px(kVignetteSwatchSize))
-        .Set(Style::MinWidth, StyleLength::Px(kVignetteSwatchSize))
-        .Set(Style::MinHeight, StyleLength::Px(kVignetteSwatchSize))
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{
-            kVignetteSwatchBorderRadius, kVignetteSwatchBorderRadius,
-            kVignetteSwatchBorderRadius, kVignetteSwatchBorderRadius})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{
-            kVignetteSwatchBorderColor, kVignetteSwatchBorderColor,
-            kVignetteSwatchBorderColor, kVignetteSwatchBorderColor})
-        .Set(Style::BackgroundColor, argb)
-        .Set(Style::Cursor, CursorStyle::Pointer);
-}
-
 void AddBloomColorRow(
     UIElement* parent, const char* labelText, const char* tooltip,
     const char* snapshotLabel, const char* undoLabel,
@@ -98,28 +52,11 @@ void AddBloomColorRow(
     Editor::EditorChangeNotifications* notifications, Editor::UndoRedoService* undo,
     OpenColorPickerWindowFn openPicker, const float (&initialColor)[3])
 {
-    UIElement* row = InspectorUI::AddRow(parent);
-    Label* label = InspectorUI::AddLabel(row, labelText, tooltip);
-    if (label)
-        label->AddClass("inspector-label-no-drag");
-
-    UIElement* field = InspectorUI::AddFieldContainer(row);
-    field->Overrides()
-        .Set(Style::FlexDir, FlexDirection::Row)
-        .Set(Style::AlignItems, AlignItems::Center)
-        .Set(Style::Gap, StyleLength::Px(6.0f));
-
-    auto swatch = std::make_unique<UIElement>();
-    UIElement* swatchRaw = swatch.get();
-    StyleVignetteSwatch(swatchRaw, VignetteColorToArgb(initialColor));
-    field->AddChild(std::move(swatch));
-
-    auto rgbLabel = std::make_unique<Label>();
-    Label* rgbLabelRaw = rgbLabel.get();
-    rgbLabelRaw->AddClass("inspector-text");
-    rgbLabelRaw->SetText(FormatVignetteColor(initialColor));
-    rgbLabelRaw->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-    field->AddChild(std::move(rgbLabel));
+    const InspectorUI::ColorSwatchRow colorRow = InspectorUI::AddColorSwatchRow(
+        parent, labelText, tooltip, ColorUtils::RgbFloatsToArgb(initialColor),
+        InspectorUI::FormatColorRgb(initialColor[0], initialColor[1], initialColor[2]));
+    UIElement* swatchRaw = colorRow.Swatch;
+    Label* rgbLabelRaw = colorRow.Value;
 
     // The picker's callbacks outlive an inspector rebuild: resolve the row through weak
     // refs instead of holding the freed widgets.
@@ -132,8 +69,8 @@ void AddBloomColorRow(
         if (!bloom || !swatch || !rgbLabel)
             return;
         const auto& color = bloom->*colorMember;
-        StyleVignetteSwatch(swatch, VignetteColorToArgb(color));
-        rgbLabel->SetText(FormatVignetteColor(color));
+        InspectorUI::SetColorSwatchColor(swatch, ColorUtils::RgbFloatsToArgb(color));
+        rgbLabel->SetText(InspectorUI::FormatColorRgb(color[0], color[1], color[2]));
     };
 
     auto onClick = [world, entity, notifications, undo, openPicker, refresh,
@@ -166,7 +103,7 @@ void AddBloomColorRow(
                 edit->Preview([&]
                 {
                     if (auto* value = world->GetComponentForWrite<Bloom>(entity))
-                        ArgbToVignetteColor(argb, value->*colorMember);
+                        ColorUtils::ArgbToRgbFloats(argb, value->*colorMember);
                 });
                 if (commit)
                     edit->Commit();
@@ -174,7 +111,7 @@ void AddBloomColorRow(
             else if (const auto* current = world->GetComponent<Bloom>(entity))
             {
                 Bloom updated = *current;
-                ArgbToVignetteColor(argb, updated.*colorMember);
+                ColorUtils::ArgbToRgbFloats(argb, updated.*colorMember);
                 if (commit)
                     Editor::CommitComponentUpdate(world, entity, notifications, updated);
                 else
@@ -194,7 +131,7 @@ void AddBloomColorRow(
                 Editor::PreviewComponentUpdate(world, entity, notifications, original);
             refresh();
         };
-        openPicker(VignetteColorToArgb(bloom->*colorMember), 1.0f, std::move(callbacks));
+        openPicker(ColorUtils::RgbFloatsToArgb(bloom->*colorMember), 1.0f, std::move(callbacks));
     };
 
     swatchRaw->RegisterEventHandler(kEventMouseDown, onClick);

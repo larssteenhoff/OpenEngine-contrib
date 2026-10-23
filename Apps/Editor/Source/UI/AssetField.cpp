@@ -42,8 +42,8 @@ AssetField::AssetField()
     m_Icon = icon.get();
     AddChild(std::move(icon));
 
-    // Preview strip: model thumbnail (via IThumbnailProvider) or the texture
-    // file itself; hidden for every other asset type.
+    // Preview strip: the texture file itself, or any thumbnail a provider answers
+    // with. Hidden until one of the two produces a picture.
     auto preview = std::make_unique<UIElement>();
     preview->AddClass("asset-field-preview");
     preview->AddClass("hidden");
@@ -91,7 +91,7 @@ void AssetField::ApplyValue(const GUID& guid)
         m_OnValueChanged(m_Value);
 }
 
-void AssetField::ClearModelPreviewStrip()
+void AssetField::ClearPreviewStrip()
 {
     if (!m_Preview)
         return;
@@ -99,12 +99,43 @@ void AssetField::ClearModelPreviewStrip()
     UI::Layout::ClearBackgroundOverride(*m_Preview);
 }
 
+void AssetField::ApplyThumbnail(uint32_t generation, AssetType assetType, const std::string& rel)
+{
+    if (generation != m_PreviewRequestGen || !m_Preview)
+        return;
+    if (rel.empty())
+    {
+        ClearPreviewStrip();
+        m_Icon->RemoveClass("hidden");
+        if (m_CurrentIconClass.empty())
+        {
+            m_CurrentIconClass = AssetSearchProvider::GetIconClassForType(assetType);
+            m_Icon->AddClass(m_CurrentIconClass);
+        }
+        return;
+    }
+    constexpr const char* kEnginePrefix = "engine:";
+    constexpr size_t kEnginePrefixLen = 7;
+    if (rel.rfind(kEnginePrefix, 0) == 0)
+        UI::Layout::SetBackgroundResourceName(*m_Preview, rel.substr(kEnginePrefixLen));
+    else
+        UI::Layout::SetBackgroundPath(*m_Preview, rel);
+    m_Preview->RemoveClass("hidden");
+    m_Icon->AddClass("hidden");
+    if (!m_CurrentIconClass.empty())
+    {
+        m_Icon->RemoveClass(m_CurrentIconClass);
+        m_CurrentIconClass.clear();
+    }
+}
+
 void AssetField::UpdateDisplay()
 {
+    ++m_PreviewRequestGen;
     if (m_Value.IsNull())
     {
         ShowEmpty();
-        ClearModelPreviewStrip();
+        ClearPreviewStrip();
         if (!m_CurrentIconClass.empty())
         {
             m_Icon->RemoveClass(m_CurrentIconClass);
@@ -122,7 +153,7 @@ void AssetField::UpdateDisplay()
         {
             ShowNamed(meta.Name);
 
-            // Type icon (hidden when a model preview image is shown).
+            // Type icon (hidden once a preview image arrives for this asset).
             m_Icon->RemoveClass("hidden");
             if (!m_CurrentIconClass.empty())
                 m_Icon->RemoveClass(m_CurrentIconClass);
@@ -135,7 +166,6 @@ void AssetField::UpdateDisplay()
                 // preview strip directly, the way MaterialTexturePreviewHost
                 // does — no provider round-trip, and the UI texture cache
                 // dedups with any larger preview of the same file.
-                ++m_ModelPreviewRequestGen; // invalidate any in-flight model thumb
                 UI::Layout::SetBackgroundPath(*m_Preview, meta.Path.string());
                 m_Preview->RemoveClass("hidden");
                 m_Icon->AddClass("hidden");
@@ -145,58 +175,49 @@ void AssetField::UpdateDisplay()
                     m_CurrentIconClass.clear();
                 }
             }
-            else if (meta.Type == AssetType::Model && m_Thumbnails && m_Preview)
+            // Every other asset the provider can picture shows its picture. It
+            // answers for the types that have a handler — models, tile sets, tile
+            // maps, sprite sheets — and returns empty for the rest, which keeps
+            // the type icon below. Gating on the asset type here would mean this
+            // field has to learn about every new handler.
+            else if (m_Thumbnails && m_Preview)
             {
-                ++m_ModelPreviewRequestGen;
-                const uint32_t gen = m_ModelPreviewRequestGen;
-                ClearModelPreviewStrip();
+                const uint32_t gen = m_PreviewRequestGen;
+                const AssetType assetType = meta.Type;
+                ClearPreviewStrip();
 
-                auto applyThumb = [this, gen](const std::string& rel) {
-                    if (gen != m_ModelPreviewRequestGen || !m_Preview)
-                        return;
-                    if (rel.empty())
-                    {
-                        ClearModelPreviewStrip();
-                        m_Icon->RemoveClass("hidden");
-                        if (m_CurrentIconClass.empty())
-                        {
-                            m_CurrentIconClass = AssetSearchProvider::GetIconClassForType(AssetType::Model);
-                            m_Icon->AddClass(m_CurrentIconClass);
-                        }
-                        return;
-                    }
-                    constexpr const char* kEnginePrefix = "engine:";
-                    constexpr size_t kEnginePrefixLen = 7;
-                    if (rel.rfind(kEnginePrefix, 0) == 0)
-                        UI::Layout::SetBackgroundResourceName(*m_Preview, rel.substr(kEnginePrefixLen));
-                    else
-                        UI::Layout::SetBackgroundPath(*m_Preview, rel);
-                    m_Preview->RemoveClass("hidden");
-                    m_Icon->AddClass("hidden");
-                    if (!m_CurrentIconClass.empty())
-                    {
-                        m_Icon->RemoveClass(m_CurrentIconClass);
-                        m_CurrentIconClass.clear();
-                    }
+                const auto weakField = UIElement::MakeWeakRef(this);
+                auto applyThumb = [weakField, gen, assetType](const std::string& rel) {
+                    if (auto* field = weakField.Get())
+                        field->ApplyThumbnail(gen, assetType, rel);
                 };
 
-                // GetOrRequest always fires the callback synchronously (via the
-                // model-handler or fallback path), so we rely solely on applyThumb
-                // rather than also acting on the return value – that would call
-                // applyThumb twice, leaving m_CurrentIconClass in a cleared state
-                // on the second call and causing a stale-texture crash in the renderer.
-                m_Thumbnails->GetOrRequest(meta.Path, 64, applyThumb, true);
+                // ThumbnailService delivers every ready callback on the UI thread
+                // (see ThumbnailService::DeliverOnUiThread), so applying the thumbnail
+                // from here is safe whether the handler answered from its cache or
+                // finished generating on a worker. Delivery is uniform rather than
+                // immediate — it lands on the next frame — so the callback is the
+                // single application path and the return value is deliberately not
+                // used as well; applying both would run applyThumb twice and clear
+                // m_CurrentIconClass on the second pass.
+                //
+                // The static-list variant is a models-only concept: it hands back a
+                // cached engine texture instead of the rotating Asset View preview.
+                // Asking for it on any other type requests a preview that does not
+                // exist.
+                const bool staticModelList = (assetType == AssetType::Model);
+                m_Thumbnails->GetOrRequest(meta.Path, 64, applyThumb, staticModelList);
             }
             else
             {
-                ClearModelPreviewStrip();
+                ClearPreviewStrip();
             }
 
             return;
         }
     }
 
-    ClearModelPreviewStrip();
+    ClearPreviewStrip();
     m_Icon->AddClass("hidden");
 
     // Engine built-ins — the default scene's primitive meshes and materials — are

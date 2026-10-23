@@ -1,6 +1,11 @@
 # Apps/Player/CMakeLists.txt
 # Standalone Player runtime — lightweight game executable without Editor.
 
+if(GE_MOBILE)
+    include(Mobile.cmake)
+    return()
+endif()
+
 # Web Player (wasm): the same PlayerApplication driven by the browser's rAF
 # loop from WebMain.cpp instead of main.cpp's desktop loop. The canvas comes
 # from Tools/Web/shell.html and the WebGPU device binds to it. ASYNCIFY is
@@ -339,6 +344,9 @@ if(ENABLE_SCRIPTING)
                     "${CMAKE_SOURCE_DIR}/Managed/Scripting.Bindings/bin/$<CONFIG>"
                     "$<TARGET_FILE_DIR:Player>"
             COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+                    "${CMAKE_SOURCE_DIR}/Managed/TileMap.ABI/bin/$<CONFIG>"
+                    "$<TARGET_FILE_DIR:Player>"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
                     "${CMAKE_SOURCE_DIR}/Managed/Platform.ABI/bin/$<CONFIG>"
                     "$<TARGET_FILE_DIR:Player>"
             COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
@@ -367,6 +375,7 @@ if(ENABLE_SCRIPTING)
                 "${CMAKE_SOURCE_DIR}/Managed/Scripting.ABI/bin/$<CONFIG>"
                 "${CMAKE_SOURCE_DIR}/Managed/ECS.ABI/bin/$<CONFIG>"
                 "${CMAKE_SOURCE_DIR}/Managed/Scripting.Bindings/bin/$<CONFIG>"
+                "${CMAKE_SOURCE_DIR}/Managed/TileMap.ABI/bin/$<CONFIG>"
                 "${CMAKE_SOURCE_DIR}/Managed/Platform.ABI/bin/$<CONFIG>"
                 # GameSystem runner (ManagedSystemBridge resolves it beside CoreBridge)
                 "${CMAKE_SOURCE_DIR}/Managed/Scripting.Runtime/bin/$<CONFIG>"
@@ -387,7 +396,7 @@ endif()
 if(ENABLE_SCRIPTING)
     set(_ge_player_managed_deps
         CoreBridgeAssembly HotReloadAssembly ScriptingAbiAssembly
-        EcsAbiAssembly ScriptingBindingsAssembly PlatformAbiAssembly
+        EcsAbiAssembly ScriptingBindingsAssembly TileMapAbiAssembly PlatformAbiAssembly
         ScriptingRuntimeAssembly)
     add_dependencies(Player ${_ge_player_managed_deps})
 

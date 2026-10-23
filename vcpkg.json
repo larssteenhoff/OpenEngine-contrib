@@ -4,6 +4,7 @@
 
   "dependencies": [
     "freetype",
+    "icu",
     {
       "name": "harfbuzz",
       "platform": "!nothreads",
@@ -12,6 +13,7 @@
     "miniaudio",
     "libvorbis",
     "nlohmann-json",
+    "zlib",
     "sqlite3",
     "concurrentqueue",
     "cgltf",
@@ -35,8 +37,19 @@
     },
     "glm",
     {
+      "name": "sdl3",
+      "default-features": false,
+      "features": [ "vulkan" ],
+      "platform": "android"
+    },
+    {
+      "name": "sdl3",
+      "default-features": false,
+      "platform": "ios"
+    },
+    {
       "name": "glfw3",
-      "platform": "!wasm32"
+      "platform": "!wasm32 & !android & !ios"
     },
     {
       "name": "vulkan-memory-allocator",
@@ -53,11 +66,11 @@
     },
     {
       "name": "vulkan",
-      "platform": "!wasm32"
+      "platform": "!wasm32 & !ios"
     },
     {
       "name": "vulkan-headers",
-      "platform": "wasm32"
+      "platform": "wasm32 | ios"
     },
     {
       "name": "wgpu-native",
@@ -71,7 +84,7 @@
     },
     {
       "name": "spirv-cross",
-      "platform": "osx"
+      "platform": "osx | ios"
     },
     "ktx",
     {
@@ -125,8 +138,8 @@
     },
 
     "ui-extras": {
-      "description": "Optional UI helpers: HTML parsing via lexbor (used by the editor's docs/AI tooling) and SVG rasterization via thorvg (used by SvgRasterizer). Both have QUIET find_package's so opting out degrades gracefully.",
-      "dependencies": [ "lexbor", "thorvg" ]
+      "description": "Optional UI helpers: HTML parsing via lexbor, SVG parsing/rasterization via thorvg, and cooked SVG UI meshes via libtess2. The integrations use QUIET find_package calls so opting out degrades gracefully.",
+      "dependencies": [ "lexbor", "thorvg", "libtess2" ]
     },
 
     "tests": {

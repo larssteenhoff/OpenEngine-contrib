@@ -621,13 +621,6 @@ public:
     [[nodiscard]] ExpectedAssetWrite ExpectWritesUnder(const std::filesystem::path& root);
 
     /**
-     * @brief Unload an asset on a job-system worker, withdrawing its in-flight load first
-     * @param guid Asset GUID to unload
-     * @return TaskHandle of the unload task; invalid when the manager is not initialized or has no job system
-     */
-    JobSystem::TaskHandle UnloadAssetWithDependencies(const GUID& guid);
-
-    /**
      * @brief Load a single asset with a Result<>-based completion callback.
      *
      * Fire-and-forget asset loading. The callback receives a typed
@@ -962,7 +955,6 @@ private:
      * @brief Fallback synchronous load for managers without a job system.
      */
     std::future<SharedPtr<Asset>> LoadAssetSynchronous(const AssetMetadata& metadata);
-    std::future<Vector<SharedPtr<Asset>>> LoadAssetsSequential(const Vector<GUID>& guids, AssetLoadPriority priority);
 
     // A per-request completion callback awaiting an in-flight load, paired with
     // the originating handle's cancel flag. These are fired as a CONTINUATION
@@ -1338,7 +1330,6 @@ private:
     };
     mutable std::mutex m_SuppressedLoadMutex;
     HashMap<GUID, SuppressedLoadInfo> m_SuppressedLoads;
-
 
     // Cached memory statistics: the totals are atomics, the per-type map is
     // read and written under m_StatsCacheMutex.

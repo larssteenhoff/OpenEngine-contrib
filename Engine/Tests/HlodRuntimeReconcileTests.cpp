@@ -34,6 +34,8 @@
 
 #include "Rendering/CameraTypes.h"
 
+#include "TestTempDir.h"
+
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -125,8 +127,11 @@ Rendering::CameraData CameraAt(float x, float y, float z) {
     return cam;
 }
 
+// Under this test process's own directory, removed at exit: a concurrent ctest process running
+// the same tests writes its own.
 std::filesystem::path TempPath(const char* name) {
-    return std::filesystem::temp_directory_path() / name;
+    static const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("hlod_reconcile")};
+    return directory.Path() / name;
 }
 
 // One cell of `count` FAR statics, each a distinct model (r = 1 so the benefit

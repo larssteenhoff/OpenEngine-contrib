@@ -15,6 +15,7 @@
 #include "Scripting/ScriptingABI.h"
 #include "Assets/FileWatchingService.h"
 #include "Jobs/MockHotReloadDependencies.h"
+#include "TestTempDir.h"
 
 // GE_* stubs come from Engine/Source/HotReloadNativeStubs.cpp, added to this
 // target via CMake with /wd4273 (silences the dllimport-vs-definition warning).
@@ -35,7 +36,7 @@ protected:
         Logger::Log::SetLogLevel(Logger::LogLevel::Debug);
 
         // Create test directory
-        testDir = std::filesystem::temp_directory_path() / "hotreload_stress_test";
+        testDir = TestUtils::MakeUniqueTempDirectory("hotreload_stress_test");
         std::filesystem::create_directories(testDir);
 
         // Create test assembly file

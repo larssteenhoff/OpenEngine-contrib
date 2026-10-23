@@ -1,11 +1,13 @@
 #include "Inspectors/CameraInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
 
 #include "Components/Rendering/Camera.h"
 #include "Editor/Entities/EditorECSHelpers.h"
 #include "EditorChangeNotifications.h"
 #include "Engine/Rendering/CameraAspectRatio.h"
+#include "Engine/Rendering/TileMapCameraPixelGrid.h"
 #include "Components/Rendering/PostProcessVolume.h"
 #include "Panels/CameraCustomAspectModal.h"
 
@@ -22,6 +24,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace GameEngine
@@ -153,6 +156,18 @@ void CommitCameraAspectPreset(ECS::World* w,
 
 void RegisterCameraInspector()
 {
+    constexpr int kCameraSortKey = 120;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Camera";
+        traits.SortKey = kCameraSortKey;
+        traits.Tooltip = "Defines a view frustum used to render the scene";
+        traits.InspectorIconClass = "inspector-section-icon-camera";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::Camera>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())
@@ -349,10 +364,35 @@ void RegisterCameraInspector()
 
             if (cam->PixelPerfect)
             {
-                AddComponentIntRowWithDrag<Components::Camera>(ctx.Parent, "Pixels Per Unit", static_cast<int>(cam->PixelPerfectPixelsPerUnit), w, e, n, undo,
-                    "Change Camera Pixels Per Unit",
-                    [](Components::Camera& u, int v) { u.PixelPerfectPixelsPerUnit = static_cast<uint32>(std::max(1, v)); },
-                    static_cast<int>(cam->PixelPerfectPixelsPerUnit), "Reference pixel size: source texels per world unit", extras);
+                AddToggleRow(ctx.Parent, "Auto Pixels Per Unit", cam->PixelPerfectAutoPixelsPerUnit,
+                    [commitBool, notifyInspectorRebuild](bool v) {
+                        commitBool("Change Camera Auto Pixels Per Unit", v,
+                            [](Components::Camera& u, bool value) { u.PixelPerfectAutoPixelsPerUnit = value; });
+                        notifyInspectorRebuild();
+                    },
+                    "Derive Pixels Per Unit from the scene's tile maps (tile pixel width / cell width) instead of typing it. Uses the authored value when the scene has no visible tile map layer");
+
+                // In manual mode the editable row below already shows the effective
+                // density; in auto mode this read-only row is the only place the
+                // user can see what the camera resolved, and whether it resolved at all.
+                if (cam->PixelPerfectAutoPixelsPerUnit)
+                {
+                    const uint32 effectivePpu =
+                        static_cast<uint32>(Engine::Renderer::ResolvePixelPerfectPixelsPerUnit(*w, *cam));
+                    const bool resolved = Engine::Renderer::ResolveScenePixelsPerUnit(*w) > 0.0f;
+                    UIElement* row = InspectorUI::AddRow(ctx.Parent);
+                    InspectorUI::AddLabel(row, "Pixels Per Unit",
+                        "Taken from the scene's visible tile map layers. Turn off Auto to type a value");
+                    InspectorUI::AddTextBlock(row,
+                        std::to_string(effectivePpu) + (resolved ? " (from tileset)" : " (no tile map: authored value)"));
+                }
+                else
+                {
+                    AddComponentIntRowWithDrag<Components::Camera>(ctx.Parent, "Pixels Per Unit", static_cast<int>(cam->PixelPerfectPixelsPerUnit), w, e, n, undo,
+                        "Change Camera Pixels Per Unit",
+                        [](Components::Camera& u, int v) { u.PixelPerfectPixelsPerUnit = static_cast<uint32>(std::max(1, v)); },
+                        static_cast<int>(cam->PixelPerfectPixelsPerUnit), "Reference pixel size: source texels per world unit", extras);
+                }
                 AddComponentIntRowWithDrag<Components::Camera>(ctx.Parent, "Reference Width", static_cast<int>(cam->PixelPerfectReferenceWidth), w, e, n, undo,
                     "Change Camera Reference Width",
                     [](Components::Camera& u, int v) { u.PixelPerfectReferenceWidth = static_cast<uint32>(std::max(1, v)); },
@@ -652,6 +692,12 @@ void RegisterCameraInspector()
             "Change Camera Volume Layers",
             "The volume layers this camera takes: a post-process volume affects it when their Volume Layers share a layer.",
             "Takes no post-process volume.", extras);
+        AddToggleRow(ctx.Parent, "Include UI in Post-Processing", cam->IncludeUIInPostProcessing,
+            [w, e, n, undo, extras](bool value) {
+                CommitComponentsWithUndo<Components::Camera>(w, e, extras, n, undo, "Change Camera UI Post-Processing",
+                    [value](Components::Camera& u) { u.IncludeUIInPostProcessing = value; });
+            },
+            "When enabled, fullscreen camera effects (such as CRT) also affect game UI. Disable to composite UI after those effects.");
 
         // --- Exposure (the camera's sensor; the active camera's exposure drives its view) ---
         InspectorUI::AddTextBlock(ctx.Parent, "Exposure", "inspector-section-subheader");

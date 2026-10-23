@@ -36,6 +36,7 @@
 #include "Engine/Rendering/Pipeline/RenderPipeline.h"
 #include "Engine/Rendering/Pipeline/RenderPipelineNodes.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Common/Utils.h"
 #include "Rendering/Core/BindlessResourceManager.h"
 #include "Rendering/Core/Device.h"
@@ -75,7 +76,6 @@
 #include <cmath>
 #include <cassert>
 #include <cstring>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -335,20 +335,11 @@ void RenderServices::UpdateIdleElisionFrameState()
     // cull family left ON. Every line those measurements read — windows and
     // engage/disengage edges — is opt-in: GE_IDLE_ELISION_LOG=1
     // (IdleElisionLoggingEnabled).
-    static const bool kMaster = []
-    {
-        const char* v = std::getenv("GE_IDLE_ELISION");
-        return !v || std::strcmp(v, "0") != 0;
-    }();
-    auto familyEnabled = [](const char* name)
-    {
-        const char* v = std::getenv(name);
-        return !v || std::strcmp(v, "0") != 0;
-    };
-    static const bool kCull = familyEnabled("GE_IDLE_ELISION_CULL");
-    static const bool kScatter = familyEnabled("GE_IDLE_ELISION_SCATTER");
-    static const bool kCluster = familyEnabled("GE_IDLE_ELISION_CLUSTER");
-    static const bool kSdsm = familyEnabled("GE_IDLE_ELISION_SDSM");
+    static const bool kMaster = Platform::EnvironmentSwitchEnabled("GE_IDLE_ELISION", true);
+    static const bool kCull = Platform::EnvironmentSwitchEnabled("GE_IDLE_ELISION_CULL", true);
+    static const bool kScatter = Platform::EnvironmentSwitchEnabled("GE_IDLE_ELISION_SCATTER", true);
+    static const bool kCluster = Platform::EnvironmentSwitchEnabled("GE_IDLE_ELISION_CLUSTER", true);
+    static const bool kSdsm = Platform::EnvironmentSwitchEnabled("GE_IDLE_ELISION_SDSM", true);
 
     m_IdleElision.AllowCull = kMaster && kCull;
     m_IdleElision.AllowScatter = kMaster && kScatter;
@@ -399,7 +390,7 @@ void RenderServices::UpdateIdleElisionFrameState()
     //      some view (OceanRenderFeature::PublishDepthClaim).
     bool anyDepthWritingProducer = !m_DrawProducers->Depth.empty();
     for (const ForwardProducerEntry& e : m_DrawProducers->Forward)
-        anyDepthWritingProducer = anyDepthWritingProducer || e.WritesDepth;
+        anyDepthWritingProducer = anyDepthWritingProducer || e.Options.WritesDepth;
     const bool skinPaletteChanged = m_SkinPaletteContentChanged;
     m_SkinPaletteContentChanged = false;
     bool anyDynamicDepthFeature = false;
@@ -1058,12 +1049,7 @@ void RenderServices::ScheduleGpuSkinningAndRetarget(Rendering::RenderGraph::RGFr
         // Runtime ids beyond kRuntimeVisibleCapacity bypass the gate and
         // always animate, so overflow degrades to the pre-gate behavior.
         // GE_SKINNING_VISIBILITY_GATE=0 is the kill-switch.
-        static const bool kSkinningGateEnabled = []()
-        {
-            if (const char* env = std::getenv("GE_SKINNING_VISIBILITY_GATE"))
-                return env[0] != '0';
-            return true;
-        }();
+        static const bool kSkinningGateEnabled = Platform::EnvironmentSwitchEnabled("GE_SKINNING_VISIBILITY_GATE", true);
         // Spawn-frame guard: the gate consumes the PREVIOUS frame's
         // visibility aggregate (deliberate WAR lag), so a runtime created
         // this frame — new or free-list reused — has a stale word. Gating on

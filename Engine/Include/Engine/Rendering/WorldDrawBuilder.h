@@ -8,12 +8,16 @@
 #include "Types/FalseSharing.h"
 #include "Types/Types.h"
 
-#include <array>
-#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <unordered_map>
 #include <vector>
+
+namespace JobSystem
+{
+class WorkStealingThreadPool;
+}
 
 namespace GameEngine
 {
@@ -36,18 +40,24 @@ class Material;
 class WorldDrawBuilder
 {
   public:
+    // `jobSystem` is the pool whose workers submit: one submission buffer per
+    // worker plus one for callers off its workers (the render thread). Null
+    // when every submit comes from a single thread (hosts without a pool).
+    explicit WorldDrawBuilder(const JobSystem::WorkStealingThreadPool* jobSystem);
+
     // Called once per frame on the render thread before any submissions.
     void BeginFrame();
 
-    // Submit a batch of records. Thread-safe: multiple ECS systems and jobs
-    // can call this concurrently from different threads. Each thread gets its
-    // own submission buffer (no contention). Call MergeSubmissions() on the
-    // render thread after all submissions are done.
+    // Submit a batch of records. Thread-safe for concurrent callers on
+    // distinct workers of the construction pool, plus one caller off its
+    // workers at a time: each worker appends to its own buffer (no
+    // contention), and callers off the pool share the one extra buffer. Call
+    // MergeSubmissions() on the render thread after all submissions are done.
     void Submit(std::span<const WorldSubmissionRecord> records);
 
-    // Merge per-thread submission buffers into the per-view map. Must be called
-    // on the render thread after all parallel submissions are done and before
-    // BuildBatchKeys.
+    // Merge per-thread submission buffers into the per-view map, in worker-id
+    // order with the off-pool buffer last. Must be called on the render thread
+    // after all parallel submissions are done and before BuildBatchKeys.
     void MergeSubmissions();
 
     // Derive per-view batch-key sets from the merged submissions. Calls
@@ -150,18 +160,22 @@ class WorldDrawBuilder
         std::span<const uint32_t> materialColorClass);
 
     // --- Per-thread submission buffers (thread-safe Submit) ---
-    static constexpr uint32 kMaxSubmitThreads = 16;
 
     struct ThreadSubmissionBuffer
     {
         std::vector<WorldSubmissionRecord> records;
         uint32 drained = 0; // records.size() at the time of last MergeSubmissions drain
     };
-    // Each slot is written by its own submitting thread, so each sits alone on
-    // its false-sharing span.
-    std::array<FalseSharingPadded<ThreadSubmissionBuffer>, kMaxSubmitThreads> m_ThreadBuffers;
-    std::atomic<uint32> m_NextThreadSlot{0};
-    static thread_local uint32 t_MySlot;
+    // Null when the builder serves no pool; every submit then lands in the
+    // off-pool buffer.
+    const JobSystem::WorkStealingThreadPool* m_JobSystem;
+    // The pool's worker count, which is also the index of the off-pool buffer.
+    size_t m_OffPoolBufferIndex;
+    // Indexed by worker id; the last entry takes every caller off the pool.
+    // Each buffer is written by its own submitting thread, so each sits alone
+    // on its false-sharing span. Sized once at construction and never resized,
+    // so a buffer's address is stable while workers append to it.
+    std::vector<FalseSharingPadded<ThreadSubmissionBuffer>> m_ThreadBuffers;
 
     // Per-view submission records built during extraction (populated by MergeSubmissions).
     std::unordered_map<Rendering::ViewId, std::vector<WorldSubmissionRecord>> m_SubmissionsByView;

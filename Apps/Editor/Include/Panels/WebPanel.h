@@ -41,8 +41,8 @@ class WebPanel : public DockPanel
 
     /// The host window the platform web views are children of. Setting it runs
     /// the setup that needs it, because the two arrive in either order: the
-    /// panel binds (and tries to set up) when it is first shown, while
-    /// ShowOrActivateWebPanel shows the panel and only then hands it the window.
+    /// panel binds (and tries to set up) when it is first shown, which may come
+    /// before the editor hands it the window.
     void SetWindow(Platform::Window* window);
 
     /// Show a URL without disturbing a page the user is browsing: activates an

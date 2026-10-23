@@ -1,6 +1,7 @@
 #include "Inspectors/VolumetricFogEffectInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Platform/SystemMetrics.h"
 
 #include "Components/Rendering/PostProcessEffects/VolumetricFogEffect.h"
@@ -27,9 +28,6 @@ namespace GameEngine
 namespace
 {
 constexpr float kMaxFogColorPickerIntensity = 8.0f;
-constexpr float kSwatchSize = 20.0f;
-constexpr float kSwatchBorderRadius = 3.0f;
-constexpr uint32_t kSwatchBorderColor = 0xFF555555u;
 
 static constexpr EnumEntry<Components::VolumetricFogDensityMode> kDensityModes[] = {
     {Components::VolumetricFogDensityMode::Additive, "Additive"},
@@ -81,29 +79,6 @@ static void PickerToFogRgb(uint32_t argb, float intensity, float* out)
     out[2] = clamp01(static_cast<float>(argb & 0xFF) / 255.0f) * i;
 }
 
-static std::string FormatFogRgb(const float* c)
-{
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "(%.2f, %.2f, %.2f)", c[0], c[1], c[2]);
-    return buf;
-}
-
-static void StyleFogSwatch(UIElement* swatch, uint32_t argb)
-{
-    if (!swatch)
-        return;
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(kSwatchSize))
-        .Set(Style::Height, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinWidth, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinHeight, StyleLength::Px(kSwatchSize))
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{kSwatchBorderRadius, kSwatchBorderRadius, kSwatchBorderRadius, kSwatchBorderRadius})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor})
-        .Set(Style::BackgroundColor, argb)
-        .Set(Style::Cursor, CursorStyle::Pointer);
-}
-
 static void AddFogColorRow(
     UIElement* parent,
     const char* label,
@@ -125,31 +100,16 @@ static void AddFogColorRow(
     if (!effect)
         return;
 
-    UIElement* row = InspectorUI::AddRow(parent);
-    Label* colorLabel = InspectorUI::AddLabel(row, label, tooltip);
-    if (colorLabel)
-        colorLabel->AddClass("inspector-label-no-drag");
-    UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-    fieldContainer->Overrides()
-        .Set(Style::FlexDir, FlexDirection::Row)
-        .Set(Style::AlignItems, AlignItems::Center)
-        .Set(Style::Gap, StyleLength::Px(6.0f));
-
     uint32_t argb = 0;
     float intensity = 1.0f;
     FogRgbToPickerState(effect->*member, argb, intensity);
 
-    auto swatch = std::make_unique<UIElement>();
-    UIElement* swatchRaw = swatch.get();
-    StyleFogSwatch(swatchRaw, argb);
-    fieldContainer->AddChild(std::move(swatch));
-
-    auto rgbLabel = std::make_unique<Label>();
-    rgbLabel->AddClass("inspector-text");
-    rgbLabel->SetText(FormatFogRgb(effect->*member));
-    rgbLabel->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-    Label* rgbLabelRaw = rgbLabel.get();
-    fieldContainer->AddChild(std::move(rgbLabel));
+    const float* color = effect->*member;
+    const InspectorUI::ColorSwatchRow colorRow = InspectorUI::AddColorSwatchRow(
+        parent, label, tooltip, argb, InspectorUI::FormatColorRgb(color[0], color[1], color[2]));
+    Label* colorLabel = colorRow.Title;
+    UIElement* swatchRaw = colorRow.Swatch;
+    Label* rgbLabelRaw = colorRow.Value;
 
     auto updateUI = [world, entity, member, swatchRaw, rgbLabelRaw]() {
         auto* c = world->GetComponent<Fog>(entity);
@@ -158,8 +118,8 @@ static void AddFogColorRow(
         uint32_t nextArgb = 0;
         float nextIntensity = 1.0f;
         FogRgbToPickerState(c->*member, nextArgb, nextIntensity);
-        StyleFogSwatch(swatchRaw, nextArgb);
-        rgbLabelRaw->SetText(FormatFogRgb(c->*member));
+        InspectorUI::SetColorSwatchColor(swatchRaw, nextArgb);
+        rgbLabelRaw->SetText(InspectorUI::FormatColorRgb((c->*member)[0], (c->*member)[1], (c->*member)[2]));
     };
 
     auto clickHandler = [world, entity, notifications, undo, openPicker, member, updateUI, changeLabel](UIEvent& ev) {

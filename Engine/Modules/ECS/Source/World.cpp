@@ -12,7 +12,6 @@
 #include <cassert>
 #include <cstring>
 #include <mutex>
-#include <sstream>
 #include <stdexcept>
 #include <typeindex>
 #include <unordered_map>
@@ -149,7 +148,7 @@ EntityHandle Archetype::RemoveEntityUnsafe(EntityLocation loc)
     return moved;
 }
 
-void Archetype::InitializeTable(const std::unordered_map<ComponentTypeId, std::size_t>& /*componentSizes*/)
+void Archetype::InitializeTable()
 {
     // Build the colocated ArchetypeTable from the registered component sizes. Uses the shared
     // BuildSortedComponentMetas so the column sizing/alignment rule has a single definition (the
@@ -799,7 +798,7 @@ Archetype* World::GetOrCreateArchetype(const ComponentSignature& signature)
     }
 
     auto archetype = std::make_unique<Archetype>(signature, this);
-    archetype->InitializeTable(componentSizes);
+    archetype->InitializeTable();
 
     auto* ptr = archetype.get();
     archetypes[signature] = std::move(archetype);
@@ -2524,51 +2523,6 @@ EntityHandle World::DeserializeEntity(std::span<const uint8_t> data, EntityHandl
     return entity;
 }
 
-std::string World::GetEntityAsJsonUnsafe(EntityHandle entity) const
-{
-    if (!IsValid(entity))
-    {
-        return "{}";
-    }
-
-    auto& metadata = entityMetadata[entity.index];
-    if (!metadata.archetype)
-    {
-        return "{\"entity\":{\"index\":" + std::to_string(entity.index) +
-               ",\"version\":" + std::to_string(entity.version) + ",\"components\":[]}}";
-    }
-
-    std::ostringstream json;
-    json << "{\"entity\":{";
-    json << "\"index\":" << entity.index << ",";
-    json << "\"version\":" << entity.version << ",";
-    json << "\"components\":[";
-
-    auto& signature = metadata.archetype->GetSignature();
-    bool first = true;
-    for (auto typeId : signature.GetComponents())
-    {
-        if (!first)
-            json << ",";
-
-        auto* handler = ComponentRegistry::GetHandler(typeId);
-        if (handler)
-        {
-            json << handler->GetComponentAsJson(metadata.archetype, metadata.chunkIndex, metadata.indexInChunk);
-        }
-        first = false;
-    }
-
-    json << "]}}";
-    return json.str();
-}
-
-std::string World::GetEntityAsJson(EntityHandle entity)
-{
-    std::shared_lock lock(worldMutex);
-    return GetEntityAsJsonUnsafe(entity);
-}
-
 namespace
 {
 constexpr uint32_t kWorldSnapshotMagic = 0x57435345; // ECSW
@@ -2785,34 +2739,6 @@ void World::DeserializeWorld(const std::vector<uint8_t>& data)
         std::erase_if(m_UnresolvedComponents->FieldMap(),
                       [&](const auto& entry) { return isStale(entry.first); });
     }
-}
-
-std::string World::GetWorldAsJson()
-{
-    std::shared_lock lock(worldMutex);
-
-    std::ostringstream json;
-    json << "{\"world\":{";
-    json << "\"entityCount\":" << entityCount.load(std::memory_order_relaxed) << ",";
-    json << "\"archetypeCount\":" << archetypes.size() << ",";
-    json << "\"entities\":[";
-
-    bool first = true;
-    for (EntityIndex i = 0; i < entityMetadata.size(); ++i)
-    {
-        const auto& metadata = entityMetadata[i];
-        if (metadata.alive)
-        {
-            if (!first)
-                json << ",";
-            EntityHandle entity(i, metadata.version);
-            json << GetEntityAsJsonUnsafe(entity);
-            first = false;
-        }
-    }
-
-    json << "]}}";
-    return json.str();
 }
 
 // ============================================================================
@@ -3083,56 +3009,6 @@ size_t World::CompactAllChunks()
         structuralChangeVersion.fetch_add(1, std::memory_order_relaxed);
 
     return totalFreed;
-}
-
-size_t World::PruneEmptyArchetypes()
-{
-    CheckRemovalReentry();
-    std::unique_lock lock(worldMutex);
-
-    // Two-pass prune: first collect the set of archetypes to remove, then erase
-    // all graph edges in surviving archetypes that point to them, THEN destroy.
-    // This prevents dangling Archetype* pointers in m_AddEdges / m_RemoveEdges.
-    std::unordered_set<Archetype*> toPrune;
-    for (auto& [sig, arch] : archetypes)
-    {
-        if (arch->GetEntityCount() == 0)
-            toPrune.insert(arch.get());
-    }
-
-    if (toPrune.empty())
-        return 0;
-
-    // Scrub edges in surviving archetypes.
-    for (auto& [sig, arch] : archetypes)
-    {
-        if (toPrune.count(arch.get()))
-            continue;
-        arch->EraseEdgesTo(toPrune);
-    }
-
-    // Now safe to destroy the archetypes themselves.
-    size_t prunedCount = 0;
-    for (auto it = archetypes.begin(); it != archetypes.end();)
-    {
-        if (toPrune.count(it->second.get()))
-        {
-            it = archetypes.erase(it);
-            ++prunedCount;
-        }
-        else
-        {
-            ++it;
-        }
-    }
-
-    // Invalidate query caches (so Query::UpdateCache rebuilds m_CachedArchetypes)
-    // and CreateHandle caches (so thread_local cached Archetype* is discarded).
-    structuralChangeVersion.fetch_add(1, std::memory_order_relaxed);
-    ++m_WorldGeneration;
-
-    Logger::Log::Info("[ECS] Pruned {} empty archetypes", prunedCount);
-    return prunedCount;
 }
 
 } // namespace ECS

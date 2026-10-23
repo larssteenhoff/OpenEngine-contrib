@@ -1,9 +1,9 @@
-// Tests for ShaderCompilationCache: per-material variant caching, global dedup,
-// clear/cleanup behavior, and the invalidation-epoch resurrection guard.
+// Tests for ShaderCompilationCache: global dedup, clear/cleanup behavior, and
+// the invalidation-epoch resurrection guard.
 //
 // Most tests exercise the caching layer without real shader compilation.
-// GetOrCompileVariant will fail to compile (no composed shader directory) and
-// cache nullptr — the caching behavior is identical for nullptr and real variants.
+// GetOrCompile will fail to compile (no composed shader directory) and cache
+// nullptr — the caching behavior is identical for nullptr and real variants.
 // ShaderCompilationCacheEpochTest is the exception: it compiles real SPIR-V from
 // the staged adapters (no device needed) because the epoch guard's whole point is
 // which BYTES end up cached.
@@ -17,32 +17,33 @@
 #include <fstream>
 #include <string>
 
-#include "Engine/Rendering/Material.h"
 #include "Engine/Rendering/ShaderCompilationCache.h"
-#include "AssetCore/GUID.h"
 
 using namespace GameEngine;
 using namespace GameEngine::Engine::Renderer;
 using namespace GameEngine::Rendering;
 
 #include "StagedTestPaths.h"
+#include "TestTempDir.h"
 
 namespace
 {
 
-Material MakeTestMaterial(const std::string& name, const std::string& surfaceShader)
+MaterialCompileSpec MakeTestSpec(const std::string& surfaceShader)
 {
-    auto mat = Material::TestFactory::Create(GUID::Generate(), name, 32);
     MaterialCompileSpec spec{};
     spec.surfaceShaderPath = surfaceShader;
     spec.lightingModel = "StandardPBR";
-    Material::TestFactory::SetCompileSpec(mat, spec);
+    return spec;
+}
 
-    ShaderVariantKey key{};
-    key.vertexFlags = VertexAttributeFlags::StandardMesh;
-    key.lightingModel = LightingModel::kStandardPBR;
-    Material::TestFactory::SetVariantKey(mat, key);
-    return mat;
+ShaderCacheKey MakeTestKey(const std::string& surfaceShader)
+{
+    ShaderCacheKey key{};
+    key.VariantKey.vertexFlags = VertexAttributeFlags::StandardMesh;
+    key.VariantKey.lightingModel = LightingModel::kStandardPBR;
+    key.Source.SurfaceShaderPath = surfaceShader;
+    return key;
 }
 
 // Did the sweep NAME this source identity? Asserting on the returned identities
@@ -78,194 +79,88 @@ class ShaderCompilationCacheTest : public ::testing::Test
     Rendering::MaterialBuildContext m_fakeContext = MakeFakeContext();
 };
 
-// --- Per-material variant caching ---
-
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_PopulatesPerMaterialCache)
-{
-    auto mat = MakeTestMaterial("MatA", "surface_a.glsl");
-
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 0u);
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 1u);
-    EXPECT_TRUE(m_cache.HasVariantsForMaterial(&mat));
-}
+// --- Global cache ---
 
 // Regression: an empty AdapterShaderDir means the build context isn't ready yet
 // (early startup, before the editor 'editor' asset source is registered). This is
-// transient, not a genuine compile error — it must NOT poison either cache, or the
+// transient, not a genuine compile error — it must NOT poison the cache, or the
 // material's color variant stays permanently dead for the session even after the
 // context becomes available. Symptom this caused: a mesh casts shadows but is
 // invisible in the color pass (the shared depth shader works; the color variant
 // was cached as nullptr). A genuine failure (non-empty but invalid dir) still caches.
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_EmptyContext_DoesNotPoisonCache)
+TEST_F(ShaderCompilationCacheTest, GetOrCompile_EmptyContext_DoesNotPoisonCache)
 {
     Rendering::MaterialBuildContext emptyContext{};
     ASSERT_TRUE(emptyContext.AdapterShaderDir.empty());
 
-    auto mat = MakeTestMaterial("MatA", "surface_a.glsl");
+    const ShaderCacheKey key = MakeTestKey("surface_a.glsl");
+    const MaterialCompileSpec spec = MakeTestSpec("surface_a.glsl");
 
-    auto first = m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, emptyContext, ShaderSourceKind::SpirV);
+    auto first = m_cache.GetOrCompile(key, spec, emptyContext, "MatA", ShaderSourceKind::SpirV);
     EXPECT_EQ(first, nullptr);
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 0u); // per-material cache not poisoned
-    EXPECT_EQ(m_cache.GetEntryCount(), 0u);           // global cache not poisoned
-    EXPECT_FALSE(m_cache.HasVariantsForMaterial(&mat));
+    EXPECT_EQ(m_cache.GetEntryCount(), 0u);
 
     // A populated (but here still invalid) context resumes normal caching, so the
     // material recompiles once the context is ready rather than staying dead.
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 1u);
+    m_cache.GetOrCompile(key, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
+    EXPECT_EQ(m_cache.GetEntryCount(), 1u);
 }
 
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_CacheHitReturnsSameResult)
+TEST_F(ShaderCompilationCacheTest, GetOrCompile_CacheHitReturnsSameResult)
 {
-    auto mat = MakeTestMaterial("MatA", "surface_a.glsl");
+    const ShaderCacheKey key = MakeTestKey("surface_a.glsl");
+    const MaterialCompileSpec spec = MakeTestSpec("surface_a.glsl");
 
-    auto first = m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    auto second = m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
+    auto first = m_cache.GetOrCompile(key, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
+    auto second = m_cache.GetOrCompile(key, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
 
     EXPECT_EQ(first, second);
     EXPECT_EQ(m_cache.GetEntryCount(), 1u);
 }
 
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_DifferentKeywordsCreateSeparateEntries)
+// --- Clear ---
+
+TEST_F(ShaderCompilationCacheTest, Clear_RemovesGlobalEntries)
 {
-    auto mat = MakeTestMaterial("MatA", "surface_a.glsl");
-
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::ForwardPlus, m_fakeContext, ShaderSourceKind::SpirV);
-
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 1u);
-    EXPECT_EQ(m_cache.GetEntryCount(), 2u);
-}
-
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_DifferentMaterialsSeparate)
-{
-    auto matA = MakeTestMaterial("MatA", "surface_a.glsl");
-    auto matB = MakeTestMaterial("MatB", "surface_b.glsl");
-
-    m_cache.GetOrCompileVariant(matA, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.GetOrCompileVariant(matB, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 2u);
-    EXPECT_TRUE(m_cache.HasVariantsForMaterial(&matA));
-    EXPECT_TRUE(m_cache.HasVariantsForMaterial(&matB));
-}
-
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_GlobalDedupAcrossMaterials)
-{
-    auto matA = MakeTestMaterial("MatA", "shared_surface.glsl");
-    auto matB = MakeTestMaterial("MatB", "shared_surface.glsl");
-
-    m_cache.GetOrCompileVariant(matA, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.GetOrCompileVariant(matB, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 2u);
-    EXPECT_EQ(m_cache.GetEntryCount(), 1u);
-}
-
-// --- Clear methods ---
-
-TEST_F(ShaderCompilationCacheTest, ClearVariantsForMaterial_RemovesOnlyTargetMaterial)
-{
-    auto matA = MakeTestMaterial("MatA", "surface_a.glsl");
-    auto matB = MakeTestMaterial("MatB", "surface_b.glsl");
-
-    m_cache.GetOrCompileVariant(matA, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.GetOrCompileVariant(matB, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 2u);
-
-    m_cache.ClearVariantsForMaterial(&matA);
-
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 1u);
-    EXPECT_FALSE(m_cache.HasVariantsForMaterial(&matA));
-    EXPECT_TRUE(m_cache.HasVariantsForMaterial(&matB));
-    EXPECT_EQ(m_cache.GetEntryCount(), 2u);
-}
-
-TEST_F(ShaderCompilationCacheTest, ClearVariantsForMaterial_NoOpForUnknownMaterial)
-{
-    auto matA = MakeTestMaterial("MatA", "surface_a.glsl");
-    auto matB = MakeTestMaterial("MatB", "surface_b.glsl");
-
-    m_cache.GetOrCompileVariant(matA, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.ClearVariantsForMaterial(&matB);
-
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 1u);
-    EXPECT_TRUE(m_cache.HasVariantsForMaterial(&matA));
-}
-
-TEST_F(ShaderCompilationCacheTest, ClearAllMaterialVariants_RemovesAllPerMaterialEntries)
-{
-    auto matA = MakeTestMaterial("MatA", "surface_a.glsl");
-    auto matB = MakeTestMaterial("MatB", "surface_b.glsl");
-
-    m_cache.GetOrCompileVariant(matA, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.GetOrCompileVariant(matB, MaterialKeyword::ForwardPlus, m_fakeContext, ShaderSourceKind::SpirV);
-
-    m_cache.ClearAllMaterialVariants();
-
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 0u);
-    EXPECT_FALSE(m_cache.HasVariantsForMaterial(&matA));
-    EXPECT_FALSE(m_cache.HasVariantsForMaterial(&matB));
-    EXPECT_EQ(m_cache.GetEntryCount(), 2u);
-}
-
-TEST_F(ShaderCompilationCacheTest, Clear_RemovesBothGlobalAndPerMaterialCaches)
-{
-    auto matA = MakeTestMaterial("MatA", "surface_a.glsl");
-
-    m_cache.GetOrCompileVariant(matA, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.GetOrCompileVariant(matA, MaterialKeyword::ForwardPlus, m_fakeContext, ShaderSourceKind::SpirV);
+    const MaterialCompileSpec spec = MakeTestSpec("surface_a.glsl");
+    m_cache.GetOrCompile(MakeTestKey("surface_a.glsl"), spec, m_fakeContext, "MatA",
+                         ShaderSourceKind::SpirV);
+    ShaderCacheKey forwardPlusKey = MakeTestKey("surface_a.glsl");
+    forwardPlusKey.VariantKey.materialKeywords |= MaterialKeyword::ForwardPlus;
+    m_cache.GetOrCompile(forwardPlusKey, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
+    ASSERT_EQ(m_cache.GetEntryCount(), 2u);
 
     m_cache.Clear();
 
     EXPECT_EQ(m_cache.GetEntryCount(), 0u);
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 0u);
 }
 
 // --- Re-population after clear ---
 
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_WorksAfterClearVariantsForMaterial)
+TEST_F(ShaderCompilationCacheTest, GetOrCompile_WorksAfterClear)
 {
-    auto mat = MakeTestMaterial("MatA", "surface_a.glsl");
+    const ShaderCacheKey key = MakeTestKey("surface_a.glsl");
+    const MaterialCompileSpec spec = MakeTestSpec("surface_a.glsl");
 
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    m_cache.ClearVariantsForMaterial(&mat);
-
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 1u);
-    EXPECT_EQ(m_cache.GetEntryCount(), 1u);
-}
-
-TEST_F(ShaderCompilationCacheTest, GetOrCompileVariant_WorksAfterClear)
-{
-    auto mat = MakeTestMaterial("MatA", "surface_a.glsl");
-
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
+    m_cache.GetOrCompile(key, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
     m_cache.Clear();
 
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
-    EXPECT_EQ(m_cache.GetMaterialVariantCount(), 1u);
+    m_cache.GetOrCompile(key, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
     EXPECT_EQ(m_cache.GetEntryCount(), 1u);
 }
 
 TEST_F(ShaderCompilationCacheTest, InvalidateGlobalEntry_ForcesGlobalRecompile)
 {
-    auto mat = MakeTestMaterial("MatA", "surface_a.glsl");
+    const ShaderCacheKey key = MakeTestKey("surface_a.glsl");
+    const MaterialCompileSpec spec = MakeTestSpec("surface_a.glsl");
 
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
+    m_cache.GetOrCompile(key, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
     EXPECT_EQ(m_cache.GetEntryCount(), 1u);
-
-    ShaderCacheKey key{};
-    key.VariantKey = mat.GetVariantKey();
-    key.Source.SurfaceShaderPath = mat.GetCompileSpec().surfaceShaderPath;
-    key.Source.VertexModifierPath = mat.GetCompileSpec().vertexModifierPath;
-    key.Source.MaterialAssetPath = mat.GetMaterialAssetPath();
 
     m_cache.InvalidateGlobalEntry(key);
     EXPECT_EQ(m_cache.GetEntryCount(), 0u);
 
-    m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_fakeContext, ShaderSourceKind::SpirV);
+    m_cache.GetOrCompile(key, spec, m_fakeContext, "MatA", ShaderSourceKind::SpirV);
     EXPECT_EQ(m_cache.GetEntryCount(), 1u);
 }
 
@@ -295,17 +190,11 @@ class ShaderCompilationCacheEpochTest : public ::testing::Test
         if (!std::filesystem::exists(m_shaderDir, ec))
             GTEST_SKIP() << "Staged shader directory not found: " << m_shaderDir.string();
 
-        // Per-TEST project root AND cache root. Keyed by test name, not just the
-        // gtest seed (which is 0 without --gtest_shuffle, i.e. the same for every
-        // test): the on-disk shaderpkg key folds the composed source, which
+        // Per-TEST project root AND cache root, unique to this process and this
+        // test: the on-disk shaderpkg key folds the composed source, which
         // carries the surface's absolute path, so a shared root makes sibling
         // tests share cache entries.
-        m_projectRoot =
-            std::filesystem::temp_directory_path()
-            / (std::string("ge_shader_epoch_")
-               + ::testing::UnitTest::GetInstance()->current_test_info()->name());
-        std::error_code rmEc;
-        std::filesystem::remove_all(m_projectRoot, rmEc); // residue from a killed run
+        m_projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_epoch");
         std::filesystem::create_directories(m_projectRoot);
 
         m_ctx.AdapterShaderDir = m_shaderDir;
@@ -444,33 +333,6 @@ TEST_F(ShaderCompilationCacheEpochTest, TargetedInvalidateDuringCompile_DoesNotR
         << "the post-invalidation compile must produce the edited SPIR-V, not the pre-edit bytes";
 }
 
-TEST_F(ShaderCompilationCacheEpochTest, InvalidateDuringCompile_DoesNotMemoizeStaleVariant)
-{
-    WriteSurface("vec3(0.0, 1.0, 0.0)"); // v1
-    auto mat = MakeTestMaterial("EpochMat", kSurfaceFile);
-
-    auto calls = ArmInvalidationDuringCompile();
-    auto stale = m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_ctx, ShaderSourceKind::SpirV);
-    Disarm();
-
-    ASSERT_EQ(*calls, 1) << "the compile window must have been entered, or nothing was tested";
-    ASSERT_NE(stale, nullptr);
-    ASSERT_FALSE(stale->fragmentBytes.empty());
-    // The per-material memo is a fast path ONTO the global entry: a memo that
-    // survives the invalidation keeps serving pre-edit SPIR-V to this material
-    // even though the global cache correctly dropped it.
-    EXPECT_FALSE(m_cache.HasVariantsForMaterial(&mat))
-        << "the memo must not retain a variant whose compile predates the invalidation";
-    EXPECT_EQ(m_cache.GetEntryCount(), 0u);
-
-    WriteSurface("vec3(1.0, 0.0, 0.0) * 0.25"); // v2
-    auto fresh = m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_ctx, ShaderSourceKind::SpirV);
-    ASSERT_NE(fresh, nullptr);
-    EXPECT_TRUE(m_cache.HasVariantsForMaterial(&mat));
-    EXPECT_NE(fresh->fragmentBytes, stale->fragmentBytes)
-        << "the post-invalidation variant must be compiled from the edited source";
-}
-
 // Clear() must bar the same resurrection the sweep bars. It runs at project
 // switch with prewarm workers still compiling — nothing drains them first — so a
 // compile in flight across the Clear() would otherwise republish the OLD
@@ -478,10 +340,11 @@ TEST_F(ShaderCompilationCacheEpochTest, InvalidateDuringCompile_DoesNotMemoizeSt
 // the session. The row that compile recorded does come back (rows are
 // deliberately not epoch-gated, or the affected-material scan could not outlive
 // a sweep); the ENTRY is what must not.
-TEST_F(ShaderCompilationCacheEpochTest, ClearDuringCompile_DoesNotResurrectEntryOrMemo)
+TEST_F(ShaderCompilationCacheEpochTest, ClearDuringCompile_DoesNotResurrectEntry)
 {
     WriteSurface("vec3(0.0, 1.0, 0.0)");
-    auto mat = MakeTestMaterial("ClearMat", kSurfaceFile);
+    const ShaderCacheKey key = MakeKey();
+    const MaterialCompileSpec spec = MakeSpec();
 
     auto calls = std::make_shared<int>(0);
     m_cache.SetCompileEnteredHookForTesting(
@@ -490,7 +353,7 @@ TEST_F(ShaderCompilationCacheEpochTest, ClearDuringCompile_DoesNotResurrectEntry
             ++*calls;
             m_cache.Clear();
         });
-    auto stale = m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_ctx, ShaderSourceKind::SpirV);
+    auto stale = m_cache.GetOrCompile(key, spec, m_ctx, "ClearProbe", ShaderSourceKind::SpirV);
     Disarm();
 
     ASSERT_EQ(*calls, 1) << "the compile window must have been entered, or nothing was tested";
@@ -498,11 +361,9 @@ TEST_F(ShaderCompilationCacheEpochTest, ClearDuringCompile_DoesNotResurrectEntry
     ASSERT_FALSE(stale->fragmentBytes.empty()) << "the staged adapters must produce real SPIR-V";
     EXPECT_EQ(m_cache.GetEntryCount(), 0u)
         << "a publish whose compile started before Clear() must not reinstate the entry";
-    EXPECT_FALSE(m_cache.HasVariantsForMaterial(&mat))
-        << "nor may the per-material memo retain a fast path onto it";
 
     // ...and the cache is not wedged: the next request compiles and caches.
-    auto fresh = m_cache.GetOrCompileVariant(mat, MaterialKeyword::None, m_ctx, ShaderSourceKind::SpirV);
+    auto fresh = m_cache.GetOrCompile(key, spec, m_ctx, "ClearProbe", ShaderSourceKind::SpirV);
     ASSERT_NE(fresh, nullptr);
     EXPECT_EQ(m_cache.GetEntryCount(), 1u);
 }
@@ -545,12 +406,7 @@ class ShaderCompilationCacheClosureTest : public ::testing::Test
 
         // Per-TEST roots for the same reason as the epoch fixture: the disk key
         // folds the surface's absolute path via the composed source.
-        m_projectRoot =
-            std::filesystem::temp_directory_path()
-            / (std::string("ge_shader_closure_")
-               + ::testing::UnitTest::GetInstance()->current_test_info()->name());
-        std::error_code rmEc;
-        std::filesystem::remove_all(m_projectRoot, rmEc);
+        m_projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_closure");
         std::filesystem::create_directories(m_projectRoot);
 
         m_ctx.AdapterShaderDir = m_shaderDir;

@@ -1,6 +1,7 @@
 #include "Rendering/Core/GPUCulling.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -458,7 +459,8 @@ RenderGraph::RGBuffer GPUCullingPipeline::ImportPrevVisible(RenderGraph::RGFrame
         return {};
     PrevVisibleView& pv = m_PrevVisible[viewId];
     // Sized for the global instance index the shader addresses (prevVisible[i]);
-    // grown like m_VisibilityBufferU.
+    // grown like m_VisibilityBufferU, to the next power of two, so a scene that
+    // streams in keeps this history across most new instance-count maxima.
     const size_t kMinBytes = 4096;
     const size_t needBytes =
         std::max(kMinBytes, static_cast<size_t>(instanceCount) * sizeof(uint32_t));
@@ -467,14 +469,15 @@ RenderGraph::RGBuffer GPUCullingPipeline::ImportPrevVisible(RenderGraph::RGFrame
     {
         if (pv.buffer.IsValid())
             m_Device->DestroyBuffer(pv.buffer); // deferred-destroy device-side
+        const size_t allocBytes = std::bit_ceil(needBytes);
         BufferDesc d{};
-        d.size = needBytes;
+        d.size = allocBytes;
         d.usage = static_cast<uint32_t>(BufferUsage::Storage | BufferUsage::TransferDst);
         d.memoryUsage = BufferMemoryUsage::DeviceLocal;
         pv.importName = "GPUCulling.PrevVisible.V" + std::to_string(static_cast<uint32_t>(viewId));
         d.debugName = pv.importName.c_str();
         pv.buffer = m_Device->CreateBuffer(d);
-        pv.bytes = pv.buffer.IsValid() ? needBytes : 0;
+        pv.bytes = pv.buffer.IsValid() ? allocBytes : 0;
         freshlyCreated = true;
     }
     if (!pv.buffer.IsValid())
@@ -942,7 +945,9 @@ void GPUCullingPipeline::EndFrameRG()
     }
 
     // ONE visibility buffer (the per-slot ring collapses — RenderGraph's first-touch
-    // import dependency provides the cross-frame WAR ordering).
+    // import dependency provides the cross-frame WAR ordering). It grows to the
+    // next power of two: every dispatch sizes its work by instance count, and
+    // the byte size is only a binding range.
     const size_t kMinVisBytes = 4096;
     size_t requiredBytes =
         std::max(kMinVisBytes, static_cast<size_t>(std::min<uint64_t>(
@@ -952,14 +957,15 @@ void GPUCullingPipeline::EndFrameRG()
     {
         if (m_VisibilityBufferU.IsValid())
             m_Device->DestroyBuffer(m_VisibilityBufferU); // deferred-destroy device-side
+        const size_t allocBytes = std::bit_ceil(requiredBytes);
         BufferDesc d{};
-        d.size = requiredBytes;
+        d.size = allocBytes;
         d.usage = static_cast<uint32_t>(BufferUsage::Storage | BufferUsage::TransferSrc |
                                         BufferUsage::TransferDst);
         d.memoryUsage = BufferMemoryUsage::DeviceLocal;
         d.debugName = "GPUCulling_Visibility.RenderGraph";
         m_VisibilityBufferU = m_Device->CreateBuffer(d);
-        m_VisibilityBufferUBytes = m_VisibilityBufferU.IsValid() ? requiredBytes : 0;
+        m_VisibilityBufferUBytes = m_VisibilityBufferU.IsValid() ? allocBytes : 0;
     }
     if (!m_VisibilityBufferU.IsValid())
         return;
@@ -1320,13 +1326,15 @@ void GPUCullingPipeline::ScheduleVisibilityUnion(RenderGraph::RGFrame& frame, GP
     {
         if (m_AnyViewVisibleU.IsValid())
             m_Device->DestroyBuffer(m_AnyViewVisibleU);
+        // Next power of two, like the visibility buffer it is the union of.
+        const size_t allocBytes = std::bit_ceil(flagsBytes);
         BufferDesc d{};
-        d.size = flagsBytes;
+        d.size = allocBytes;
         d.usage = static_cast<uint32_t>(BufferUsage::Storage | BufferUsage::TransferDst);
         d.memoryUsage = BufferMemoryUsage::DeviceLocal;
         d.debugName = "GPUCulling_AnyViewVisible.RenderGraph";
         m_AnyViewVisibleU = m_Device->CreateBuffer(d);
-        m_AnyViewVisibleUBytes = m_AnyViewVisibleU.IsValid() ? flagsBytes : 0;
+        m_AnyViewVisibleUBytes = m_AnyViewVisibleU.IsValid() ? allocBytes : 0;
     }
     if (!m_AnyViewVisibleU.IsValid())
         return;

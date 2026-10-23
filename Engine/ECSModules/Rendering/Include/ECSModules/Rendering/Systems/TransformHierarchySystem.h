@@ -113,8 +113,8 @@ private:
     // pointers captured at topology rebuild, outside any query visit, so
     // nothing stamps those columns for it and Changed<WorldTransform>
     // consumers would never see a propagated move. The rebuild pass is the
-    // exception: its node gather binds Write<WorldTransform> and its
-    // stamp-at-visit has already covered every chunk.
+    // exception: its node gather takes Mutable() on every WorldTransform it
+    // caches, which has already granted every chunk.
     enum class StampCollection { Collect, AlreadyGranted };
 
     // Propagates each root's subtree (the roots' subtrees must be disjoint),

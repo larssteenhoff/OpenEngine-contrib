@@ -1,0 +1,80 @@
+---
+title: Tiled and LDtk map import
+description: Import Tiled (.tmx) maps and LDtk (.ldtk) projects as tile sets and tile maps.
+---
+
+A Tiled map or an LDtk project imports as native assets: one `.tileset` for each tileset the source uses and one `.tilemap` for each map or level. The files are written beside the source file and registered with the project, so they appear in the Assets panel with their thumbnails. The atlas images are registered as textures.
+
+## Import a map
+
+1. Put the source file, its external tilesets or levels, and its atlas images in one folder inside the project.
+2. In the Assets panel, right-click the `.tmx` or `.ldtk` file and choose **Import as Tilemap**.
+3. A notice reports what was written and lists any warnings.
+
+Importing a source again rebuilds its outputs from the source file. When a `.tileset` or `.tilemap` with the same name already exists, the editor lists the files and asks before replacing them; nothing is written until you choose **Replace**. A `.tilemap` replaced this way loses the painting, layers and IntGrid values added to it after its import. To keep them, rename the existing files first.
+
+The debug server's `tilemap_import` request runs the same import. It refuses to replace existing files unless the request sets `overwrite` to `true`, and names the files in `details.existing`.
+
+## Tiled maps
+
+Supported:
+
+- Orthogonal maps, finite and infinite.
+- Tile layer data as CSV, base64, and base64 compressed with zlib or gzip.
+- Inline tilesets and external `.tsx` tilesets with a single atlas image.
+- Flipped and rotated tiles.
+- Per-tile animations, per-tile custom properties, and collision rectangles and polygons drawn in the tileset's tile collision editor.
+- Layer groups. Their tile layers import in order.
+
+A layer that draws from several tilesets is split into one layer per tileset, named "Layer (tileset)", because an engine tile layer uses one tile set. The import reports the split as a warning.
+
+Skipped with a warning: object layers and image layers, rotated, ellipse and point collision objects, collision polygons over 256 points, animations over 1024 frames (truncated), cells whose tile matches no tileset, the hexagonal rotation flag, and values that are not finite numbers.
+
+## LDtk projects
+
+Supported:
+
+- Tiles, Auto-layer and IntGrid layers. Tiles and auto-layer tiles import as painted cells; LDtk's rules are not imported.
+- IntGrid values with their names and colors. An IntGrid layer that also has auto-layer tiles adds a "Layer (tiles)" tile layer with those tiles.
+- External level files (`.ldtkl`).
+- Flipped tiles, and per-tile custom data and enum tags as custom data.
+
+Each level imports as its own `.tilemap` in its own coordinates; the world layout of levels is not imported. Where LDtk stacks several tiles in one cell, the topmost is kept.
+
+Skipped with a warning: Entities layers (without a warning), tilesets without an image (LDtk's internal icons), levels without layers, external levels that cannot be read, IntGrid values outside 1 to 255, and tiles outside their tileset.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Source files read in one import | 64 MB in total |
+| Map or layer size | 16,384 cells on each axis, 4,194,304 cells per layer |
+| Cells in one import | 16,777,216 |
+| Tile size, spacing and margin | 16,384 pixels |
+| Atlas image size | 1,048,576 pixels on each axis |
+| Tilesets in one import | 64 |
+| Tiles in one import | 65,536 across all tile sets |
+| Layers | 256, groups nested up to 64 deep |
+| LDtk levels | 256 |
+
+## When an import is refused
+
+The import writes nothing when it refuses a file. The message names the cause:
+
+| Message | Fix |
+| --- | --- |
+| orientation is not supported (orthogonal only) | Isometric, staggered and hexagonal Tiled maps do not import. Use an orthogonal map. |
+| image-collection tileset | Re-export the tileset as a single atlas image. |
+| XML-element tile data is not supported | Set the map's tile layer format to CSV or base64. |
+| unsupported tile data compression 'zstd' | Set the tile layer format to CSV, base64, or base64 with zlib or gzip. |
+| compressed layer data is corrupt or does not match the layer bounds | Save the map again from Tiled. |
+| names an atlas image outside its own directory, or outside the project directory | Move the atlas image into the source file's folder or a folder below it. |
+| external tileset resolves outside the map's own directory | Move the `.tsx` into the map's folder or a folder below it. |
+| cannot read, missing or not a regular file | Check that the file exists. Choose the file itself, not a folder or a device. |
+| cannot parse, or malformed JSON | Save the file again from its editor. |
+| duplicate output filename | Two tilesets or levels produce the same file name. Rename one in the source. |
+| two tilesets share uid | Repair the LDtk project, or recreate one of the tilesets. |
+| has a degenerate tile size, invalid image bounds, or slices to an unusable tile count | Check the tileset's tile size, spacing, margin and image size. |
+| exceeds a whole-import budget, too many tilesets, layers, chunks or levels | Split the source into smaller maps or projects. |
+| Engine not initialized | Open a project before importing. |
+| The import would replace ... | Choose **Replace** to overwrite the listed files, or rename them and import again. |

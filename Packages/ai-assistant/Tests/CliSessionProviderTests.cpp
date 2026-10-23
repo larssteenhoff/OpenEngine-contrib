@@ -8,11 +8,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace GameEngine
 {
@@ -184,6 +187,55 @@ TEST(CliSessionProviderTests, AnUnknownCodexThreadFailsTheTurnAsSessionNotFound)
     EXPECT_EQ(events.Result.Outcome, TurnOutcome::Failed);
     EXPECT_NE(events.Result.Error.find("no rollout found for thread id"), std::string::npos) << events.Result.Error;
     EXPECT_TRUE(events.Result.SessionNotFound);
+}
+
+// The session has no tool that could read a file, so its images travel as content blocks: the turn
+// switches to stream-json input and writes one user message with the images before the text.
+TEST(CliSessionProviderTests, ClaudeImagesGoAsAStreamJsonMessage)
+{
+    const ClaudeSessionProvider provider("claude", {});
+    PromptFile shot;
+    shot.Kind = PromptFileKind::Image;
+    shot.MediaType = "image/png";
+    shot.Bytes = "foo";
+    AgentTurnRequest request = Request("what is this?");
+
+    EXPECT_EQ(provider.TurnInput(request), "what is this?");
+    const std::vector<std::string> textArguments = provider.TurnArguments(request);
+    EXPECT_EQ(std::find(textArguments.begin(), textArguments.end(), "--input-format"), textArguments.end());
+
+    request.Images = std::span<const PromptFile>(&shot, 1);
+    const std::vector<std::string> arguments = provider.TurnArguments(request);
+    const auto format = std::find(arguments.begin(), arguments.end(), "--input-format");
+    ASSERT_NE(format, arguments.end());
+    ASSERT_NE(format + 1, arguments.end());
+    EXPECT_EQ(*(format + 1), "stream-json");
+
+    const std::string input = provider.TurnInput(request);
+    ASSERT_FALSE(input.empty());
+    EXPECT_EQ(input.back(), '\n');
+    EXPECT_EQ(nlohmann::json::parse(input), nlohmann::json::parse(R"({"type":"user","message":{"role":"user","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"Zm9v"}},
+        {"type":"text","text":"what is this?"}]}})"));
+}
+
+// Codex takes images by path; they go last, before the prompt's `-`, so on a resumed thread they
+// belong to `resume`.
+TEST(CliSessionProviderTests, CodexImagesGoAsImageArgumentsBeforeThePrompt)
+{
+    const CodexSessionProvider provider("codex", "C:/Project");
+    PromptFile shot;
+    shot.Kind = PromptFileKind::Image;
+    shot.Path = "C:/Project/shot.png";
+    AgentTurnRequest request = Request("hello");
+    request.SessionId = "thread-1";
+    request.Images = std::span<const PromptFile>(&shot, 1);
+
+    const std::vector<std::string> expected = {
+        "exec", "--json", "--skip-git-repo-check", "-C", std::filesystem::path("C:/Project").string(),
+        "-s", "read-only", "resume", "thread-1",
+        "--image=" + std::filesystem::path("C:/Project/shot.png").string(), "-"};
+    EXPECT_EQ(provider.TurnArguments(request), expected);
 }
 
 TEST(CliSessionProviderTests, ThePromptGoesOnStdin)

@@ -157,11 +157,6 @@ class AssetTypeRegistry
     AssetEventDispatcher m_EventDispatcher;
 
     /**
-     * @brief Register built-in asset types
-     */
-    void RegisterBuiltInAssetTypes();
-
-    /**
      * @brief Update extension mappings after registration changes
      */
     void UpdateExtensionMappings();

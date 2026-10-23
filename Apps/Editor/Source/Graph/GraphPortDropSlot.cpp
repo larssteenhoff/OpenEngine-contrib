@@ -9,6 +9,7 @@
 #include "Graph/GraphModel.h"
 #include "Graph/GraphNodeSummary.h"
 #include "Input/KeyCodes.h"
+#include "Types/Fnv1a.h"
 #include "UI/Controls/SearchDialog.h"
 #include "UI/Interaction/Payload.h"
 #include "UI/Layout/ElementOverrideHelpers.h"
@@ -205,12 +206,7 @@ void GraphPortDropSlot::OpenTexturePicker()
 
 UI::Interaction::ItemId GraphPortDropSlot::HashNodeId(const std::string& nodeId)
 {
-    uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char c : nodeId)
-    {
-        hash ^= static_cast<uint64_t>(c);
-        hash *= 1099511628211ull;
-    }
+    const uint64_t hash = Hashing::Fnv1a64(nodeId);
     return hash != 0 ? hash : 1ull;
 }
 

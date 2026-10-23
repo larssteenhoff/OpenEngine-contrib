@@ -320,9 +320,11 @@ std::vector<GUID> CollectStandaloneMaterialGuids(ECS::World& world, RenderServic
     std::unordered_set<GUID> seen;
     std::vector<GUID> needed;
     // Asset resolution binds handles for the scene as authored: an entity that
-    // is switched off still needs its material and mesh when it comes back.
+    // is switched off still needs its mesh. Standalone materials are prepared
+    // when the MeshRenderer component is enabled.
     world.Query<ECS::Read<Components::MeshRenderer>>()
         .IncludeDisabled()
+        .Without<ECS::ComponentDisabled<Components::MeshRenderer>>()
         .Each([&](const Components::MeshRenderer& mr)
         {
             const GUID matGuid = mr.materialAssetGuid.ToGuid();

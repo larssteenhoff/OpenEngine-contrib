@@ -1383,7 +1383,7 @@ constexpr uint32_t kTileNoiseSeed = 42u;
 constexpr double kPressureFullOcc = kCBTSaturatedOccupancy;
 constexpr double kPressureRecoverOcc = static_cast<double>(kOffFrustumKeepOcc);
 
-// Heightfield.cpp NoiseHash / SmoothNoise, so the fixture carries the shipped relief rather than a
+// Noise/ValueNoise2D.h ValueLatticeHash / ValueNoise2D, so the fixture carries the shipped relief rather than a
 // synthetic one: the preset pins only because of this relief's small-scale slopes.
 float TileNoiseHash(int32_t x, int32_t z, uint32_t seed)
 {

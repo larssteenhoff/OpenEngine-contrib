@@ -26,9 +26,10 @@ void PhysicsWritebackSystem::Update(ECS::World& world, float32 /*deltaTime*/)
 
     uint32 composed = 0;
     q.Each([&](ECS::EntityHandle e,
-               GameEngine::Components::Transform& t,
-               GameEngine::Components::WorldTransform& wt,
-               GameEngine::Components::PhysicsBody& body) {
+               ECS::Writable<GameEngine::Components::Transform> t,
+               ECS::Writable<GameEngine::Components::WorldTransform> wt,
+               ECS::Writable<GameEngine::Components::PhysicsBody> bodyRow) {
+        const GameEngine::Components::PhysicsBody& body = bodyRow.Get();
         if (!body.initialized || !pw->IsBodyValid(body.body))
             return;
 
@@ -36,9 +37,12 @@ void PhysicsWritebackSystem::Update(ECS::World& world, float32 /*deltaTime*/)
         const Physics::Transform* interpolateFrom =
             (body.hasPrevPhysicsTransform && alpha < 1.0f) ? &body.prevPhysicsTransform : nullptr;
 
-        if (WritePhysicsPose(world, e, pw->GetBodyTransform(body.body), interpolateFrom, alpha, t, wt,
-                             body.WritebackRecord))
+        if (const auto record = WritePhysicsPose(world, e, pw->GetBodyTransform(body.body), interpolateFrom,
+                                                 alpha, t, wt, body.WritebackRecord))
+        {
+            bodyRow.Mutable().WritebackRecord = *record;
             ++composed;
+        }
     });
     PhysicsWorldService::SetLastBodiesComposed(composed);
 }

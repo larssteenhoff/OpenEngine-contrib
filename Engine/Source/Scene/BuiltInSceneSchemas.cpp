@@ -51,6 +51,7 @@
 #include "PhysicsECS/Components/BoxColliderShape.h"
 #include "PhysicsECS/Components/CapsuleColliderShape.h"
 #include "PhysicsECS/Components/CharacterController.h"
+#include "PhysicsECS/Components/MovingPlatform.h"
 #include "PhysicsECS/Components/PhysicsBody.h"
 #include "PhysicsECS/Components/PhysicsCollider.h"
 #include "PhysicsECS/Components/PhysicsColliderOwner.h"
@@ -251,6 +252,24 @@ class PhysicsBodySchema final : public ISceneComponentSchema
     bool Remove(ECS::World& world, ECS::EntityHandle entity) const override;
 };
 
+class MovingPlatformSchema final : public ISceneComponentSchema
+{
+  public:
+    std::string_view GetComponentName() const override { return "MovingPlatform"; }
+
+    void Serialize(const ECS::World& world, ECS::EntityHandle entity, const SceneSaveContext& ctx, std::vector<std::string>& outLines) const override;
+
+    bool ApplyProperty(ECS::World& world,
+                       ECS::EntityHandle entity,
+                       const SceneLoadContext& ctx,
+                       std::string_view property,
+                       std::string_view value,
+                       std::string* outError) const override;
+
+    bool AddDefault(ECS::World& world, ECS::EntityHandle entity, std::string* outError) const override;
+    bool Remove(ECS::World& world, ECS::EntityHandle entity) const override;
+};
+
 class CharacterControllerSchema final : public ISceneComponentSchema
 {
   public:
@@ -409,11 +428,7 @@ bool NameSchema::ApplyProperty(ECS::World& world,
         return false;
     }
     Components::Name nm{};
-    std::memset(nm.value, 0, sizeof(nm.value));
-    const size_t maxCopy = sizeof(nm.value) - 1;
-    const size_t toCopy = std::min(maxCopy, s.size());
-    std::memcpy(nm.value, s.data(), toCopy);
-    nm.value[toCopy] = '\0';
+    CopyToFixedString(nm.value, s);
     world.AddComponentImmediate(entity, nm);
     return true;
 }
@@ -1404,6 +1419,108 @@ bool PhysicsBodySchema::Remove(ECS::World& world, ECS::EntityHandle entity) cons
     return true;
 }
 
+// Path modes round-trip as names: a scene diff should read "PingPong", not "2",
+// and renumbering the enum must never silently repoint an authored platform.
+static const char* PlatformPathModeName(Components::PlatformPathMode mode)
+{
+    switch (mode)
+    {
+    case Components::PlatformPathMode::Loop:     return "Loop";
+    case Components::PlatformPathMode::PingPong: return "PingPong";
+    case Components::PlatformPathMode::Once:
+    default:                                     return "Once";
+    }
+}
+
+static bool ParsePlatformPathMode(std::string_view value, Components::PlatformPathMode& out)
+{
+    const std::string v = ToLowerAscii(value);
+    if (v == "once") out = Components::PlatformPathMode::Once;
+    else if (v == "loop") out = Components::PlatformPathMode::Loop;
+    else if (v == "pingpong") out = Components::PlatformPathMode::PingPong;
+    else return false;
+    return true;
+}
+
+void MovingPlatformSchema::Serialize(const ECS::World& world, ECS::EntityHandle entity, const SceneSaveContext& ctx, std::vector<std::string>& outLines) const
+{
+    const auto* p = world.GetComponent<Components::MovingPlatform>(entity);
+    if (!p)
+        return;
+
+    outLines.push_back(std::string("MovingPlatform.pathMode = ") + PlatformPathModeName(p->pathMode));
+    if (std::string pathRef = FormatEntityReferenceForSave(ctx, p->path); !pathRef.empty())
+        outLines.push_back(std::string("MovingPlatform.path = ") + pathRef);
+    outLines.push_back(std::string("MovingPlatform.speed = ") + FormatFloat(p->speed));
+    outLines.push_back(std::string("MovingPlatform.endpointPause = ") + FormatFloat(p->endpointPause));
+    // distance / pauseRemaining / direction / finished are where the platform
+    // happens to be, not what was authored — a scene stores authoring only, the
+    // same split PhysicsBody makes for its body handles.
+}
+
+bool MovingPlatformSchema::ApplyProperty(ECS::World& world,
+                                         ECS::EntityHandle entity,
+                                         const SceneLoadContext& ctx,
+                                         std::string_view property,
+                                         std::string_view value,
+                                         std::string* outError) const
+{
+    Components::MovingPlatform p{};
+    if (auto* existing = world.GetComponent<Components::MovingPlatform>(entity))
+        p = *existing;
+
+    if (property == "pathmode")
+    {
+        if (!ParsePlatformPathMode(value, p.pathMode))
+        {
+            if (outError)
+                *outError = "MovingPlatform.pathMode must be Once, Loop or PingPong";
+            return false;
+        }
+    }
+    else if (property == "path")
+    {
+        if (!TryResolveEntityReference(ctx, value, p.path))
+        {
+            if (outError)
+                *outError = "MovingPlatform.path: expected quoted entity-id string";
+            return false;
+        }
+    }
+    else if (property == "speed")
+    {
+        if (!ParseF32(value, p.speed, outError))
+            return false;
+    }
+    else if (property == "endpointpause")
+    {
+        if (!ParseF32(value, p.endpointPause, outError))
+            return false;
+    }
+    else
+    {
+        return ReportUnknownField(ctx, GetComponentName(), property, outError);
+    }
+
+    world.AddComponentImmediate(entity, p);
+    return true;
+}
+
+bool MovingPlatformSchema::AddDefault(ECS::World& world, ECS::EntityHandle entity, std::string* outError) const
+{
+    (void)outError;
+    if (world.GetComponent<Components::MovingPlatform>(entity))
+        return true;
+    world.AddComponentImmediate(entity, Components::MovingPlatform{});
+    return true;
+}
+
+bool MovingPlatformSchema::Remove(ECS::World& world, ECS::EntityHandle entity) const
+{
+    world.RemoveComponentImmediate<Components::MovingPlatform>(entity);
+    return true;
+}
+
 void CharacterControllerSchema::Serialize(const ECS::World& world, ECS::EntityHandle entity, [[maybe_unused]] const SceneSaveContext& ctx, std::vector<std::string>& outLines) const
 {
     const auto* c = world.GetComponent<Components::CharacterController>(entity);
@@ -1530,6 +1647,9 @@ void PhysicsColliderSchema::Serialize(const ECS::World& world, ECS::EntityHandle
     outLines.push_back(std::string("PhysicsCollider.belongsToMask = ") + std::to_string(c->belongsToMask));
     outLines.push_back(std::string("PhysicsCollider.collidesWithMask = ") + std::to_string(c->collidesWithMask));
     outLines.push_back(std::string("PhysicsCollider.isTrigger = ") + (c->isTrigger ? "true" : "false"));
+    if (!c->materialAsset.IsNull())
+        outLines.push_back(std::string("PhysicsCollider.materialAsset = ") +
+                           FormatAssetReferenceForSave(ctx, c->materialAsset.ToGuid(), ""));
     outLines.push_back(std::string("PhysicsCollider.overrideMaterial = ") + (c->overrideMaterial ? "true" : "false"));
     outLines.push_back(std::string("PhysicsCollider.materialFriction = ") + FormatFloat(c->material.friction));
     outLines.push_back(std::string("PhysicsCollider.materialRestitution = ") + FormatFloat(c->material.restitution));
@@ -1585,6 +1705,16 @@ bool PhysicsColliderSchema::ApplyProperty(ECS::World& world,
     {
         if (!ParseBool(value, c.isTrigger, outError))
             return false;
+    }
+    else if (property == "materialasset")
+    {
+        SceneValue parsed{};
+        if (!ParseValue(value, parsed, outError))
+            return false;
+        AssetReference reference{};
+        if (!TryResolveAssetReference(ctx, parsed, AssetType::PhysicsMaterial, reference, outError))
+            return false;
+        c.materialAsset.Set(reference.guid);
     }
     else if (property == "overridematerial")
     {
@@ -2025,14 +2155,12 @@ static bool TryParseSkyScalarCurveShapeMode(std::string_view value, Components::
     std::string quoted;
     if (ParseQuotedString(value, quoted))
         raw = quoted;
-    std::transform(raw.begin(), raw.end(), raw.begin(), [](unsigned char ch)
-                   { return static_cast<char>(std::tolower(ch)); });
-    if (raw == "keycurve" || raw == "keys" || raw == "curve")
+    if (EqualsIgnoreCase(raw, "keycurve") || EqualsIgnoreCase(raw, "keys") || EqualsIgnoreCase(raw, "curve"))
     {
         out = Components::SkyScalarCurveShapeMode::KeyCurve;
         return true;
     }
-    if (raw == "cubicbezier" || raw == "bezier" || raw == "cubic")
+    if (EqualsIgnoreCase(raw, "cubicbezier") || EqualsIgnoreCase(raw, "bezier") || EqualsIgnoreCase(raw, "cubic"))
     {
         out = Components::SkyScalarCurveShapeMode::CubicBezier;
         return true;
@@ -2388,12 +2516,9 @@ Components::SkySunPathKind ParseSunPath(std::string_view value)
     std::string quoted;
     if (ParseQuotedString(value, quoted))
         raw = quoted;
-    std::string lowered = raw;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    if (lowered == "custom")
+    if (EqualsIgnoreCase(raw, "custom"))
         return Components::SkySunPathKind::Custom;
-    if (lowered != "earth")
+    if (!EqualsIgnoreCase(raw, "earth"))
         Logger::Log::Warning("Scene: SkyEnvironment.SunPath = {} is not Earth or Custom; the sky uses the "
                              "Earth path. Re-save the scene to store it.",
                              raw);
@@ -3964,8 +4089,7 @@ class SkyboxSchema final : public ISceneComponentSchema
                     *outError = "Skybox.Resolution must be a quoted string";
                 return false;
             }
-            std::memset(c.Resolution, 0, sizeof(c.Resolution));
-            std::memcpy(c.Resolution, s.data(), std::min(sizeof(c.Resolution) - 1, s.size()));
+            CopyToFixedString(c.Resolution, s);
         }
         else if (property == "sourceslug")
         {
@@ -3976,8 +4100,7 @@ class SkyboxSchema final : public ISceneComponentSchema
                     *outError = "Skybox.SourceSlug must be a quoted string";
                 return false;
             }
-            std::memset(c.SourceSlug, 0, sizeof(c.SourceSlug));
-            std::memcpy(c.SourceSlug, s.data(), std::min(sizeof(c.SourceSlug) - 1, s.size()));
+            CopyToFixedString(c.SourceSlug, s);
         }
         else if (property == "hdriassetguid")
         {
@@ -3990,8 +4113,7 @@ class SkyboxSchema final : public ISceneComponentSchema
                     *outError = "Skybox.HDRIAssetGuid must be a quoted string";
                 return false;
             }
-            std::memset(c.HDRIAssetGuid, 0, sizeof(c.HDRIAssetGuid));
-            std::memcpy(c.HDRIAssetGuid, s.data(), std::min(sizeof(c.HDRIAssetGuid) - 1, s.size()));
+            CopyToFixedString(c.HDRIAssetGuid, s);
         }
         else if (property == "hdripath")
         {
@@ -4003,8 +4125,7 @@ class SkyboxSchema final : public ISceneComponentSchema
                     *outError = "Skybox.HDRIPath must be a quoted string";
                 return false;
             }
-            std::memset(c.HDRIPath, 0, sizeof(c.HDRIPath));
-            std::memcpy(c.HDRIPath, s.data(), std::min(sizeof(c.HDRIPath) - 1, s.size()));
+            CopyToFixedString(c.HDRIPath, s);
         }
         else if (property == "hdri")
         {
@@ -4028,19 +4149,8 @@ class SkyboxSchema final : public ISceneComponentSchema
                         *outError = err.empty() ? "Skybox.HDRI: invalid reference" : err;
                     return false;
                 }
-                std::memset(c.HDRIAssetGuid, 0, sizeof(c.HDRIAssetGuid));
-                if (!ref.guid.IsNull())
-                {
-                    const std::string gs = ref.guid.ToString();
-                    const size_t n = std::min(gs.size(), sizeof(c.HDRIAssetGuid) - 1);
-                    std::memcpy(c.HDRIAssetGuid, gs.data(), n);
-                }
-                std::memset(c.HDRIPath, 0, sizeof(c.HDRIPath));
-                if (!ref.path.empty())
-                {
-                    const size_t n = std::min(ref.path.size(), sizeof(c.HDRIPath) - 1);
-                    std::memcpy(c.HDRIPath, ref.path.data(), n);
-                }
+                CopyToFixedString(c.HDRIAssetGuid, ref.guid.IsNull() ? std::string() : ref.guid.ToString());
+                CopyToFixedString(c.HDRIPath, ref.path);
             }
         }
         else
@@ -4132,11 +4242,13 @@ class CameraSchema final : public ISceneComponentSchema
         outLines.push_back(std::string("Camera.antiAliasing = ") + std::to_string(c->AntiAliasing));
         outLines.push_back(std::string("Camera.renderScale = ") + FormatFloat(c->RenderScale));
         outLines.push_back(std::string("Camera.volumeLayers = ") + FormatRenderLayerMask(c->VolumeLayers));
+        outLines.push_back(std::string("Camera.includeUIInPostProcessing = ") + (c->IncludeUIInPostProcessing ? "true" : "false"));
         outLines.push_back(std::string("Camera.aspectPreset = ") + std::to_string(c->AspectPreset));
         outLines.push_back(std::string("Camera.customAspectWidth = ") + FormatFloat(c->CustomAspectWidth));
         outLines.push_back(std::string("Camera.customAspectHeight = ") + FormatFloat(c->CustomAspectHeight));
         outLines.push_back(std::string("Camera.pixelPerfect = ") + (c->PixelPerfect ? "true" : "false"));
         outLines.push_back(std::string("Camera.pixelPerfectPixelsPerUnit = ") + std::to_string(c->PixelPerfectPixelsPerUnit));
+        outLines.push_back(std::string("Camera.pixelPerfectAutoPixelsPerUnit = ") + (c->PixelPerfectAutoPixelsPerUnit ? "true" : "false"));
         outLines.push_back(std::string("Camera.pixelPerfectReferenceWidth = ") + std::to_string(c->PixelPerfectReferenceWidth));
         outLines.push_back(std::string("Camera.pixelPerfectReferenceHeight = ") + std::to_string(c->PixelPerfectReferenceHeight));
         outLines.push_back(std::string("Camera.pixelPerfectPixelSnap = ") + (c->PixelPerfectPixelSnap ? "true" : "false"));
@@ -4231,6 +4343,11 @@ class CameraSchema final : public ISceneComponentSchema
             if (!ParseRenderLayerMask(value, "volumeLayers", c.VolumeLayers, outError))
                 return false;
         }
+        else if (property == "includeuiinpostprocessing")
+        {
+            if (!ParseBool(value, c.IncludeUIInPostProcessing, outError))
+                return false;
+        }
         else if (property == "aspectpreset")
         {
             if (!ParseU32(value, c.AspectPreset, outError))
@@ -4254,6 +4371,11 @@ class CameraSchema final : public ISceneComponentSchema
         else if (property == "pixelperfectpixelsperunit")
         {
             if (!ParseU32(value, c.PixelPerfectPixelsPerUnit, outError))
+                return false;
+        }
+        else if (property == "pixelperfectautopixelsperunit")
+        {
+            if (!ParseBool(value, c.PixelPerfectAutoPixelsPerUnit, outError))
                 return false;
         }
         else if (property == "pixelperfectreferencewidth")
@@ -4446,11 +4568,10 @@ static const char* LightUnitToName(Components::LightUnit u)
 
 static bool ParseLightUnit(std::string_view value, Components::LightUnit& out, std::string* outError)
 {
-    const std::string v = ToLowerAscii(value);
-    if (v == "unitless") out = Components::LightUnit::Unitless;
-    else if (v == "lux") out = Components::LightUnit::Lux;
-    else if (v == "lumen") out = Components::LightUnit::Lumen;
-    else if (v == "candela") out = Components::LightUnit::Candela;
+    if (EqualsIgnoreCase(value, "unitless")) out = Components::LightUnit::Unitless;
+    else if (EqualsIgnoreCase(value, "lux")) out = Components::LightUnit::Lux;
+    else if (EqualsIgnoreCase(value, "lumen")) out = Components::LightUnit::Lumen;
+    else if (EqualsIgnoreCase(value, "candela")) out = Components::LightUnit::Candela;
     else
     {
         if (outError)
@@ -5339,35 +5460,6 @@ class GameLogicGraphRefSchema final : public ISceneComponentSchema
     }
 };
 
-// Legacy alias: loads scenes saved with the old "ModelAnimationPlayback" name.
-class ModelAnimationPlaybackLegacySchema final : public ISceneComponentSchema
-{
-  public:
-    std::string_view GetComponentName() const override { return "ModelAnimationPlayback"; }
-    void Serialize(const ECS::World&, ECS::EntityHandle, const SceneSaveContext&, std::vector<std::string>&) const override {}
-
-    bool ApplyProperty(ECS::World& world, ECS::EntityHandle entity, const SceneLoadContext& ctx,
-                       std::string_view property, std::string_view value,
-                       std::string* outError) const override
-    {
-        return ApplyAnimatorProperty(world, entity, ctx, GetComponentName(), property, value, outError);
-    }
-
-    bool AddDefault(ECS::World& world, ECS::EntityHandle entity, std::string* /*outError*/) const override
-    {
-        if (world.GetComponent<Components::Animator>(entity))
-            return true;
-        world.AddComponentImmediate(entity, Components::Animator{});
-        return true;
-    }
-
-    bool Remove(ECS::World& world, ECS::EntityHandle entity) const override
-    {
-        world.RemoveComponentImmediate<Components::Animator>(entity);
-        return true;
-    }
-};
-
 class ValueCurveSchema final : public ISceneComponentSchema
 {
   public:
@@ -5386,18 +5478,14 @@ class ValueCurveSchema final : public ISceneComponentSchema
 
     static bool TryParseShapeMode(std::string_view name, Components::ValueCurveShapeMode& out)
     {
-        std::string raw = std::string(name);
-        std::string quoted;
-        if (ParseQuotedString(name, quoted))
-            raw = quoted;
-        std::transform(raw.begin(), raw.end(), raw.begin(), [](unsigned char ch)
-                       { return static_cast<char>(std::tolower(ch)); });
-        if (raw == "keycurve" || raw == "keys" || raw == "curve" || raw == "mathcurve")
+        const std::string raw = UnquoteValue(name);
+        if (EqualsIgnoreCase(raw, "keycurve") || EqualsIgnoreCase(raw, "keys") || EqualsIgnoreCase(raw, "curve") ||
+            EqualsIgnoreCase(raw, "mathcurve"))
         {
             out = Components::ValueCurveShapeMode::KeyCurve;
             return true;
         }
-        if (raw == "cubicbezier" || raw == "bezier" || raw == "cubic")
+        if (EqualsIgnoreCase(raw, "cubicbezier") || EqualsIgnoreCase(raw, "bezier") || EqualsIgnoreCase(raw, "cubic"))
         {
             out = Components::ValueCurveShapeMode::CubicBezier;
             return true;
@@ -5448,90 +5536,36 @@ class ValueCurveSchema final : public ISceneComponentSchema
         return false;
     }
 
-    static std::string_view ToTargetName(Components::ValueCurveTarget target)
+    // The saved name of `target`; a stored value outside the target table saves as "none".
+    static constexpr std::string_view ToTargetName(Components::ValueCurveTarget target)
     {
-        using Target = Components::ValueCurveTarget;
-        switch (target)
-        {
-        case Target::None:
-            return "none";
-        case Target::TransformPositionX:
-            return "transformPositionX";
-        case Target::TransformPositionY:
-            return "transformPositionY";
-        case Target::TransformPositionZ:
-            return "transformPositionZ";
-        case Target::TransformScaleX:
-            return "transformScaleX";
-        case Target::TransformScaleY:
-            return "transformScaleY";
-        case Target::TransformScaleZ:
-            return "transformScaleZ";
-        case Target::LightIntensity:
-            return "lightIntensity";
-        case Target::PostProcessWeight:
-            return "postProcessWeight";
-        default:
-            return "none";
-        }
+        const Components::ValueCurveTargetEntry* entry =
+            Components::FindValueCurveTargetEntry(static_cast<int>(target));
+        return entry ? entry->Name : Components::kValueCurveTargetEntries[0].Name;
     }
 
-    static bool TryParseTarget(std::string_view name, Components::ValueCurveTarget& out)
+    // The target table row whose saved name is `name` in any case, or nullptr when no row has it.
+    static constexpr const Components::ValueCurveTargetEntry* FindTargetEntry(std::string_view name)
     {
-        using Target = Components::ValueCurveTarget;
-        if (name == "none")
+        for (const Components::ValueCurveTargetEntry& entry : Components::kValueCurveTargetEntries)
         {
-            out = Target::None;
-            return true;
+            if (EqualsIgnoreCase(name, entry.Name))
+                return &entry;
         }
-        if (name == "transformpositionx")
+        return nullptr;
+    }
+
+    static std::string FormatUnknownTargetError()
+    {
+        std::string message = "ValueCurve.target must be one of: ";
+        std::string_view separator;
+        for (const Components::ValueCurveTargetEntry& entry : Components::kValueCurveTargetEntries)
         {
-            out = Target::TransformPositionX;
-            return true;
+            message += separator;
+            message += entry.Name;
+            separator = ", ";
         }
-        if (name == "transformpositiony")
-        {
-            out = Target::TransformPositionY;
-            return true;
-        }
-        if (name == "transformpositionz")
-        {
-            out = Target::TransformPositionZ;
-            return true;
-        }
-        if (name == "transformscalex")
-        {
-            out = Target::TransformScaleX;
-            return true;
-        }
-        if (name == "transformscaley")
-        {
-            out = Target::TransformScaleY;
-            return true;
-        }
-        if (name == "transformscalez")
-        {
-            out = Target::TransformScaleZ;
-            return true;
-        }
-        if (name == "lightintensity")
-        {
-            out = Target::LightIntensity;
-            return true;
-        }
-        if (name == "postprocessweight")
-        {
-            out = Target::PostProcessWeight;
-            return true;
-        }
-        if (name == "postprocessexposure")
-        {
-            // Exposure moved off the volume onto the camera; the old curve target no longer exists.
-            // Migrate legacy scenes to an inert target rather than failing the load.
-            out = Target::None;
-            return true;
-        }
-        return false;
+        return message;
     }
 
     std::string_view GetComponentName() const override { return "ValueCurve"; }
@@ -5618,14 +5652,14 @@ class ValueCurveSchema final : public ISceneComponentSchema
             std::string quoted;
             if (ParseQuotedString(value, quoted))
                 raw = quoted;
-            std::transform(raw.begin(), raw.end(), raw.begin(), [](unsigned char ch)
-                           { return static_cast<char>(std::tolower(ch)); });
-            if (!TryParseTarget(raw, c.Target))
+            const Components::ValueCurveTargetEntry* entry = FindTargetEntry(raw);
+            if (!entry)
             {
                 if (outError)
-                    *outError = "ValueCurve.target must be a known target name";
+                    *outError = FormatUnknownTargetError();
                 return false;
             }
+            c.Target = entry->Value;
         }
         else if (property == "durationseconds")
         {
@@ -5720,13 +5754,7 @@ class ValueCurveSchema final : public ISceneComponentSchema
         }
         else if (property == "curve")
         {
-            std::string raw = std::string(value);
-            std::string quoted;
-            if (ParseQuotedString(value, quoted))
-                raw = quoted;
-            std::transform(raw.begin(), raw.end(), raw.begin(), [](unsigned char ch)
-                           { return static_cast<char>(std::tolower(ch)); });
-            if (raw == "custom")
+            if (EqualsIgnoreCase(UnquoteValue(value), "custom"))
             {
                 c.ShapeMode = Components::ValueCurveShapeMode::CubicBezier;
                 c.UseBuiltinEasing = false;
@@ -5803,6 +5831,14 @@ static bool ParseLook(std::string_view value, Components::Look& out, std::string
     }
     return false;
 }
+
+static_assert(ValueCurveSchema::ToTargetName(Components::ValueCurveTarget::TransformScaleY) == "transformScaleY" &&
+                  ValueCurveSchema::ToTargetName(static_cast<Components::ValueCurveTarget>(
+                      std::size(Components::kValueCurveTargetEntries))) == "none",
+              "A ValueCurve target must save as its table name, and a value outside the table as none");
+static_assert(ValueCurveSchema::FindTargetEntry("TRANSFORMSCALEY")->Value == Components::ValueCurveTarget::TransformScaleY &&
+                  ValueCurveSchema::FindTargetEntry("postProcessExposure") == nullptr,
+              "A ValueCurve target name must load in any case, and a name outside the table must not load");
 
 class PostProcessVolumeSchema final : public ISceneComponentSchema
 {
@@ -6199,6 +6235,7 @@ class WindVolumeSchema final : public ISceneComponentSchema
                            FormatFloat(c->DirectionY) + ", " +
                            FormatFloat(c->DirectionZ) + ")");
         outLines.push_back("WindVolume.speed = " + FormatFloat(c->Speed));
+        outLines.push_back("WindVolume.rainAmount = " + FormatFloat(c->RainAmount));
         outLines.push_back("WindVolume.turbulence = " + FormatFloat(c->Turbulence));
         outLines.push_back("WindVolume.gustFrequency = " + FormatFloat(c->GustFrequency));
         outLines.push_back("WindVolume.gustScale = " + FormatFloat(c->GustScale));
@@ -6281,6 +6318,12 @@ class WindVolumeSchema final : public ISceneComponentSchema
             if (!ParseF32(value, c.Speed, outError))
                 return false;
             c.Speed = std::max(0.0f, c.Speed);
+        }
+        else if (property == "rainamount")
+        {
+            if (!ParseF32(value, c.RainAmount, outError))
+                return false;
+            c.RainAmount = std::clamp(c.RainAmount, 0.0f, 2.0f);
         }
         else if (property == "turbulence")
         {
@@ -8266,14 +8309,6 @@ class VideoTextureSchema final : public ISceneComponentSchema
         if (auto* existing = world.GetComponent<Components::VideoTextureComponent>(entity))
             c = *existing;
 
-        auto copyString = [](char* dst, size_t dstSize, const std::string& src)
-        {
-            std::memset(dst, 0, dstSize);
-            const size_t toCopy = std::min(dstSize - 1, src.size());
-            std::memcpy(dst, src.data(), toCopy);
-            dst[toCopy] = '\0';
-        };
-
         if (property == "videopath")
         {
             std::string s;
@@ -8283,7 +8318,7 @@ class VideoTextureSchema final : public ISceneComponentSchema
                     *outError = "VideoTextureComponent.videoPath must be a quoted string";
                 return false;
             }
-            copyString(c.videoPath, sizeof(c.videoPath), s);
+            CopyToFixedString(c.videoPath, s);
         }
         else if (property == "uniformname")
         {
@@ -8300,7 +8335,7 @@ class VideoTextureSchema final : public ISceneComponentSchema
             // writes the migrated name.
             if (s == "uBaseColor")
                 s = "albedoMap";
-            copyString(c.uniformName, sizeof(c.uniformName), s);
+            CopyToFixedString(c.uniformName, s);
         }
         else if (property == "loop")
         {
@@ -8732,6 +8767,7 @@ void RegisterBuiltInSceneSchemas()
     SceneSchemaRegistry::Register(std::make_unique<VolumetricFogEffectSchema>());
     SceneSchemaRegistry::Register(std::make_unique<CubeLutEffectSchema>());
     SceneSchemaRegistry::Register(std::make_unique<PhysicsWorldSettingsSchema>());
+    SceneSchemaRegistry::Register(std::make_unique<MovingPlatformSchema>());
     SceneSchemaRegistry::Register(std::make_unique<PhysicsBodySchema>());
     SceneSchemaRegistry::Register(std::make_unique<CharacterControllerSchema>());
     SceneSchemaRegistry::Register(std::make_unique<PhysicsColliderSchema>());
@@ -8743,7 +8779,6 @@ void RegisterBuiltInSceneSchemas()
     SceneSchemaRegistry::Register(std::make_unique<AnimatorSchema>());
     SceneSchemaRegistry::Register(std::make_unique<GameLogicGraphRefSchema>());
     SceneSchemaRegistry::Register(std::make_unique<ValueCurveSchema>());
-    SceneSchemaRegistry::Register(std::make_unique<ModelAnimationPlaybackLegacySchema>());
     SceneSchemaRegistry::Register(std::make_unique<SkinnedMeshRendererSchema>());
     SceneSchemaRegistry::Register(std::make_unique<AudioListenerSchema>());
     SceneSchemaRegistry::Register(std::make_unique<LODGroupSchema>());

@@ -72,9 +72,12 @@ public:
     /// Optional: set a small colored dot/icon for a menu item (e.g. for tag colors). hexColor e.g. "#3498db" or "#rgb".
     virtual void SetItemColor(uint32_t commandId, const std::string& hexColor) { (void)commandId; (void)hexColor; }
 
-    /// Optional: set a small image/icon for a menu item. UI menus resolve this
-    /// like CSS background-image paths, so aliases such as "editor:Icons/foo.png"
-    /// are valid. Native menus may ignore this when not supported.
+    /// Optional: set a small image/icon for a menu item. imagePath is either an
+    /// asset alias path as CSS background-image takes it ("editor:Icons/foo.png")
+    /// or an absolute file path (including a drive-letter path such as
+    /// "C:\Icons\foo.png", which is a file, not an alias). A native menu gets the
+    /// string unchanged, so it can load only an absolute file path; native menus
+    /// may ignore this when not supported.
     virtual void SetItemIcon(uint32_t commandId, const std::string& imagePath) { (void)commandId; (void)imagePath; }
 
     /// Optional: set a small image/icon for a submenu row. Native menus may

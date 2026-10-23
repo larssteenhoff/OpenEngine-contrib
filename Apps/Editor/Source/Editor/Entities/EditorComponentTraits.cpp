@@ -20,21 +20,17 @@ std::string ComponentDisplayName(ECS::ComponentTypeId typeId)
     return "id " + std::to_string(typeId);
 }
 
-// A registered component type that `hosts` claims and that another component's
-// traits (not `hostTypeId`'s own, which a re-registration replaces) already
-// host, with that other host; false when the claims are disjoint.
-bool FindSectionClaimedByAnotherHost(const EditorComponentTraitsRegistry& registry,
-                                     ECS::ComponentTypeId hostTypeId,
+// Each other host's type id with its HostsInspectorSection claim.
+using SectionHostClaims = std::vector<std::pair<ECS::ComponentTypeId, std::function<bool(ECS::ComponentTypeId)>>>;
+
+// A registered component type that `hosts` claims and that one of
+// `otherHosts` already hosts, with that other host; false when the claims are
+// disjoint.
+bool FindSectionClaimedByAnotherHost(const SectionHostClaims& otherHosts,
                                      const std::function<bool(ECS::ComponentTypeId)>& hosts,
                                      ECS::ComponentTypeId& outHostedTypeId,
                                      ECS::ComponentTypeId& outOtherHostTypeId)
 {
-    std::vector<std::pair<ECS::ComponentTypeId, EditorComponentTraits>> otherHosts;
-    for (auto& [typeId, traits] : registry.Snapshot())
-    {
-        if (typeId != hostTypeId && traits.HostsInspectorSection)
-            otherHosts.emplace_back(typeId, std::move(traits));
-    }
     if (otherHosts.empty())
         return false;
     for (const std::string& name : ECS::ComponentRegistry::GetAllComponentNames())
@@ -42,9 +38,9 @@ bool FindSectionClaimedByAnotherHost(const EditorComponentTraitsRegistry& regist
         const ECS::ComponentTypeId typeId = ECS::ComponentRegistry::GetComponentTypeId(name);
         if (!hosts(typeId))
             continue;
-        for (const auto& [otherHostTypeId, otherTraits] : otherHosts)
+        for (const auto& [otherHostTypeId, otherHostClaims] : otherHosts)
         {
-            if (otherTraits.HostsInspectorSection(typeId))
+            if (otherHostClaims(typeId))
             {
                 outHostedTypeId = typeId;
                 outOtherHostTypeId = otherHostTypeId;
@@ -65,18 +61,31 @@ EditorComponentTraitsRegistry& EditorComponentTraitsRegistry::Get()
 void EditorComponentTraitsRegistry::Register(ECS::ComponentTypeId typeId, EditorComponentTraits traits)
 {
     std::lock_guard<std::mutex> registration(m_RegistrationMutex);
-    ECS::ComponentTypeId hostedTypeId{};
-    ECS::ComponentTypeId otherHostTypeId{};
-    if (traits.HostsInspectorSection &&
-        FindSectionClaimedByAnotherHost(*this, typeId, traits.HostsInspectorSection, hostedTypeId,
-                                        otherHostTypeId))
+    if (traits.HostsInspectorSection)
     {
-        Logger::Log::Error("EditorComponentTraits: '{}' and '{}' both host the inspector section of '{}'. "
-                           "A section has one host, so the traits of '{}' are not registered; make the "
-                           "two HostsInspectorSection claims disjoint.",
-                           ComponentDisplayName(otherHostTypeId), ComponentDisplayName(typeId),
-                           ComponentDisplayName(hostedTypeId), ComponentDisplayName(typeId));
-        return;
+        // Every other host's claim (not `typeId`'s own, which a re-registration
+        // replaces), copied out so the predicates run outside m_Mutex.
+        SectionHostClaims otherHosts;
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            for (const auto& [hostTypeId, hostTraits] : m_Traits)
+            {
+                if (hostTypeId != typeId && hostTraits.HostsInspectorSection)
+                    otherHosts.emplace_back(hostTypeId, hostTraits.HostsInspectorSection);
+            }
+        }
+        ECS::ComponentTypeId hostedTypeId{};
+        ECS::ComponentTypeId otherHostTypeId{};
+        if (FindSectionClaimedByAnotherHost(otherHosts, traits.HostsInspectorSection, hostedTypeId,
+                                            otherHostTypeId))
+        {
+            Logger::Log::Error("EditorComponentTraits: '{}' and '{}' both host the inspector section of '{}'. "
+                               "A section has one host, so the traits of '{}' are not registered; make the "
+                               "two HostsInspectorSection claims disjoint.",
+                               ComponentDisplayName(otherHostTypeId), ComponentDisplayName(typeId),
+                               ComponentDisplayName(hostedTypeId), ComponentDisplayName(typeId));
+            return;
+        }
     }
 
     std::lock_guard<std::mutex> lock(m_Mutex);
@@ -106,6 +115,72 @@ std::string EditorComponentTraitsRegistry::UntitledNameOf(const std::vector<ECS:
     return {};
 }
 
+bool EditorComponentTraitsRegistry::IsHiddenInInspector(ECS::ComponentTypeId typeId) const
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    const auto it = m_Traits.find(typeId);
+    return it != m_Traits.end() && it->second.HiddenInInspector;
+}
+
+std::vector<std::pair<ECS::ComponentTypeId, std::string>> EditorComponentTraitsRegistry::HierarchyRowClasses() const
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    std::vector<std::pair<ECS::ComponentTypeId, std::string>> rowClasses;
+    for (const auto& [typeId, traits] : m_Traits)
+    {
+        if (!traits.HierarchyRowClass.empty())
+            rowClasses.emplace_back(typeId, traits.HierarchyRowClass);
+    }
+    return rowClasses;
+}
+
+std::vector<ECS::ComponentTypeId> EditorComponentTraitsRegistry::PickInstanceRootTypes() const
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    std::vector<ECS::ComponentTypeId> types;
+    for (const auto& [typeId, traits] : m_Traits)
+    {
+        if (traits.IsPickInstanceRoot)
+            types.push_back(typeId);
+    }
+    return types;
+}
+
+std::vector<ECS::ComponentTypeId> EditorComponentTraitsRegistry::GizmoPivotAtEntityOriginTypes() const
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    std::vector<ECS::ComponentTypeId> types;
+    for (const auto& [typeId, traits] : m_Traits)
+    {
+        if (traits.GizmoPivotAtEntityOrigin)
+            types.push_back(typeId);
+    }
+    return types;
+}
+
+std::vector<std::function<GenericEditUndoRecorder(ECS::World&)>> EditorComponentTraitsRegistry::BeforeGenericEditHooks() const
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    std::vector<std::function<GenericEditUndoRecorder(ECS::World&)>> hooks;
+    for (const auto& [typeId, traits] : m_Traits)
+    {
+        if (traits.BeforeGenericEdit)
+            hooks.push_back(traits.BeforeGenericEdit);
+    }
+    return hooks;
+}
+
+ECS::ComponentTypeId EditorComponentTraitsRegistry::FindByDisplayName(std::string_view displayName) const
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    for (const auto& [typeId, traits] : m_Traits)
+    {
+        if (traits.DisplayName == displayName)
+            return typeId;
+    }
+    return ECS::ComponentTypeId{};
+}
+
 bool EditorComponentTraitsRegistry::TryGetSectionHost(ECS::ComponentTypeId hostedTypeId,
                                                       ECS::ComponentTypeId& outHostTypeId,
                                                       EditorComponentTraits& outHostTraits) const
@@ -133,10 +208,25 @@ bool EditorComponentTraitsRegistry::TryGetSectionHost(ECS::ComponentTypeId hoste
     return false;
 }
 
-std::vector<std::pair<ECS::ComponentTypeId, EditorComponentTraits>> EditorComponentTraitsRegistry::Snapshot() const
+ECS::ComponentTypeId EditorComponentTraitsRegistry::FindStackEffectOwner(ECS::ComponentTypeId effectTypeId) const
 {
-    std::lock_guard<std::mutex> lock(m_Mutex);
-    return {m_Traits.begin(), m_Traits.end()};
+    // The predicates run outside the lock: they consult other registries, and a
+    // module's predicate may register traits of its own.
+    std::vector<std::pair<ECS::ComponentTypeId, std::function<bool(ECS::ComponentTypeId)>>> owners;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        for (const auto& [typeId, traits] : m_Traits)
+        {
+            if (traits.OwnsStackEffect)
+                owners.emplace_back(typeId, traits.OwnsStackEffect);
+        }
+    }
+    for (const auto& [volumeTypeId, ownsStackEffect] : owners)
+    {
+        if (ownsStackEffect(effectTypeId))
+            return volumeTypeId;
+    }
+    return ECS::ComponentTypeId{};
 }
 
 void EditorComponentTraitsRegistry::AppendModulePins(std::string_view moduleId,

@@ -311,7 +311,7 @@ The system that loads `.rendergraph` JSON and turns it into RG passes.
 | `Nodes/DepthPrepassNode.h/.cpp` | "DepthPrepass" type — clears + renders world depth |
 | `Nodes/ViewParamsUploadNode.h/.cpp` | "ViewParamsUpload" — uploads per-view UBO (matrices, camera pos) |
 | `Nodes/LightUploadNode.h/.cpp` | "LightUpload" — uploads the light SSBO |
-| `Nodes/ShadowMapNode.h/.cpp` | "ShadowMap" (legacy alias "CascadedShadowMap", deprecated) — renders all shadow families (cascades + area/spot/point) |
+| `Nodes/ShadowMapNode.h/.cpp` | "ShadowMap" — renders all shadow families (cascades + area/spot/point) |
 | `Nodes/SkyRenderNode.h/.cpp` | "SkyRender" — sky atmosphere render |
 | `Nodes/WorldRenderNode.h/.cpp` | "WorldRender" — main forward-pass world geometry |
 | `Nodes/ComputeShaderNode.h/.cpp` | "ComputeShader" — JSON-configured generic compute dispatch (used for cluster cull, etc.) |
@@ -460,7 +460,7 @@ The order of the `passes` array is the order of the frame: the pipeline declares
 | `DepthPrepass` | `DepthPrepassNode` | Renders world depth |
 | `ViewParamsUpload` | `ViewParamsUploadNode` | Uploads per-view UBO |
 | `LightUpload` | `LightUploadNode` | Uploads light SSBO from extracted lights |
-| `ShadowMap` (legacy alias `CascadedShadowMap`) | `ShadowMapNode` | Renders all shadow families (cascades + area/spot/point) + uploads shadow UBO |
+| `ShadowMap` | `ShadowMapNode` | Renders all shadow families (cascades + area/spot/point) + uploads shadow UBO |
 | `SkyRender` | `SkyRenderNode` | Renders sky atmosphere |
 | `WorldRender` | `WorldRenderNode` | Forward-pass world geometry with material binding |
 | `TerrainUpload`, `CBTRender`, `TerrainGrass` | (terrain module nodes) | Upload the terrain's per-frame data, render the CBT terrain and its grass |

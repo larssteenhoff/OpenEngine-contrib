@@ -74,6 +74,15 @@ class FileWatcher
     }
 
     /**
+     * @brief True from StartWatching until the watch thread returns.
+     * Once it is false, StopWatching joins without waiting.
+     */
+    bool IsThreadRunning() const
+    {
+        return m_Watching.load();
+    }
+
+    /**
      * @brief Set callback for file change events.
      * Call only while not watching: the watch thread reads the callback with
      * no lock, so replacing it while that thread runs is a data race. To stop
@@ -187,6 +196,7 @@ class FileWatcher
     // Pre-computed normalized absolute watch root (set once in StartWatching, read-only after).
     std::filesystem::path m_NormalizedWatchBase;
     bool m_Recursive;
+    // Set by StartWatching before the thread starts; the thread clears it as it returns.
     std::atomic<bool> m_Watching;
     std::atomic<bool> m_ShouldStop;
     std::thread m_WatchThread;

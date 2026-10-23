@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <string_view>
 #include <vector>
 
 #include "Core/CpuProfiler.h"
@@ -31,6 +32,11 @@ public:
     virtual bool DeleteSelection() { return false; }
 
     virtual void GatherGizmos(GizmoCollector& collector) = 0;
+    /**
+     * One line the Scene View shows while this tool is active: what the next
+     * click needs, or what it will do. Empty when nothing is worth saying.
+     */
+    virtual std::string_view StatusText() const { return {}; }
 };
 
 class GizmoCollector

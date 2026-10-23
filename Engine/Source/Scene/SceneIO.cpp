@@ -157,24 +157,11 @@ bool TryResolveResourceIdToAssetReference(const SceneLoadContext& ctx,
         pit != ctx.ResourceAbsPathById.end())
     {
         const std::filesystem::path& absPath = pit->second;
-        const std::string guidStr = (ctx.ResourceGuidById.count(std::string(resourceId)) > 0)
-                                        ? ctx.ResourceGuidById.at(std::string(resourceId))
-                                        : std::string{};
-
         GUID guid = GUID::Null();
-        if (!guidStr.empty())
-        {
-            try
-            {
-                guid = GUID(guidStr);
-                if (ctx.Resolver)
-                    guid = ctx.Resolver->ResolveGuid(guid);
-            }
-            catch (...)
-            {
-                guid = GUID::Null();
-            }
-        }
+        if (auto guidIt = ctx.ResourceGuidById.find(std::string(resourceId)); guidIt != ctx.ResourceGuidById.end())
+            guid = guidIt->second;
+        if (!guid.IsNull() && ctx.Resolver)
+            guid = ctx.Resolver->ResolveGuid(guid);
         if (guid.IsNull() && !absPath.empty())
         {
             if (ctx.Resolver)
@@ -670,31 +657,6 @@ static bool WriteTextFileAtomic(const std::filesystem::path& p, const std::strin
     return FileSystem::PublishFile(tmp, p);
 }
 
-static std::string Trim(std::string s)
-{
-    // Compute the trimmed bounds, then erase once from each end — the old front s.erase(begin())
-    // loop shifted the whole string per leading space (O(n^2)); erase(0, b) shifts once.
-    std::size_t b = 0, e = s.size();
-    while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r')) ++b;
-    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r')) --e;
-    s.erase(e);
-    s.erase(0, b);
-    return s;
-}
-
-static bool StartsWith(const std::string& s, const char* prefix)
-{
-    if (!prefix)
-        return false;
-    const size_t n = std::strlen(prefix);
-    return s.size() >= n && s.compare(0, n, prefix) == 0;
-}
-
-struct Tuple3
-{
-    float x = 0, y = 0, z = 0;
-};
-
 struct Section
 {
     std::string type; // scene, blueprint, resource, entity, blueprint(instance), subscene
@@ -705,11 +667,11 @@ struct Section
 
 static bool ParseSectionHeader(const std::string& line, std::string& outType, std::unordered_map<std::string, std::string>& outAttrs)
 {
-    std::string t = Trim(line);
+    std::string t = std::string(TrimSceneWhitespace(line));
     if (t.size() < 2 || t.front() != '[' || t.back() != ']')
         return false;
     t = t.substr(1, t.size() - 2);
-    t = Trim(t);
+    t = std::string(TrimSceneWhitespace(t));
     if (t.empty())
         return false;
 
@@ -865,7 +827,7 @@ struct SceneDoc
     {
         std::string id;
         std::string sourceResourceId;
-        Tuple3 offset{};
+        Float3 offset{};
         bool hasOffset = false;
         bool enabled = true;
         int headerLine = 0;
@@ -936,8 +898,8 @@ static bool ParseComponentLine(const std::string& line, std::string& outComp, st
     const size_t eq = line.find('=');
     if (eq == std::string::npos)
         return false;
-    std::string left = Trim(line.substr(0, eq));
-    std::string right = Trim(line.substr(eq + 1));
+    std::string left = std::string(TrimSceneWhitespace(line.substr(0, eq)));
+    std::string right = std::string(TrimSceneWhitespace(line.substr(eq + 1)));
     const size_t dot = left.find('.');
     if (dot == std::string::npos)
         return false;
@@ -955,30 +917,30 @@ static bool ParseComponentLine(const std::string& line, std::string& outComp, st
         size_t split = lowered.rfind('.');
         while (split != std::string::npos && split > dot)
         {
-            const std::string candidate = Trim(lowered.substr(0, split));
+            const std::string candidate = std::string(TrimSceneWhitespace(lowered.substr(0, split)));
             if (ECS::ComponentFieldRegistry::FindByName(candidate) != 0)
             {
                 outComp = candidate;
-                outProp = Trim(lowered.substr(split + 1));
+                outProp = std::string(TrimSceneWhitespace(lowered.substr(split + 1)));
                 outValue = right;
                 // lowered and left are index-aligned (ASCII lowering).
                 if (outCompAuthored)
-                    *outCompAuthored = Trim(left.substr(0, split));
+                    *outCompAuthored = std::string(TrimSceneWhitespace(left.substr(0, split)));
                 if (outPropAuthored)
-                    *outPropAuthored = Trim(left.substr(split + 1));
+                    *outPropAuthored = std::string(TrimSceneWhitespace(left.substr(split + 1)));
                 return !outComp.empty() && !outProp.empty();
             }
             split = lowered.rfind('.', split - 1);
         }
     }
 
-    outComp = ToLowerAscii(Trim(left.substr(0, dot)));
-    outProp = ToLowerAscii(Trim(left.substr(dot + 1)));
+    outComp = ToLowerAscii(std::string(TrimSceneWhitespace(left.substr(0, dot))));
+    outProp = ToLowerAscii(std::string(TrimSceneWhitespace(left.substr(dot + 1))));
     outValue = right;
     if (outCompAuthored)
-        *outCompAuthored = Trim(left.substr(0, dot));
+        *outCompAuthored = std::string(TrimSceneWhitespace(left.substr(0, dot)));
     if (outPropAuthored)
-        *outPropAuthored = Trim(left.substr(dot + 1));
+        *outPropAuthored = std::string(TrimSceneWhitespace(left.substr(dot + 1)));
     return !outComp.empty() && !outProp.empty();
 }
 
@@ -1020,8 +982,8 @@ static bool ParsePropertyLine(const std::string& line, std::string& outKey, std:
     const size_t eq = line.find('=');
     if (eq == std::string::npos)
         return false;
-    outKey = Trim(line.substr(0, eq));
-    outValue = Trim(line.substr(eq + 1));
+    outKey = std::string(TrimSceneWhitespace(line.substr(0, eq)));
+    outValue = std::string(TrimSceneWhitespace(line.substr(eq + 1)));
     return !outKey.empty();
 }
 
@@ -1055,7 +1017,7 @@ static bool ParseDocument(const std::filesystem::path& filePath,
     while (std::getline(in, line))
     {
         ++lineNo;
-        std::string t = Trim(line);
+        std::string t = std::string(TrimSceneWhitespace(line));
         if (t.empty())
             continue;
         if (t[0] == ';')
@@ -1241,14 +1203,14 @@ static bool ParseDocument(const std::filesystem::path& filePath,
             {
                 if (!l.empty() && l[0] == '-')
                 {
-                    bi.removedComponents.insert(ToLowerAscii(Trim(l.substr(1))));
+                    bi.removedComponents.insert(ToLowerAscii(std::string(TrimSceneWhitespace(l.substr(1)))));
                     continue;
                 }
                 // Additions: "Component" or "+Component"
                 {
-                    std::string t = Trim(l);
+                    std::string t = std::string(TrimSceneWhitespace(l));
                     if (!t.empty() && t[0] == '+')
-                        t = Trim(t.substr(1));
+                        t = std::string(TrimSceneWhitespace(t.substr(1)));
                     if (!t.empty() && t.find('=') == std::string::npos && t.find('.') == std::string::npos)
                     {
                         FindOrAppendComponent(bi.components, ToLowerAscii(t), t); // mark component present with no explicit properties
@@ -1281,13 +1243,12 @@ static bool ParseDocument(const std::filesystem::path& filePath,
             for (const auto& [ln, l] : s.bodyLines)
             {
                 // offset = (x, y, z)
-                if (StartsWith(ToLowerAscii(l), "offset"))
+                if (StartsWithIgnoreCase(l, "offset"))
                 {
                     const size_t eq = l.find('=');
                     if (eq != std::string::npos)
                     {
-                        Float3 f3{};
-                        if (!ParseFloat3(l.substr(eq + 1), f3))
+                        if (!ParseFloat3(l.substr(eq + 1), ss.offset))
                         {
                             if (outError)
                                 *outError = "Invalid subscene offset in '" + ss.id + "' at line " + std::to_string(ln);
@@ -1295,11 +1256,10 @@ static bool ParseDocument(const std::filesystem::path& filePath,
                                 *outErrorLine = ln;
                             return false;
                         }
-                        ss.offset = Tuple3{f3.X, f3.Y, f3.Z};
                         ss.hasOffset = true;
                     }
                 }
-                if (StartsWith(ToLowerAscii(l), "enabled"))
+                if (StartsWithIgnoreCase(l, "enabled"))
                 {
                     const size_t eq = l.find('=');
                     if (eq != std::string::npos)
@@ -1699,11 +1659,7 @@ static bool ValidateDocument(const SceneDoc& doc, std::string* outError, int* ou
 static Components::SceneEntityTag MakeTag(const std::string& s)
 {
     Components::SceneEntityTag t{};
-    std::memset(t.value, 0, sizeof(t.value));
-    const size_t maxCopy = sizeof(t.value) - 1;
-    const size_t toCopy = std::min(maxCopy, s.size());
-    std::memcpy(t.value, s.data(), toCopy);
-    t.value[toCopy] = '\0';
+    CopyToFixedString(t.value, s);
     return t;
 }
 
@@ -2655,7 +2611,7 @@ static bool LoadParsedIntoWorld(ECS::World& world,
     for (const auto& kv : doc.resources)
     {
         localCtx.ResourceAbsPathById[kv.first] = ResolveResourcePath(localCtx, sceneFilePath, kv.second);
-        localCtx.ResourceGuidById[kv.first] = kv.second.guid;
+        localCtx.ResourceGuidById[kv.first] = GUID(kv.second.guid);
     }
     localCtx.EmbedsById.reserve(doc.embeds.size());
     for (const auto& kv : doc.embeds)
@@ -2731,7 +2687,7 @@ static bool LoadParsedIntoWorld(ECS::World& world,
                 for (const auto& kv : bpDoc.resources)
                 {
                     bpCtx.ResourceAbsPathById[kv.first] = ResolveResourcePath(bpCtx, bpPath, kv.second);
-                    bpCtx.ResourceGuidById[kv.first] = kv.second.guid;
+                    bpCtx.ResourceGuidById[kv.first] = GUID(kv.second.guid);
                 }
                 bpCtx.EmbedsById.reserve(bpDoc.embeds.size());
                 for (const auto& kv : bpDoc.embeds)
@@ -2783,23 +2739,9 @@ static bool LoadParsedIntoWorld(ECS::World& world,
             // Tag instance root for re-serialization.
             {
                 Components::SceneBlueprintInstance inst{};
-                std::memset(inst.sourcePath, 0, sizeof(inst.sourcePath));
-                std::memset(inst.sourceGuid, 0, sizeof(inst.sourceGuid));
                 const auto& res = rit->second;
-                const size_t maxPath = sizeof(inst.sourcePath) - 1;
-                const size_t maxGuid = sizeof(inst.sourceGuid) - 1;
-                if (!res.path.empty())
-                {
-                    const size_t n = std::min(maxPath, res.path.size());
-                    std::memcpy(inst.sourcePath, res.path.data(), n);
-                    inst.sourcePath[n] = '\0';
-                }
-                if (!res.guid.empty())
-                {
-                    const size_t n = std::min(maxGuid, res.guid.size());
-                    std::memcpy(inst.sourceGuid, res.guid.data(), n);
-                    inst.sourceGuid[n] = '\0';
-                }
+                CopyToFixedString(inst.sourcePath, res.path);
+                inst.sourceGuid = GUID(res.guid);
                 world.AddComponentImmediate(rootEntity, inst);
             }
 
@@ -2904,27 +2846,11 @@ static bool LoadParsedIntoWorld(ECS::World& world,
             world.AddComponentImmediate(subsceneRoot, MakeTag(idPrefix + ss.id));
             {
                 Components::SceneSubsceneInstance inst{};
-                std::memset(inst.sourcePath, 0, sizeof(inst.sourcePath));
-                std::memset(inst.sourceGuid, 0, sizeof(inst.sourceGuid));
                 const auto& res = rit->second;
-                const size_t maxPath = sizeof(inst.sourcePath) - 1;
-                const size_t maxGuid = sizeof(inst.sourceGuid) - 1;
-                if (!res.path.empty())
-                {
-                    const size_t n = std::min(maxPath, res.path.size());
-                    std::memcpy(inst.sourcePath, res.path.data(), n);
-                    inst.sourcePath[n] = '\0';
-                }
-                if (!res.guid.empty())
-                {
-                    const size_t n = std::min(maxGuid, res.guid.size());
-                    std::memcpy(inst.sourceGuid, res.guid.data(), n);
-                    inst.sourceGuid[n] = '\0';
-                }
+                CopyToFixedString(inst.sourcePath, res.path);
+                inst.sourceGuid = GUID(res.guid);
                 inst.hasOffset = ss.hasOffset;
-                inst.offsetX = ss.offset.x;
-                inst.offsetY = ss.offset.y;
-                inst.offsetZ = ss.offset.z;
+                inst.offset = Mathematics::Vector3(ss.offset.X, ss.offset.Y, ss.offset.Z);
                 world.AddComponentImmediate(subsceneRoot, inst);
                 if (!ss.enabled)
                     ECS::Entity(&world, subsceneRoot).SetEnabled<Components::SceneSubsceneInstance>(false);
@@ -2974,7 +2900,7 @@ static bool LoadParsedIntoWorld(ECS::World& world,
             if (!LoadParsedIntoWorld(world, subPath, subDoc, subOpts, subPrefix, subInst, outError, outErrorFile, outErrorLine, degradation))
                 return false;
             if (ss.hasOffset)
-                ApplyOffsetToRoots(world, subInst, ss.offset.x, ss.offset.y, ss.offset.z);
+                ApplyOffsetToRoots(world, subInst, ss.offset.X, ss.offset.Y, ss.offset.Z);
             ParentRootsTo(world, subInst, subsceneRoot);
 
             out.created.insert(out.created.end(), subInst.created.begin(), subInst.created.end());
@@ -3416,7 +3342,7 @@ bool SaveSceneToFile(ECS::World& world,
 
             while (std::getline(in, line))
             {
-                const std::string t = Trim(line);
+                const std::string t = std::string(TrimSceneWhitespace(line));
                 if (t.empty() || (!t.empty() && t.front() == ';'))
                 {
                     pending.push_back(line);
@@ -3491,7 +3417,7 @@ bool SaveSceneToFile(ECS::World& world,
 
             auto isHeaderLine = [&](const std::string& l) -> bool
             {
-                const std::string t = Trim(l);
+                const std::string t = std::string(TrimSceneWhitespace(l));
                 return !t.empty() && t.front() == '[' && t.back() == ']';
             };
 
@@ -3499,7 +3425,12 @@ bool SaveSceneToFile(ECS::World& world,
             {
                 auto itGuid = attrs.find("guid");
                 if (itGuid != attrs.end() && !itGuid->second.empty())
-                    return "guid:" + itGuid->second;
+                {
+                    // Instance roots key by GUID::ToString text; key the authored
+                    // spelling the same way so both sides name one resource.
+                    const GUID guid(itGuid->second);
+                    return "guid:" + (guid.IsNull() ? itGuid->second : guid.ToString());
+                }
                 auto itPath = attrs.find("path");
                 if (itPath != attrs.end() && !itPath->second.empty())
                     return "path:" + itPath->second;
@@ -3513,12 +3444,12 @@ bool SaveSceneToFile(ECS::World& world,
 
                 std::string type;
                 std::unordered_map<std::string, std::string> attrs;
-                if (!ParseSectionHeader(Trim(lines[i]), type, attrs))
+                if (!ParseSectionHeader(std::string(TrimSceneWhitespace(lines[i])), type, attrs))
                     continue;
 
                 if (type == "include")
                 {
-                    preservedIncludes.push_back(Trim(lines[i]));
+                    preservedIncludes.push_back(std::string(TrimSceneWhitespace(lines[i])));
                     continue;
                 }
                 if (type == "resource")
@@ -3548,7 +3479,7 @@ bool SaveSceneToFile(ECS::World& world,
                     b.id = (itId != attrs.end()) ? itId->second : std::string{};
                     if (auto itGuid = attrs.find("guid"); itGuid != attrs.end())
                         b.guid = itGuid->second;
-                    b.headerLine = Trim(lines[i]);
+                    b.headerLine = std::string(TrimSceneWhitespace(lines[i]));
                     size_t j = i + 1;
                     for (; j < lines.size(); ++j)
                     {
@@ -3595,7 +3526,7 @@ bool SaveSceneToFile(ECS::World& world,
         std::string sourcePath; // as-authored resource path
         std::string sourceGuid; // optional
         bool hasOffset = false;
-        float ox = 0, oy = 0, oz = 0;
+        Float3 offset{};
         bool enabled = true;
     };
     std::vector<SubsceneRoot> subsceneRoots;
@@ -3649,7 +3580,7 @@ bool SaveSceneToFile(ECS::World& world,
                 r.h = h;
                 r.id = id;
                 r.sourcePath = std::string(bp->SourcePath());
-                r.sourceGuid = std::string(bp->SourceGuid());
+                r.sourceGuid = bp->sourceGuid.IsNull() ? std::string{} : bp->sourceGuid.ToString();
                 if (auto* p = world.GetComponent<Components::Parent>(h))
                 {
                     auto it = tagByEntity.find(p->parent.id);
@@ -3672,11 +3603,9 @@ bool SaveSceneToFile(ECS::World& world,
                 r.h = h;
                 r.id = id;
                 r.sourcePath = std::string(ss->SourcePath());
-                r.sourceGuid = std::string(ss->SourceGuid());
+                r.sourceGuid = ss->sourceGuid.IsNull() ? std::string{} : ss->sourceGuid.ToString();
                 r.hasOffset = ss->hasOffset;
-                r.ox = ss->offsetX;
-                r.oy = ss->offsetY;
-                r.oz = ss->offsetZ;
+                r.offset = Float3{ss->offset.x, ss->offset.y, ss->offset.z};
                 r.enabled = !world.HasComponent<ECS::ComponentDisabled<Components::SceneSubsceneInstance>>(h);
                 subsceneRoots.push_back(std::move(r));
             }
@@ -3692,7 +3621,7 @@ bool SaveSceneToFile(ECS::World& world,
                 auto it = tagByEntity.find(h.id);
                 if (it == tagByEntity.end())
                     continue;
-                if (StartsWith(it->second, prefix.c_str()))
+                if (it->second.starts_with(prefix))
                     excluded.insert(h.id);
             }
         }
@@ -3705,7 +3634,7 @@ bool SaveSceneToFile(ECS::World& world,
                 auto it = tagByEntity.find(h.id);
                 if (it == tagByEntity.end())
                     continue;
-                if (StartsWith(it->second, prefix.c_str()))
+                if (it->second.starts_with(prefix))
                     excluded.insert(h.id);
             }
         }
@@ -3962,7 +3891,7 @@ bool SaveSceneToFile(ECS::World& world,
                 for (const auto& br : blueprintRoots)
                 {
                     const std::string pref = br.id + ".";
-                    if (StartsWith(parentStr, pref.c_str()))
+                    if (parentStr.starts_with(pref))
                     {
                         SetError(sceneFilePath, 0, "Cannot save: entity '" + id + "' is parented under blueprint-instanced entity '" + parentStr + "'");
                         return false;
@@ -3971,7 +3900,7 @@ bool SaveSceneToFile(ECS::World& world,
                 for (const auto& sr : subsceneRoots)
                 {
                     const std::string pref = sr.id + ".";
-                    if (StartsWith(parentStr, pref.c_str()))
+                    if (parentStr.starts_with(pref))
                     {
                         SetError(sceneFilePath, 0, "Cannot save: entity '" + id + "' is parented under subscene-instanced entity '" + parentStr + "'");
                         return false;
@@ -4168,7 +4097,7 @@ bool SaveSceneToFile(ECS::World& world,
             out << "]\n";
 
             if (sr.hasOffset)
-                out << "offset = " << FormatFloat3(sr.ox, sr.oy, sr.oz) << "\n";
+                out << "offset = " << FormatFloat3(sr.offset.X, sr.offset.Y, sr.offset.Z) << "\n";
             if (!sr.enabled)
                 out << "enabled = false\n";
             out << "\n";

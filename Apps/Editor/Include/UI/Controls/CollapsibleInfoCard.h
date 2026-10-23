@@ -2,10 +2,12 @@
 
 #include "UI/UIElement.h"
 
+#include <functional>
 #include <string>
 
 namespace GameEngine
 {
+class Button;
 class Label;
 
 namespace EditorUI
@@ -27,6 +29,11 @@ namespace EditorUI
 // without waiting on a layout pass. The folding style comes from
 // UI/controls/CollapsibleInfoCard/CollapsibleInfoCard.css, requested for this
 // card's own subtree.
+//
+// A card may carry one action, a small button after its copy. The action is
+// state the reader needs whether or not they read explanations, so while the
+// "Show Info Cards" setting is off a card with an action keeps the action and
+// hides only its copy.
 class CollapsibleInfoCard : public UIElement
 {
 public:
@@ -36,6 +43,9 @@ public:
     // Replaces the copy; the card re-decides whether it needs to fold on the
     // next layout, so a card whose text shrinks to one row loses its chevron.
     void SetText(const std::string& text);
+
+    // Shows the action button with `label`; a click calls `onInvoke`.
+    void SetAction(const std::string& label, const std::string& tooltip, std::function<void()> onInvoke);
 
     bool IsFoldable() const { return m_Foldable; }
     bool IsExpanded() const { return m_Expanded; }
@@ -59,6 +69,9 @@ private:
     Label* m_Label = nullptr;
     // "show more", right-aligned on a collapsed card's line.
     Label* m_Toggle = nullptr;
+    // Hidden until SetAction.
+    Button* m_Action = nullptr;
+    std::function<void()> m_OnInvoke;
 };
 
 } // namespace EditorUI

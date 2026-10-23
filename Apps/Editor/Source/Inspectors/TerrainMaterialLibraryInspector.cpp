@@ -3,6 +3,7 @@
 #include "EditorContextMenu/UIContextMenu.h"
 #include "InspectorRegistry.h"
 #include "Inspectors/InspectorColorSwatchRow.h"
+#include "Inspectors/InspectorComponentSection.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorTextureSlotPreview.h"
 #include "Inspectors/InspectorUIHelpers.h"
@@ -173,7 +174,7 @@ void AddTintRow(UIElement* parent, const CardContext& card, const TerrainMateria
         // Live preview repaints the swatch only: extraction shades from a cached parse of the
         // file, so nothing reaches the terrain until the apply below writes and reloads it.
         callbacks.onValueChanging = [swatchRaw](uint32_t argb, float) {
-            InspectorUI::StyleColorSwatch(swatchRaw, argb | 0xFF000000u);
+            InspectorUI::SetColorSwatchColor(swatchRaw, argb | 0xFF000000u);
         };
         callbacks.onApply = [card, slotId](uint32_t argb, float)
         {
@@ -355,12 +356,10 @@ void AddMaterialCard(UIElement* parent, const CardContext& card, const TerrainMa
 
     const std::string displayName = entry.Name.empty() ? std::string("Material") : entry.Name;
 
-    auto foldout = std::make_unique<Foldout>();
+    Foldout* foldout = InspectorUI::AddComponentSection(
+        parent, "TerrainMaterialLibrary/Slot" + std::to_string(slotId), displayName, true);
     foldout->SetId(idPrefix + "-card");
-    foldout->AddClass("rp-foldout");
     foldout->AddClass("terrain-material-card");
-    foldout->SetTitle(displayName);
-    foldout->SetExpanded(true);
     if (entry.Retired)
         foldout->AddClass("retired");
     AddCardHeaderNotes(*foldout, entry, idPrefix);
@@ -499,8 +498,6 @@ void AddMaterialCard(UIElement* parent, const CardContext& card, const TerrainMa
                       card,
                       AddRemoveConfirmBlock(content, card, entry, displayName, idPrefix),
                       idPrefix);
-
-    parent->AddChild(std::move(foldout));
 }
 
 } // namespace
@@ -551,10 +548,9 @@ void RegisterTerrainMaterialLibraryInspector()
         const std::vector<TerrainMaterialEntry>& materials = lib->GetMaterials();
         if (materials.empty() && ctx.ShowInfoCards)
         {
-            InspectorUI::AddTextBlock(ctx.Parent,
-                                      "No materials yet. Add one, then paint with it from the "
-                                      "terrain brush.",
-                                      "inspector-text");
+            InspectorUI::AddInfoCard(ctx.Parent,
+                                     "No materials yet. Add one, then paint with it from the "
+                                     "terrain brush.");
         }
 
         for (const TerrainMaterialEntry& entry : materials)

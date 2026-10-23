@@ -3,12 +3,14 @@
 #include "BackgroundImageGeometry.h"
 #include "Core/CpuProfiler.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "UI/Interaction/TooltipOverlay.h"
 
 #include "UI/Controls/TextField.h"
 #include "UI/ResolvedStyle.h"
 #include "UI/UIElement.h"
 #include "TextShapeCache.h"
+#include "TextEditOverlayStyle.h"
 #include "UI/UIFrameBufferRing.h"
 #include "UI/UIPrimitive.h"
 #include "UI/NineSliceLayout.h"
@@ -573,8 +575,8 @@ struct UIManager::PrimitiveGenContext
     // local opacity during the recursive walk; save/restore uses the call stack.
     float EffectiveOpacity = 1.0f;
 
-    // Clip stack: indices into ClipRects (which is m_PersistentClipRects
-    // under Stage 3; slot indices are allocated per-element via
+    // Clip stack: indices into ClipRects (m_PersistentClipRects; slot
+    // indices are allocated per-element via
     // UIManager::m_ClipAllocator and persist across frames).
     std::vector<uint16_t> ClipStack;
 
@@ -588,7 +590,7 @@ struct UIManager::PrimitiveGenContext
     // its primitives and on the clips it pushes; restored on the way out.
     uint32_t CurrentTransformIdx = UI::kNoTransform;
 
-    // Stage 3: per-element clip ownership. `el` may be nullptr for the
+    // Per-element clip ownership. `el` may be nullptr for the
     // anonymous viewport clip used by deferred-overlay rendering — that
     // case routes to UIManager::m_ViewportClipSlot, allocated lazily and
     // retained for the lifetime of the manager.
@@ -689,7 +691,7 @@ struct UIManager::PrimitiveGenContext
 
     void PopClip() { if (!ClipStack.empty()) ClipStack.pop_back(); }
 
-    // Block E1: when set, GeneratePrimitivesForElement emits ONLY the
+    // When set, GeneratePrimitivesForElement emits ONLY the
     // element's own primitives (bg/border/shadow/glow/text/control) into
     // the scratch buffer and then returns — skipping FinalizeElementSlots
     // (the persistent-buffer copy + DrawOrder push) AND child recursion.
@@ -697,7 +699,7 @@ struct UIManager::PrimitiveGenContext
     // primitives without re-running the full DFS.
     bool DrainModeOnly = false;
 
-    // MT-3 parallel drain: set while this context emits on a JobSystem
+    // Parallel drain: set while this context emits on a JobSystem
     // worker. Emission paths that would touch shared-mutable state (font
     // resolve miss, text shaping, background/texture resolution, caret
     // measurement) must not run off-thread — they set EscalateToUiThread
@@ -706,7 +708,7 @@ struct UIManager::PrimitiveGenContext
     bool OffThread = false;
     bool EscalateToUiThread = false;
 
-    // MT-3: background-image slot pre-resolved on the UI thread during the
+    // Background-image slot pre-resolved on the UI thread during the
     // drain's collect phase for the item currently being emitted. Consumed
     // by EmitBackgroundImagePrimitive in place of ResolveBackgroundTextureSlot
     // (meaningful only in drain mode, where exactly one element emits).
@@ -718,7 +720,8 @@ struct UIManager::PrimitiveGenContext
     // kNoClip outside the drain's apply phase.
     uint16_t DrainAmbientClipIdx = UI::kNoClip;
 
-    // Z-sorted child iteration scratch (stack discipline — see plan Phase 4A).
+    // Z-sorted child iteration scratch, used as a stack: each recursion level
+    // appends its children and resizes back to its base before returning.
     std::vector<UIElement*> SortedChildren;
 
     // Overlay deferral
@@ -733,7 +736,7 @@ struct UIManager::PrimitiveGenContext
     std::vector<DeferredOverlay> DeferredOverlays;
 };
 
-// MT-3: one drained element's worth of work. Collected on the UI thread,
+// One drained element's worth of work. Collected on the UI thread,
 // emitted (possibly on a JobSystem worker) into a per-task scratch buffer,
 // applied strictly in queue order on the UI thread.
 struct UIManager::DrainItem
@@ -847,7 +850,7 @@ void UI::PrimitiveEmitContext::EmitText(std::string_view text, float x, float y,
 void UIManager::GenerateAllPrimitives()
 {
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
-    // Block E (E0/E1): timed entry — flush results into the most recent
+    // Timed entry — flush results into the most recent
     // UpdateProfileFrame (back()) so per-scenario captures see PrimitiveGen
     // cost and skip-rate even though this runs in Render rather than Update.
     using ProfClk = std::chrono::high_resolution_clock;
@@ -863,7 +866,7 @@ void UIManager::GenerateAllPrimitives()
 
     const bool needFullRegen = m_PrimitivesNeedRegen.load(std::memory_order_relaxed);
 
-    // Block E (E0): no full regen and no visual-only mutations queued? The
+    // No full regen and no visual-only mutations queued? The
     // persistent primitive / clip / draw-order buffers are still valid.
     // Skip the full DFS + memcpy and let the render prep re-upload the
     // existing snapshot.
@@ -875,7 +878,7 @@ void UIManager::GenerateAllPrimitives()
         return;
     }
 
-    // Block E1: drain-only path. No layout/structural changes since last
+    // Drain-only path. No layout/structural changes since last
     // full DFS — only visual-only mutations on existing elements. Drain
     // those into their existing slot ranges instead of re-walking the tree.
     if (!needFullRegen && !m_PrimitiveDataDirty.empty() &&
@@ -899,15 +902,11 @@ void UIManager::GenerateAllPrimitives()
 
     GE_CPU_PROFILE_SCOPE("UIManager.GenerateAllPrimitives");
 
-    // Stage 2: m_SdfPrimitiveBuffer is now a scratch buffer that elements
-    // push into; FinalizeElementSlots pops each element's contribution
-    // and writes it into m_PersistentPrimitives at slot-allocator-assigned
-    // positions. m_DrawOrder accumulates the slot indices in DFS pre-order.
-    // After the DFS phases complete, we rebuild m_SdfPrimitiveBuffer in
-    // DrawOrder for the existing GPU upload path (Stage 2 part 3 will
-    // switch the shader to read DrawOrder + persistent buffer directly).
+    // m_SdfPrimitiveBuffer is a scratch buffer that elements push into;
+    // FinalizeElementSlots pops each element's contribution and writes it
+    // into m_PersistentPrimitives at slot-allocator-assigned positions.
+    // m_DrawOrder accumulates the slot indices in DFS pre-order.
     m_SdfPrimitiveBuffer.clear();
-    m_SdfClipBuffer.clear();
     m_DrawOrder.clear();
     m_FrameFontResolveCache.clear();
 
@@ -936,9 +935,8 @@ void UIManager::GenerateAllPrimitives()
     if (!m_Root)
         return;
 
-    // Stage 3: ctx.clipRects now references m_PersistentClipRects (slot-
-    // indexed, persistent across frames) instead of m_SdfClipBuffer (the
-    // legacy per-frame transient list). PushClip writes directly into the
+    // ctx.clipRects references m_PersistentClipRects (slot-indexed,
+    // persistent across frames). PushClip writes directly into the
     // element's allocated slot; the slot is preserved across frames via
     // UIElement::m_ClipSlotIdx and freed in ~UIElement / SetOwnerManager.
     PrimitiveGenContext ctx{m_SdfPrimitiveBuffer, m_PersistentClipRects,
@@ -979,15 +977,14 @@ void UIManager::GenerateAllPrimitives()
         GenerateOverlayPrimitives(def.Element, ctx, def.ParentAbsX, def.ParentAbsY, def.OwnerTransformIdx);
     }
 
-    // Stage 2 part 3: m_SdfPrimitiveBuffer is now solely a per-element
-    // scratch buffer that FinalizeElementSlots pops after copying into
-    // m_PersistentPrimitives. The GPU upload reads m_PersistentPrimitives
-    // directly via shader-side DrawOrder indirection — no compatibility
-    // rebuild needed. The scratch should be empty at this point because
-    // every Finalize call resizes back to its scratchStart.
+    // m_SdfPrimitiveBuffer is a per-element scratch buffer that
+    // FinalizeElementSlots pops after copying into m_PersistentPrimitives;
+    // the GPU reads m_PersistentPrimitives through the shader-side DrawOrder
+    // indirection. Every Finalize call resizes back to its scratchStart, so
+    // the scratch is empty here.
     assert(m_SdfPrimitiveBuffer.empty() && "PrimitiveGen scratch leak");
 
-    // Block E (E0/E1): clear the regen flag and the data-dirty queue —
+    // Clear the regen flag and the data-dirty queue —
     // a full regen subsumes any visual-only marks, and subsequent idle
     // frames will skip via the early-return at the top until a MarkDirty
     // / Update mutation re-sets it.
@@ -1341,6 +1338,43 @@ bool UIManager::OwnTextEmissionPaints(UIElement* el, PrimitiveGenContext& ctx)
     return paints;
 }
 
+// DrainPrimitiveDataDirty's shared outcome. Per-store touch tracking: bump
+// exactly the store versions this drain mutated (a text re-emit must not force
+// draw-order/clip re-uploads), and range-mark the primitive ring at every write
+// so the upload can rewrite just the touched slot span. Ok turns false once
+// any phase bails to the full regen.
+struct UIManager::PrimitiveDrainState
+{
+    bool Ok = true;
+    bool TouchedPrimitives = false;
+    bool TouchedClips = false;
+    bool TouchedTransforms = false;
+    bool TouchedDrawOrder = false;
+    uint32_t EscalatedCount = 0;
+};
+
+#if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
+namespace
+{
+// Whether the element's CURRENT style paints: an opaque background, a
+// background image, a visible outline, or a visible border.
+bool CurrentStylePaints(const UIElement* el)
+{
+    const VisualStyle& vs = el->GetResolvedStyle().Visual;
+    const Box4& bw = el->GetResolvedStyle().Layout.BorderWidth;
+    const bool paintsNow =
+        (vs.BackgroundColor & 0xFF000000u) != 0u ||
+        vs.BackgroundImage.HasImage ||
+        (vs.OutlineStyle != ::GameEngine::BorderStyle::None &&
+         (vs.OutlineColor & 0xFF000000u) != 0u) ||
+        ((bw.Left > 0.0f || bw.Top > 0.0f || bw.Right > 0.0f || bw.Bottom > 0.0f) &&
+         ((vs.BorderColor.Top | vs.BorderColor.Right |
+           vs.BorderColor.Bottom | vs.BorderColor.Left) & 0xFF000000u) != 0u);
+    return paintsNow;
+}
+} // namespace
+#endif
+
 bool UIManager::DrainPrimitiveDataDirty()
 {
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
@@ -1367,24 +1401,7 @@ bool UIManager::DrainPrimitiveDataDirty()
     ctx.DrainModeOnly = true;
     ctx.ClipStack.reserve(kInitialClipStackCapacity);
 
-    bool ok = true;
-    // Per-store touch tracking: bump exactly the store versions this drain
-    // mutated (a text re-emit must not force draw-order/clip re-uploads),
-    // and range-mark the primitive ring at every write so the upload can
-    // rewrite just the touched slot span.
-    bool touchedPrimitives = false;
-    bool touchedClips = false;
-    bool touchedTransforms = false;
-    bool touchedDrawOrder = false;
-    auto bailToFullRegen = [&]() {
-        MarkPrimitivesNeedRegen(0x400u);
-        ok = false;
-    };
-    auto hasDrawOrderSlice = [&](uint32_t start, size_t count) {
-        return start != 0xFFFFFFFFu &&
-               static_cast<size_t>(start) <= m_DrawOrder.size() &&
-               count <= (m_DrawOrder.size() - static_cast<size_t>(start));
-    };
+    PrimitiveDrainState state;
 
     // ---------------- Phase 1: collect (UI thread, queue order) -----------
     // Order-dependent shared bookkeeping stays here: RG slot recycling,
@@ -1393,19 +1410,95 @@ bool UIManager::DrainPrimitiveDataDirty()
     // the emit phase can run on JobSystem workers without touching them.
     //
     // Storage is thread_local only to retain capacity across drains; all
-    // cross-thread access below goes through explicit references — a lambda
-    // body naming a thread_local reads the EXECUTING thread's (empty)
-    // instance, never the UI thread's.
+    // cross-thread access goes through explicit references — worker code
+    // (EmitDrainSlice) naming a thread_local reads the EXECUTING thread's
+    // (empty) instance, never the UI thread's.
     static thread_local std::vector<DrainItem> sItemsStorage;
     std::vector<DrainItem>& items = sItemsStorage;
     items.clear();
     items.reserve(m_PrimitiveDataDirty.size());
+    CollectDrainItems(items, ctx, state);
 
+    if (!state.Ok)
+    {
+        // Collect bailed — the fall-through full regen rewrites everything
+        // this same frame, so skip emit/apply for the collected items. Bump
+        // the clip store if collect already rewrote clip slots (harmless —
+        // the regen bumps every store again anyway).
+        if (state.TouchedClips)
+            ++m_ClipStoreVersion;
+        if (state.TouchedTransforms)
+            ++m_TransformStoreVersion;
+        m_PrimitiveDataDirty.clear();
+        return false;
+    }
+
+    // ---------------- Phase 2: emit ---------------------------------------
+    // Each work item re-emits its own primitives from warm caches into a
+    // per-task scratch buffer — disjoint outputs, read-only shared state
+    // (enforced by the OffThread tripwires). Forked across JobSystem workers
+    // when the drain is large enough for fork-join to win; below that the
+    // same loop runs inline. Apply order is by item index either way, so the
+    // frame output is identical to the sequential path.
+    const size_t numTasks = ComputeDrainTaskCount(items.size());
+
+    static thread_local std::vector<std::vector<UI::UIPrimitive>> sTaskScratchStorage;
+    std::vector<std::vector<UI::UIPrimitive>>& taskScratch = sTaskScratchStorage;
+    if (taskScratch.size() < numTasks)
+        taskScratch.resize(numTasks);
+
+    const uint32_t forkedTasks = EmitDrainItems(items, taskScratch, numTasks);
+
+    // ---------------- Phase 3: apply (UI thread, queue order) -------------
+    // All order-sensitive mutation lives here: allocator ops, memcpy into
+    // persistent slot ranges, DrawOrder splices, ring range-marks — applied
+    // in item order so output matches the sequential path byte-for-byte.
+    // Escalated and UiThreadOnly items re-emit inline first (same code path,
+    // on the UI thread).
+    for (DrainItem& item : items)
+    {
+        if (!state.Ok)
+            break; // full regen follows; it rewrites everything
+        ApplyDrainItem(item, ctx, taskScratch, state);
+    }
+
+    m_PrimitiveDataDirty.clear();
+
+    // Bump exactly what changed. On a bail (!state.Ok) the fall-through full
+    // regen bumps everything anyway; these extra bumps are harmless.
+    if (state.TouchedPrimitives)
+        ++m_PrimitiveStoreVersion;
+    if (state.TouchedClips)
+        ++m_ClipStoreVersion;
+    if (state.TouchedTransforms)
+        ++m_TransformStoreVersion;
+    if (state.TouchedDrawOrder)
+        ++m_DrawOrderStoreVersion;
+
+    // Drain-shape counters for soak verification (read via profile history).
+    if (m_UpdateProfilingEnabled && !m_UpdateProfilingHistory.empty())
+    {
+        auto& back = m_UpdateProfilingHistory.back();
+        back.DrainItems         = static_cast<uint32_t>(items.size());
+        back.DrainParallelTasks = (numTasks >= 2) ? forkedTasks : 1;
+        back.DrainEscalated     = state.EscalatedCount;
+    }
+
+    return state.Ok;
+#else
+    return true;
+#endif
+}
+
+#if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
+void UIManager::CollectDrainItems(std::vector<DrainItem>& items, PrimitiveGenContext& ctx,
+                                  PrimitiveDrainState& state)
+{
     for (UIElement* el : m_PrimitiveDataDirty)
     {
         if (!el) continue;
         el->m_InQueueFlags &= ~UIElement::InPrimitiveDataDirty;
-        if (!ok)
+        if (!state.Ok)
             continue;
 
         // Release this element's deferred RG slot reservation(s) before any
@@ -1417,24 +1510,7 @@ bool UIManager::DrainPrimitiveDataDirty()
         // or has lost its range (it won't be re-emitted, so it must not keep a
         // reservation). Order-preserving compaction keeps the deferred-binding
         // hash stable for the entries that survive.
-        if (m_SdfTextureRegistry && !m_SdfDeferredRGBindings.empty())
-        {
-            size_t write = 0;
-            for (size_t read = 0; read < m_SdfDeferredRGBindings.size(); ++read)
-            {
-                DeferredRGBinding& b = m_SdfDeferredRGBindings[read];
-                if (b.Owner == el)
-                {
-                    if (b.Slot != 0)
-                        m_SdfTextureRegistry->ReleaseSlot(b.Slot);
-                    continue;
-                }
-                if (write != read)
-                    m_SdfDeferredRGBindings[write] = b;
-                ++write;
-            }
-            m_SdfDeferredRGBindings.resize(write);
-        }
+        ReleaseDeferredRGBindingsOf(el);
 
         // Elements the last full DFS never processed (clip-culled subtree,
         // created since, or under a display/opacity/size gate that has since
@@ -1454,7 +1530,7 @@ bool UIManager::DrainPrimitiveDataDirty()
             const bool selfVisible = rs.Layout.DisplayMode != DisplayMode::None &&
                                      rs.Visual.Opacity > 0.0f;
             if (selfVisible && ElementRectIntersectsNearestClip(el))
-                bailToFullRegen();
+                BailDrainToFullRegen(state);
             continue;
         }
 
@@ -1472,17 +1548,17 @@ bool UIManager::DrainPrimitiveDataDirty()
             {
                 if (!RepointTransformSpace(el))
                 {
-                    bailToFullRegen();
+                    BailDrainToFullRegen(state);
                     continue;
                 }
-                touchedTransforms = true;
-                touchedPrimitives = true;
-                touchedClips = true;
+                state.TouchedTransforms = true;
+                state.TouchedPrimitives = true;
+                state.TouchedClips = true;
             }
             else if (hasTransform)
             {
                 WriteElementTransformSlot(el, m_PersistentTransforms[el->m_TransformSlotIdx].ParentIndex);
-                touchedTransforms = true;
+                state.TouchedTransforms = true;
             }
         }
 
@@ -1492,7 +1568,7 @@ bool UIManager::DrainPrimitiveDataDirty()
         // rect. Must run before the range early-outs below — a pure-layout
         // clip container owns a slot but no primitive range.
         if (RewriteClipSlotFromLayout(el))
-            touchedClips = true;
+            state.TouchedClips = true;
 
         // Skip elements that don't currently own a slot range — they emitted
         // nothing at their last DFS, so a translation or visual mark has
@@ -1505,7 +1581,7 @@ bool UIManager::DrainPrimitiveDataDirty()
         // escalates it to a full regen at the producer (cause 0x800).
         //
         // Zero-size elements that DO own a range are not skipped: the emit
-        // path below produces zero primitives for them, which routes through
+        // path (EmitDrainItems) produces zero primitives for them, which routes through
         // the DrawOrder-slice shrink and range free — skipping instead would
         // leave the old primitives rendering at the stale rect until an
         // unrelated full regen.
@@ -1519,127 +1595,123 @@ bool UIManager::DrainPrimitiveDataDirty()
             // the highlight invisible until an unrelated full regen (the
             // "hover only works while the console spams" bug). The scrolled
             // spacers the contract protects resolve no paint and still skip.
-            const VisualStyle& vs = el->GetResolvedStyle().Visual;
-            const Box4& bw = el->GetResolvedStyle().Layout.BorderWidth;
-            const bool paintsNow =
-                (vs.BackgroundColor & 0xFF000000u) != 0u ||
-                vs.BackgroundImage.HasImage ||
-                (vs.OutlineStyle != ::GameEngine::BorderStyle::None &&
-                 (vs.OutlineColor & 0xFF000000u) != 0u) ||
-                ((bw.Left > 0.0f || bw.Top > 0.0f || bw.Right > 0.0f || bw.Bottom > 0.0f) &&
-                 ((vs.BorderColor.Top | vs.BorderColor.Right |
-                   vs.BorderColor.Bottom | vs.BorderColor.Left) & 0xFF000000u) != 0u);
             // The same holds for a control that draws its own text: it culls
             // its lines to the scroll viewport, so a text area below the view
             // at its last DFS emitted nothing, and scrolling it into view is
             // exactly this drain. Only re-emitting it answers whether it now
             // paints, so the probe runs after the cheaper rect test.
             if (ElementRectIntersectsNearestClip(el) &&
-                (paintsNow || OwnTextEmissionPaints(el, ctx)))
-                bailToFullRegen();
+                (CurrentStylePaints(el) || OwnTextEmissionPaints(el, ctx)))
+                BailDrainToFullRegen(state);
             continue;
         }
         const size_t existingSlotStart = static_cast<size_t>(el->m_PrimitiveRangeStart);
         if (el->m_PrimitiveRangeStart == UI::SlotAllocator::kInvalidSlot ||
             existingSlotStart >= m_PersistentPrimitives.size() ||
-            !hasDrawOrderSlice(el->m_DrawOrderIdx, el->m_PrimitiveRangeCount))
+            !HasDrawOrderSlice(el->m_DrawOrderIdx, el->m_PrimitiveRangeCount))
         {
-            bailToFullRegen();
+            BailDrainToFullRegen(state);
             continue;
         }
 
-        // The ambient clip recorded at the element's last full-DFS emission.
-        // Drain assumes the parent clip chain is unchanged since then
-        // (visual-only mutation invariant). Reading the stamp instead of the
-        // baked primitives matters because glyphs of overflowing text wear
-        // the element's own slot, not the ambient — and overlay/Mount
-        // subtrees' ambient doesn't follow tree ancestry.
-        const uint16_t preservedClipIdx = el->m_AmbientClipIdx;
+        items.push_back(BuildDrainItem(el, ctx));
+    }
+}
 
-        // Build the work item; emission happens in the emit phase below,
-        // possibly on a JobSystem worker, so pre-warm every shared cache the
-        // emit path reads. UiThreadOnly items (observed custom emission,
-        // TextInput caret overlays) skip the warm — they emit inline during
-        // apply exactly like the pre-MT-3 drain did.
-        DrainItem item;
-        item.El = el;
-        item.PreservedClipIdx = preservedClipIdx;
-        // UI-thread pins: observed custom emission, caret/selection overlays
-        // (TextInput), and controls that render their own text (TextArea
-        // family — their emission shapes on the shared primary face and is
-        // not covered by the manager's shape-cache pre-warm).
-        auto* textMeasurable = el->GetTextMeasurable();
-        item.UiThreadOnly = el->m_CustomEmitObserved ||
-                            el->GetAsTextInput() != nullptr ||
-                            (textMeasurable && textMeasurable->HandlesOwnTextRendering());
-        if (!item.UiThreadOnly)
+void UIManager::ReleaseDeferredRGBindingsOf(UIElement* el)
+{
+    if (m_SdfTextureRegistry && !m_SdfDeferredRGBindings.empty())
+    {
+        size_t write = 0;
+        for (size_t read = 0; read < m_SdfDeferredRGBindings.size(); ++read)
         {
-            // Warm only what the emit path will actually paint. The ancestor
-            // term is the drain's alone — the DFS accumulates opacity down the
-            // stack, this walk has no stack — so it rides alongside the shared
-            // gate. A mismatch is harmless (the worker escalates on the
-            // resulting cache miss).
-            const ResolvedStyle& rs = el->GetResolvedStyle();
-            const float pcs = ctx.ContentScale;
-            const float ew = el->GetLayoutWidth() * pcs;
-            const float eh = el->GetLayoutHeight() * pcs;
-            const bool selfEmits =
-                EmitWalkPaintsElement(*el) &&
-                el->m_PrimitiveAncestorOpacity * rs.Visual.Opacity > 0.0f;
-            if (selfEmits)
+            DeferredRGBinding& b = m_SdfDeferredRGBindings[read];
+            if (b.Owner == el)
             {
-                // Fill m_FrameFontResolveCache so worker lookups are hits.
-                (void)ResolveFontForVisualStyle(rs.Visual, ctx);
-                const std::string& elText = el->GetTextContent();
-                if (!elText.empty())
-                {
-                    auto* textEl = el->GetTextMeasurable();
-                    if (!textEl || !textEl->HandlesOwnTextRendering())
-                        EmitTextPrimitives(el, ctx, rs,
-                                           el->GetLayoutX() * pcs, el->GetLayoutY() * pcs,
-                                           ew, eh, elText, /*warmOnly=*/true);
-                }
-                if (rs.Visual.BackgroundImage.HasImage ||
-                    el->HasBackgroundImageTextureOverride())
-                {
-                    float paddingX = 0.0f;
-                    float paddingY = 0.0f;
-                    float paddingW = ew;
-                    float paddingH = eh;
-                    InsetToPaddingBox(rs.Layout.BorderWidth, pcs, paddingX, paddingY, paddingW, paddingH);
-                    item.Bg = ResolveBackgroundTextureSlot(el, ctx, rs.Visual.BackgroundImage, paddingW, paddingH);
-                    item.HasPreResolvedBg = true;
-                }
+                if (b.Slot != 0)
+                    m_SdfTextureRegistry->ReleaseSlot(b.Slot);
+                continue;
+            }
+            if (write != read)
+                m_SdfDeferredRGBindings[write] = b;
+            ++write;
+        }
+        m_SdfDeferredRGBindings.resize(write);
+    }
+}
+
+UIManager::DrainItem UIManager::BuildDrainItem(UIElement* el, PrimitiveGenContext& ctx)
+{
+    // The ambient clip recorded at the element's last full-DFS emission.
+    // Drain assumes the parent clip chain is unchanged since then
+    // (visual-only mutation invariant). Reading the stamp instead of the
+    // baked primitives matters because glyphs of overflowing text wear
+    // the element's own slot, not the ambient — and overlay/Mount
+    // subtrees' ambient doesn't follow tree ancestry.
+    const uint16_t preservedClipIdx = el->m_AmbientClipIdx;
+
+    // Build the work item; emission happens in EmitDrainItems,
+    // possibly on a JobSystem worker, so pre-warm every shared cache the
+    // emit path reads. UiThreadOnly items (observed custom emission,
+    // TextInput caret overlays) skip the warm — they emit inline on the UI
+    // thread during apply.
+    DrainItem item;
+    item.El = el;
+    item.PreservedClipIdx = preservedClipIdx;
+    // UI-thread pins: observed custom emission, caret/selection overlays
+    // (TextInput), and controls that render their own text (TextArea
+    // family — their emission shapes on the shared primary face and is
+    // not covered by the manager's shape-cache pre-warm).
+    auto* textMeasurable = el->GetTextMeasurable();
+    item.UiThreadOnly = el->m_CustomEmitObserved ||
+                        el->GetAsTextInput() != nullptr ||
+                        (textMeasurable && textMeasurable->HandlesOwnTextRendering());
+    if (!item.UiThreadOnly)
+    {
+        // Warm only what the emit path will actually paint. The ancestor
+        // term is the drain's alone — the DFS accumulates opacity down the
+        // stack, this walk has no stack — so it rides alongside the shared
+        // gate. A mismatch is harmless (the worker escalates on the
+        // resulting cache miss).
+        const ResolvedStyle& rs = el->GetResolvedStyle();
+        const float pcs = ctx.ContentScale;
+        const float ew = el->GetLayoutWidth() * pcs;
+        const float eh = el->GetLayoutHeight() * pcs;
+        const bool selfEmits =
+            EmitWalkPaintsElement(*el) &&
+            el->m_PrimitiveAncestorOpacity * rs.Visual.Opacity > 0.0f;
+        if (selfEmits)
+        {
+            // Fill m_FrameFontResolveCache so worker lookups are hits.
+            (void)ResolveFontForVisualStyle(rs.Visual, ctx);
+            const std::string& elText = el->GetTextContent();
+            if (!elText.empty())
+            {
+                auto* textEl = el->GetTextMeasurable();
+                if (!textEl || !textEl->HandlesOwnTextRendering())
+                    EmitTextPrimitives(el, ctx, rs,
+                                       el->GetLayoutX() * pcs, el->GetLayoutY() * pcs,
+                                       ew, eh, elText, /*warmOnly=*/true);
+            }
+            if (rs.Visual.BackgroundImage.HasImage ||
+                el->HasBackgroundImageTextureOverride())
+            {
+                float paddingX = 0.0f;
+                float paddingY = 0.0f;
+                float paddingW = ew;
+                float paddingH = eh;
+                InsetToPaddingBox(rs.Layout.BorderWidth, pcs, paddingX, paddingY, paddingW, paddingH);
+                item.Bg = ResolveBackgroundTextureSlot(el, ctx, rs.Visual.BackgroundImage, paddingW, paddingH);
+                item.HasPreResolvedBg = true;
             }
         }
-        items.push_back(item);
     }
+    return item;
+}
 
-    if (!ok)
-    {
-        // Collect bailed — the fall-through full regen rewrites everything
-        // this same frame, so skip emit/apply for the collected items. Bump
-        // the clip store if collect already rewrote clip slots (harmless —
-        // the regen bumps every store again anyway).
-        if (touchedClips)
-            ++m_ClipStoreVersion;
-        if (touchedTransforms)
-            ++m_TransformStoreVersion;
-        m_PrimitiveDataDirty.clear();
-        return false;
-    }
-
-    // ---------------- Phase 2: emit ---------------------------------------
-    // Each work item re-emits its own primitives from warm caches into a
-    // per-task scratch buffer — disjoint outputs, read-only shared state
-    // (enforced by the OffThread tripwires). Forked across JobSystem workers
-    // when the drain is large enough for fork-join to win; below that the
-    // same loop runs inline. Apply order is by item index either way, so the
-    // frame output is identical to the sequential path.
-    static const bool sParallelDrainEnabled = [] {
-        const char* e = std::getenv("GE_UI_PARALLEL_DRAIN");
-        return !(e && e[0] == '0'); // default ON; GE_UI_PARALLEL_DRAIN=0 disables
-    }();
+size_t UIManager::ComputeDrainTaskCount(size_t itemCount) const
+{
+    static const bool sParallelDrainEnabled = Platform::EnvironmentSwitchEnabled("GE_UI_PARALLEL_DRAIN", true);
     // Below this many items per task, fork-join overhead beats the win.
     // Env-overridable so soaks can force the fork path on small drains
     // (GE_UI_PARALLEL_DRAIN_MIN_ITEMS=1 forks everything with >= 2 items).
@@ -1655,64 +1727,14 @@ bool UIManager::DrainPrimitiveDataDirty()
         // +1 lane: ParallelFor runs tasks on this thread too.
         const size_t lanes = m_JobSystem->GetWorkerCount() + 1;
         numTasks = std::max<size_t>(
-            1, std::min(lanes, (items.size() + sMinItemsPerTask - 1) / sMinItemsPerTask));
+            1, std::min(lanes, (itemCount + sMinItemsPerTask - 1) / sMinItemsPerTask));
     }
+    return numTasks;
+}
 
-    static thread_local std::vector<std::vector<UI::UIPrimitive>> sTaskScratchStorage;
-    std::vector<std::vector<UI::UIPrimitive>>& taskScratch = sTaskScratchStorage;
-    if (taskScratch.size() < numTasks)
-        taskScratch.resize(numTasks);
-
-    // Runs on JobSystem workers: everything it touches arrives via explicit
-    // references/parameters (see the thread_local note above) or via `this`
-    // members that are read-only during the emit phase.
-    const auto emitSlice = [this](std::vector<DrainItem>& sliceItems,
-                                  std::vector<UI::UIPrimitive>& scratch,
-                                  uint32_t taskIdx, size_t sliceBegin, size_t sliceEnd,
-                                  bool offThread)
-    {
-        scratch.clear();
-        PrimitiveGenContext ectx{scratch, m_PersistentClipRects,
-                                 m_SdfTextureRegistry.get(), this,
-                                 static_cast<float>(m_LastLayoutWidth),
-                                 static_cast<float>(m_LastLayoutHeight),
-                                 std::max(0.01f, m_ContentScale)};
-        ectx.DrainModeOnly = true;
-        ectx.OffThread = offThread;
-        for (size_t i = sliceBegin; i < sliceEnd; ++i)
-        {
-            DrainItem& it = sliceItems[i];
-            if (it.UiThreadOnly)
-                continue; // emitted inline during apply
-            ectx.EscalateToUiThread = false;
-            ectx.PreResolvedBg = it.HasPreResolvedBg ? &it.Bg : nullptr;
-            // Seed emission from the stored ancestor-chain product, NOT the
-            // baked primitive opacity: the baked value already includes this
-            // element's own opacity, so reusing it would multiply self in a
-            // second time on every drain.
-            ectx.EffectiveOpacity = it.El->m_PrimitiveAncestorOpacity;
-            // Ambient clip for a text-overflow PushClip. Only the inline
-            // (offThread=false) slice can reach that push — workers escalate
-            // first — but seeding is per-item state either way.
-            ectx.DrainAmbientClipIdx = it.PreservedClipIdx;
-            const size_t start = scratch.size();
-            GeneratePrimitivesForElement(it.El, ectx, 0.0f, 0.0f);
-            if (ectx.EscalateToUiThread)
-            {
-                scratch.resize(start);
-                // Reset the re-entry stamp so the apply-phase re-emit isn't
-                // rejected as a same-frame duplicate visit.
-                it.El->m_LastPrimitiveGenFrame = 0;
-                it.Escalated = true;
-                continue;
-            }
-            it.Task = taskIdx;
-            it.EmitBegin = static_cast<uint32_t>(start);
-            it.EmitCount = static_cast<uint32_t>(scratch.size() - start);
-            PatchAmbientClip(scratch.data() + it.EmitBegin, it.EmitCount, it.PreservedClipIdx);
-        }
-    };
-
+uint32_t UIManager::EmitDrainItems(std::vector<DrainItem>& items,
+                                   std::vector<std::vector<UI::UIPrimitive>>& taskScratch, size_t numTasks)
+{
     uint32_t forkedTasks = 1;
     if (numTasks >= 2)
     {
@@ -1723,248 +1745,296 @@ bool UIManager::DrainPrimitiveDataDirty()
         std::vector<DrainItem>* itemsPtr = &items;
         std::vector<std::vector<UI::UIPrimitive>>* scratchPtr = &taskScratch;
         JobSystem::ParallelFor(m_JobSystem, forkedTasks,
-                               [&emitSlice, itemsPtr, scratchPtr, perTask](size_t t)
+                               [this, itemsPtr, scratchPtr, perTask](size_t t)
                                {
                                    const size_t b = t * perTask;
                                    const size_t e = std::min(b + perTask, itemsPtr->size());
-                                   emitSlice(*itemsPtr, (*scratchPtr)[t], static_cast<uint32_t>(t), b, e,
-                                             /*offThread=*/true);
+                                   EmitDrainSlice(*itemsPtr, (*scratchPtr)[t], static_cast<uint32_t>(t), b, e,
+                                                  /*offThread=*/true);
                                });
     }
     else
     {
-        emitSlice(items, taskScratch[0], 0, 0, items.size(), /*offThread=*/false);
+        EmitDrainSlice(items, taskScratch[0], 0, 0, items.size(), /*offThread=*/false);
+    }
+    return forkedTasks;
+}
+
+// Runs on JobSystem workers: everything it touches arrives via explicit
+// references/parameters (see the thread_local note in
+// DrainPrimitiveDataDirty) or via `this`
+// members that are read-only during the emit phase.
+void UIManager::EmitDrainSlice(std::vector<DrainItem>& sliceItems, std::vector<UI::UIPrimitive>& scratch,
+                               uint32_t taskIdx, size_t sliceBegin, size_t sliceEnd, bool offThread)
+{
+    scratch.clear();
+    PrimitiveGenContext ectx{scratch, m_PersistentClipRects,
+                             m_SdfTextureRegistry.get(), this,
+                             static_cast<float>(m_LastLayoutWidth),
+                             static_cast<float>(m_LastLayoutHeight),
+                             std::max(0.01f, m_ContentScale)};
+    ectx.DrainModeOnly = true;
+    ectx.OffThread = offThread;
+    for (size_t i = sliceBegin; i < sliceEnd; ++i)
+    {
+        DrainItem& it = sliceItems[i];
+        if (it.UiThreadOnly)
+            continue; // emitted inline during apply
+        ectx.EscalateToUiThread = false;
+        ectx.PreResolvedBg = it.HasPreResolvedBg ? &it.Bg : nullptr;
+        // Seed emission from the stored ancestor-chain product, NOT the
+        // baked primitive opacity: the baked value already includes this
+        // element's own opacity, so reusing it would multiply self in a
+        // second time on every drain.
+        ectx.EffectiveOpacity = it.El->m_PrimitiveAncestorOpacity;
+        // Ambient clip for a text-overflow PushClip. Only the inline
+        // (offThread=false) slice can reach that push — workers escalate
+        // first — but seeding is per-item state either way.
+        ectx.DrainAmbientClipIdx = it.PreservedClipIdx;
+        const size_t start = scratch.size();
+        GeneratePrimitivesForElement(it.El, ectx, 0.0f, 0.0f);
+        if (ectx.EscalateToUiThread)
+        {
+            scratch.resize(start);
+            // Reset the re-entry stamp so the apply-phase re-emit isn't
+            // rejected as a same-frame duplicate visit.
+            it.El->m_LastPrimitiveGenFrame = 0;
+            it.Escalated = true;
+            continue;
+        }
+        it.Task = taskIdx;
+        it.EmitBegin = static_cast<uint32_t>(start);
+        it.EmitCount = static_cast<uint32_t>(scratch.size() - start);
+        PatchAmbientClip(scratch.data() + it.EmitBegin, it.EmitCount, it.PreservedClipIdx);
+    }
+}
+
+void UIManager::ApplyDrainItem(DrainItem& item, PrimitiveGenContext& ctx,
+                               const std::vector<std::vector<UI::UIPrimitive>>& taskScratch,
+                               PrimitiveDrainState& state)
+{
+    UIElement* el = item.El;
+    const UI::UIPrimitive* emitted = nullptr;
+    size_t emittedCount = 0;
+    size_t inlineStart = 0;
+    const bool inlineEmit = item.UiThreadOnly || item.Escalated;
+    if (inlineEmit)
+    {
+        if (item.Escalated)
+            ++state.EscalatedCount;
+        ctx.EscalateToUiThread = false;
+        ctx.PreResolvedBg = item.HasPreResolvedBg ? &item.Bg : nullptr;
+        ctx.EffectiveOpacity = el->m_PrimitiveAncestorOpacity;
+        ctx.DrainAmbientClipIdx = item.PreservedClipIdx;
+        inlineStart = ctx.Primitives.size();
+        GeneratePrimitivesForElement(el, ctx, 0.0f, 0.0f);
+        ctx.DrainAmbientClipIdx = UI::kNoClip;
+        emittedCount = ctx.Primitives.size() - inlineStart;
+        PatchAmbientClip(ctx.Primitives.data() + inlineStart, emittedCount,
+                         item.PreservedClipIdx);
+        emitted = ctx.Primitives.data() + inlineStart;
+    }
+    else
+    {
+        emitted = taskScratch[item.Task].data() + item.EmitBegin;
+        emittedCount = item.EmitCount;
     }
 
-    // ---------------- Phase 3: apply (UI thread, queue order) -------------
-    // All order-sensitive mutation lives here: allocator ops, memcpy into
-    // persistent slot ranges, DrawOrder splices, ring range-marks — applied
-    // in item order so output matches the sequential path byte-for-byte.
-    // Escalated and UiThreadOnly items re-emit inline first (same code path,
-    // on-thread, exactly like the pre-MT-3 drain).
-    uint32_t escalatedCount = 0;
-    for (DrainItem& item : items)
+    // Handle any primitive-count change inline:
+    //   * fits-in-cap shrink/grow: keep slot range, edit DrawOrder
+    //   * grow past cap: try TryGrowInPlace, else relocate (free + alloc new)
+    //   * shrink to 0 with cap > 0: free slot range
+    //
+    // Per-element counts are 16-bit throughout the slot bookkeeping; an
+    // element emitting past that (pathological — ~65k glyphs) would
+    // truncate the allocator request below while memcpying the full
+    // span. Bail to the full regen instead of corrupting the heap.
+    if (emittedCount > std::numeric_limits<uint16_t>::max())
     {
-        if (!ok)
-            break; // full regen follows; it rewrites everything
+        BailDrainToFullRegen(state);
+        return;
+    }
+    const uint16_t oldCount = el->m_PrimitiveRangeCount;
+    const uint16_t emittedCount16 = static_cast<uint16_t>(emittedCount);
+    bool didRelocate = false;
+    uint32_t writeStart = el->m_PrimitiveRangeStart;
 
-        UIElement* el = item.El;
-        const UI::UIPrimitive* emitted = nullptr;
-        size_t emittedCount = 0;
-        size_t inlineStart = 0;
-        const bool inlineEmit = item.UiThreadOnly || item.Escalated;
-        if (inlineEmit)
+    if (emittedCount > el->m_PrimitiveRangeCap)
+    {
+        // Try in-place grow first (cheap: extends the existing range
+        // when the next slots in m_PersistentPrimitives are free).
+        const uint16_t grown = m_PrimitiveAllocator.TryGrowInPlace(
+            el->m_PrimitiveRangeStart, el->m_PrimitiveRangeCap,
+            emittedCount16);
+        if (grown != 0)
         {
-            if (item.Escalated)
-                ++escalatedCount;
-            ctx.EscalateToUiThread = false;
-            ctx.PreResolvedBg = item.HasPreResolvedBg ? &item.Bg : nullptr;
-            ctx.EffectiveOpacity = el->m_PrimitiveAncestorOpacity;
-            ctx.DrainAmbientClipIdx = item.PreservedClipIdx;
-            inlineStart = ctx.Primitives.size();
-            GeneratePrimitivesForElement(el, ctx, 0.0f, 0.0f);
-            ctx.DrainAmbientClipIdx = UI::kNoClip;
-            emittedCount = ctx.Primitives.size() - inlineStart;
-            PatchAmbientClip(ctx.Primitives.data() + inlineStart, emittedCount,
-                             item.PreservedClipIdx);
-            emitted = ctx.Primitives.data() + inlineStart;
+            el->m_PrimitiveRangeCap = grown;
+            // Same start address, larger cap. The fits-in-cap path
+            // below handles the DrawOrder shift.
         }
         else
         {
-            emitted = taskScratch[item.Task].data() + item.EmitBegin;
-            emittedCount = item.EmitCount;
+            // Relocate: free old, allocate new range. Slot start
+            // address changes — m_DrawOrder slice and downstream
+            // m_DrawOrderIdx need full-replace + shift.
+            const uint32_t oldStart = el->m_PrimitiveRangeStart;
+            const uint16_t oldCap = el->m_PrimitiveRangeCap;
+            m_PrimitiveAllocator.Free(oldStart, oldCap);
+            uint16_t newCap = 0;
+            const uint32_t newStart = m_PrimitiveAllocator.Allocate(
+                emittedCount16, newCap);
+            el->m_PrimitiveRangeStart = newStart;
+            el->m_PrimitiveRangeCap   = newCap;
+            writeStart = newStart;
+            didRelocate = true;
         }
-
-        // Block E1 step 4/5: handle any primitive-count change inline.
-        //   * fits-in-cap shrink/grow: keep slot range, edit DrawOrder
-        //   * grow past cap: try TryGrowInPlace, else relocate (free + alloc new)
-        //   * shrink to 0 with cap > 0: free slot range
-        //
-        // Per-element counts are 16-bit throughout the slot bookkeeping; an
-        // element emitting past that (pathological — ~65k glyphs) would
-        // truncate the allocator request below while memcpying the full
-        // span. Bail to the full regen instead of corrupting the heap.
-        if (emittedCount > std::numeric_limits<uint16_t>::max())
-        {
-            bailToFullRegen();
-            continue;
-        }
-        const uint16_t oldCount = el->m_PrimitiveRangeCount;
-        const uint16_t emittedCount16 = static_cast<uint16_t>(emittedCount);
-        constexpr uint32_t kInvalid = 0xFFFFFFFFu;
-        bool didRelocate = false;
-        uint32_t writeStart = el->m_PrimitiveRangeStart;
-
-        if (emittedCount > el->m_PrimitiveRangeCap)
-        {
-            // Try in-place grow first (cheap: extends the existing range
-            // when the next slots in m_PersistentPrimitives are free).
-            const uint16_t grown = m_PrimitiveAllocator.TryGrowInPlace(
-                el->m_PrimitiveRangeStart, el->m_PrimitiveRangeCap,
-                emittedCount16);
-            if (grown != 0)
-            {
-                el->m_PrimitiveRangeCap = grown;
-                // Same start address, larger cap. The fits-in-cap path
-                // below handles the DrawOrder shift.
-            }
-            else
-            {
-                // Relocate: free old, allocate new range. Slot start
-                // address changes — m_DrawOrder slice and downstream
-                // m_DrawOrderIdx need full-replace + shift.
-                const uint32_t oldStart = el->m_PrimitiveRangeStart;
-                const uint16_t oldCap = el->m_PrimitiveRangeCap;
-                m_PrimitiveAllocator.Free(oldStart, oldCap);
-                uint16_t newCap = 0;
-                const uint32_t newStart = m_PrimitiveAllocator.Allocate(
-                    emittedCount16, newCap);
-                el->m_PrimitiveRangeStart = newStart;
-                el->m_PrimitiveRangeCap   = newCap;
-                writeStart = newStart;
-                didRelocate = true;
-            }
-        }
-
-        // Both grow branches may advance the allocator's high-water mark
-        // past the CPU mirror — TryGrowInPlace extends m_TotalSlots, and
-        // Allocate may too when no free range fits. Resize the mirror to
-        // cover the full granted cap before the memcpy below.
-        const size_t neededSize =
-            static_cast<size_t>(writeStart) + el->m_PrimitiveRangeCap;
-        if (m_PersistentPrimitives.size() < neededSize)
-            m_PersistentPrimitives.resize(neededSize);
-
-        // Copy into the (possibly new) slot range. The recorded clip index
-        // was already patched onto the emitted primitives in the emit phase.
-        if (emittedCount > 0)
-        {
-            std::memcpy(&m_PersistentPrimitives[writeStart], emitted,
-                        emittedCount * sizeof(UI::UIPrimitive));
-            touchedPrimitives = true;
-            if (m_SdfPrimRing)
-                m_SdfPrimRing->MarkRangeDirty(writeStart, emittedCount);
-        }
-        if (inlineEmit)
-            ctx.Primitives.resize(inlineStart);
-
-        // Relocate path: replace the entire DrawOrder slice with new
-        // slot indices and shift downstream. Then we're done with this
-        // element; skip the count-change path below.
-        if (didRelocate)
-        {
-            const uint32_t doIdx = el->m_DrawOrderIdx;
-            if (doIdx != kInvalid)
-            {
-                if (!hasDrawOrderSlice(doIdx, oldCount))
-                {
-                    bailToFullRegen();
-                    continue;
-                }
-                // Erase old slice then reserve emittedCount placeholders
-                // and patch sequential slot indices in place — avoids a
-                // temp vector allocation each relocate.
-                m_DrawOrder.erase(m_DrawOrder.begin() + doIdx,
-                                  m_DrawOrder.begin() + doIdx + oldCount);
-                m_DrawOrder.insert(m_DrawOrder.begin() + doIdx, emittedCount, 0u);
-                for (size_t i = 0; i < emittedCount; ++i)
-                    m_DrawOrder[doIdx + i] = writeStart + static_cast<uint32_t>(i);
-                const int32_t delta = static_cast<int32_t>(emittedCount) - static_cast<int32_t>(oldCount);
-                if (delta != 0)
-                    ShiftDrawOrderIndicesAfter(doIdx + oldCount, delta);
-                touchedDrawOrder = true;
-            }
-            el->m_PrimitiveRangeCount = static_cast<uint16_t>(emittedCount);
-            continue;
-        }
-
-        // m_DrawOrder slice maintenance for count changes. The element's
-        // slice currently lives at [doIdx, doIdx + oldCount). After this
-        // drain it should be [doIdx, doIdx + emittedCount) with slot
-        // indices [start, start + emittedCount).
-        if (emittedCount != oldCount)
-        {
-            const uint32_t doIdx = el->m_DrawOrderIdx;
-            const uint32_t slotStart = el->m_PrimitiveRangeStart;
-            if (doIdx != kInvalid)
-            {
-                if (!hasDrawOrderSlice(doIdx, oldCount))
-                {
-                    bailToFullRegen();
-                    continue;
-                }
-                const uint32_t emittedCount32 = static_cast<uint32_t>(emittedCount);
-                if (emittedCount < oldCount)
-                {
-                    // Shrink: erase tail entries. Downstream entries
-                    // shift left by (oldCount - emittedCount).
-                    const uint16_t shrink = static_cast<uint16_t>(oldCount - emittedCount);
-                    m_DrawOrder.erase(m_DrawOrder.begin() + doIdx + emittedCount,
-                                      m_DrawOrder.begin() + doIdx + oldCount);
-                    ShiftDrawOrderIndicesAfter(doIdx + emittedCount32, -static_cast<int32_t>(shrink));
-                }
-                else
-                {
-                    // Grow (still fits in cap): insert placeholders after
-                    // the existing slice and patch sequential slot
-                    // indices in place. Downstream shifts right.
-                    const uint16_t growBy = static_cast<uint16_t>(emittedCount - oldCount);
-                    m_DrawOrder.insert(m_DrawOrder.begin() + doIdx + oldCount, growBy, 0u);
-                    for (size_t i = 0; i < growBy; ++i)
-                        m_DrawOrder[doIdx + oldCount + i] = slotStart + static_cast<uint32_t>(oldCount + i);
-                    ShiftDrawOrderIndicesAfter(doIdx + oldCount, static_cast<int32_t>(growBy));
-                }
-                touchedDrawOrder = true;
-            }
-            el->m_PrimitiveRangeCount = static_cast<uint16_t>(emittedCount);
-        }
-
-        // Block E1 step 5: free slot range when an element shrinks to 0
-        // primitives (e.g. background-color removed, displayMode flipped
-        // to None). Otherwise the slot range sits dormant — allocator
-        // still considers cap slots owned, wasting CPU mirror space.
-        if (emittedCount == 0 && el->m_PrimitiveRangeCap > 0)
-        {
-            m_PrimitiveAllocator.Free(el->m_PrimitiveRangeStart, el->m_PrimitiveRangeCap);
-            el->m_PrimitiveRangeStart = kInvalid;
-            el->m_PrimitiveRangeCap   = 0;
-            el->m_DrawOrderIdx        = kInvalid;
-        }
-
-        // Note: we do NOT call el->ClearDirty(VisualDirty) here. ClearDirty
-        // also calls Overrides::ClearDirty() which wipes m_NeedsCascadeRerun
-        // — and the cascade still needs that signal. Since no production
-        // code reads UIElement::VisualDirty as a state, leaving it set is
-        // harmless; the bit is effectively just "was queued for drain".
     }
 
-    m_PrimitiveDataDirty.clear();
+    // Both grow branches may advance the allocator's high-water mark
+    // past the CPU mirror — TryGrowInPlace extends m_TotalSlots, and
+    // Allocate may too when no free range fits. Resize the mirror to
+    // cover the full granted cap before the memcpy below.
+    const size_t neededSize =
+        static_cast<size_t>(writeStart) + el->m_PrimitiveRangeCap;
+    if (m_PersistentPrimitives.size() < neededSize)
+        m_PersistentPrimitives.resize(neededSize);
 
-    // Bump exactly what changed. On a bail (ok=false) the fall-through full
-    // regen bumps everything anyway; these extra bumps are harmless.
-    if (touchedPrimitives)
-        ++m_PrimitiveStoreVersion;
-    if (touchedClips)
-        ++m_ClipStoreVersion;
-    if (touchedTransforms)
-        ++m_TransformStoreVersion;
-    if (touchedDrawOrder)
-        ++m_DrawOrderStoreVersion;
-
-    // Drain-shape counters for soak verification (read via profile history).
-    if (m_UpdateProfilingEnabled && !m_UpdateProfilingHistory.empty())
+    // Copy into the (possibly new) slot range. The recorded clip index
+    // was already patched onto the emitted primitives in the emit phase.
+    if (emittedCount > 0)
     {
-        auto& back = m_UpdateProfilingHistory.back();
-        back.DrainItems         = static_cast<uint32_t>(items.size());
-        back.DrainParallelTasks = (numTasks >= 2) ? forkedTasks : 1;
-        back.DrainEscalated     = escalatedCount;
+        std::memcpy(&m_PersistentPrimitives[writeStart], emitted,
+                    emittedCount * sizeof(UI::UIPrimitive));
+        state.TouchedPrimitives = true;
+        if (m_SdfPrimRing)
+            m_SdfPrimRing->MarkRangeDirty(writeStart, emittedCount);
+    }
+    if (inlineEmit)
+        ctx.Primitives.resize(inlineStart);
+
+    // Relocate path: replace the entire DrawOrder slice with new
+    // slot indices and shift downstream. Then we're done with this
+    // element; skip the count-change path below.
+    if (didRelocate)
+    {
+        if (!ReplaceRelocatedDrawOrderSlice(el, oldCount, emittedCount, writeStart, state))
+            BailDrainToFullRegen(state);
+        return;
     }
 
-    return ok;
-#else
-    return true;
-#endif
+    // m_DrawOrder slice maintenance for count changes. The element's
+    // slice currently lives at [doIdx, doIdx + oldCount). After this
+    // drain it should be [doIdx, doIdx + emittedCount) with slot
+    // indices [start, start + emittedCount).
+    if (emittedCount != oldCount && !ResizeDrawOrderSlice(el, oldCount, emittedCount, state))
+    {
+        BailDrainToFullRegen(state);
+        return;
+    }
+
+    // Free the slot range when an element shrinks to 0 primitives
+    // (e.g. background-color removed). Otherwise the slot range sits
+    // dormant — allocator still considers cap slots owned, wasting CPU
+    // mirror space.
+    if (emittedCount == 0 && el->m_PrimitiveRangeCap > 0)
+    {
+        m_PrimitiveAllocator.Free(el->m_PrimitiveRangeStart, el->m_PrimitiveRangeCap);
+        el->m_PrimitiveRangeStart = UI::SlotAllocator::kInvalidSlot;
+        el->m_PrimitiveRangeCap   = 0;
+        el->m_DrawOrderIdx        = UIElement::kNoDrawOrderSlice;
+    }
+
+    // Note: we do NOT call el->ClearDirty(VisualDirty) here. ClearDirty
+    // also calls Overrides::ClearDirty() which wipes m_NeedsCascadeRerun
+    // — and the cascade still needs that signal. Since no production
+    // code reads UIElement::VisualDirty as a state, leaving it set is
+    // harmless; the bit is effectively just "was queued for drain".
 }
+
+// Relocated range: replaces the element's whole DrawOrder slice with the new
+// slot indices and shifts downstream. Returns false when the recorded slice is
+// out of bounds (the caller bails to the full regen).
+bool UIManager::ReplaceRelocatedDrawOrderSlice(UIElement* el, uint16_t oldCount, size_t emittedCount,
+                                               uint32_t writeStart, PrimitiveDrainState& state)
+{
+    const uint32_t doIdx = el->m_DrawOrderIdx;
+    if (doIdx != UIElement::kNoDrawOrderSlice)
+    {
+        if (!HasDrawOrderSlice(doIdx, oldCount))
+        {
+            return false;
+        }
+        // Erase old slice then reserve emittedCount placeholders
+        // and patch sequential slot indices in place — avoids a
+        // temp vector allocation each relocate.
+        m_DrawOrder.erase(m_DrawOrder.begin() + doIdx,
+                          m_DrawOrder.begin() + doIdx + oldCount);
+        m_DrawOrder.insert(m_DrawOrder.begin() + doIdx, emittedCount, 0u);
+        for (size_t i = 0; i < emittedCount; ++i)
+            m_DrawOrder[doIdx + i] = writeStart + static_cast<uint32_t>(i);
+        const int32_t delta = static_cast<int32_t>(emittedCount) - static_cast<int32_t>(oldCount);
+        if (delta != 0)
+            ShiftDrawOrderIndicesAfter(doIdx + oldCount, delta);
+        state.TouchedDrawOrder = true;
+    }
+    el->m_PrimitiveRangeCount = static_cast<uint16_t>(emittedCount);
+    return true;
+}
+
+// Fits-in-cap count change: shrinks or grows the element's DrawOrder slice in
+// place and shifts downstream. Returns false when the recorded slice is out of
+// bounds (the caller bails to the full regen).
+bool UIManager::ResizeDrawOrderSlice(UIElement* el, uint16_t oldCount, size_t emittedCount,
+                                     PrimitiveDrainState& state)
+{
+    const uint32_t doIdx = el->m_DrawOrderIdx;
+    const uint32_t slotStart = el->m_PrimitiveRangeStart;
+    if (doIdx != UIElement::kNoDrawOrderSlice)
+    {
+        if (!HasDrawOrderSlice(doIdx, oldCount))
+        {
+            return false;
+        }
+        const uint32_t emittedCount32 = static_cast<uint32_t>(emittedCount);
+        if (emittedCount < oldCount)
+        {
+            // Shrink: erase tail entries. Downstream entries
+            // shift left by (oldCount - emittedCount).
+            const uint16_t shrink = static_cast<uint16_t>(oldCount - emittedCount);
+            m_DrawOrder.erase(m_DrawOrder.begin() + doIdx + emittedCount,
+                              m_DrawOrder.begin() + doIdx + oldCount);
+            ShiftDrawOrderIndicesAfter(doIdx + emittedCount32, -static_cast<int32_t>(shrink));
+        }
+        else
+        {
+            // Grow (still fits in cap): insert placeholders after
+            // the existing slice and patch sequential slot
+            // indices in place. Downstream shifts right.
+            const uint16_t growBy = static_cast<uint16_t>(emittedCount - oldCount);
+            m_DrawOrder.insert(m_DrawOrder.begin() + doIdx + oldCount, growBy, 0u);
+            for (size_t i = 0; i < growBy; ++i)
+                m_DrawOrder[doIdx + oldCount + i] = slotStart + static_cast<uint32_t>(oldCount + i);
+            ShiftDrawOrderIndicesAfter(doIdx + oldCount, static_cast<int32_t>(growBy));
+        }
+        state.TouchedDrawOrder = true;
+    }
+    el->m_PrimitiveRangeCount = static_cast<uint16_t>(emittedCount);
+    return true;
+}
+
+bool UIManager::HasDrawOrderSlice(uint32_t start, size_t count) const
+{
+    return start != UIElement::kNoDrawOrderSlice &&
+           static_cast<size_t>(start) <= m_DrawOrder.size() &&
+           count <= (m_DrawOrder.size() - static_cast<size_t>(start));
+}
+
+void UIManager::BailDrainToFullRegen(PrimitiveDrainState& state)
+{
+    MarkPrimitivesNeedRegen(0x400u);
+    state.Ok = false;
+}
+#endif
 
 const UI::UIPrimitive* UIManager::PeekPrimitiveForTesting(const UIElement& el, uint16_t index) const
 {
@@ -2027,8 +2097,8 @@ void UIManager::FinalizeElementSlots(UIElement* el, PrimitiveGenContext& ctx, si
             el->m_PrimitiveRangeCount = 0;
             el->m_PrimitiveRangeCap = 0;
         }
-        // Block E1: no slice in m_DrawOrder this frame.
-        el->m_DrawOrderIdx = 0xFFFFFFFFu;
+        // No slice in m_DrawOrder this frame.
+        el->m_DrawOrderIdx = UIElement::kNoDrawOrderSlice;
         return;
     }
 
@@ -2074,14 +2144,12 @@ void UIManager::FinalizeElementSlots(UIElement* el, PrimitiveGenContext& ctx, si
                 ctx.Primitives.data() + scratchStart,
                 count * sizeof(UI::UIPrimitive));
 
-    // Push slot indices into DrawOrder in DFS pre-order. Stage 2 part 3 will
-    // bind m_DrawOrder as a shader-side indirection; until then this is also
-    // the order in which the compatibility copy in GenerateAllPrimitives
-    // populates m_SdfPrimitiveBuffer for upload.
+    // Push slot indices into DrawOrder in DFS pre-order; the shader reads
+    // primitives through this indirection.
     //
-    // Block E1 (sparse drain prep): record the slice start index on the
-    // element so the future drain code can locate this element's entries
-    // in m_DrawOrder in O(1) without re-walking the tree.
+    // Record the slice start index on the element so the drain can locate
+    // this element's entries in m_DrawOrder in O(1) without re-walking the
+    // tree.
     el->m_DrawOrderIdx = static_cast<uint32_t>(m_DrawOrder.size());
     for (size_t i = 0; i < count; ++i)
         m_DrawOrder.push_back(el->m_PrimitiveRangeStart + static_cast<uint32_t>(i));
@@ -2158,10 +2226,7 @@ void UIManager::GeneratePrimitivesForElement(UIElement* el, PrimitiveGenContext&
         return;
 
     {
-        static const bool sThumbTrace = [] {
-            const char* v = std::getenv("GE_UI_THUMB_TRACE");
-            return v && v[0] == '1';
-        }();
+        static const bool sThumbTrace = Platform::EnvironmentSwitchEnabled("GE_UI_THUMB_TRACE", false);
         if (sThumbTrace && el->HasClass("slider-thumb"))
             Logger::Log::Info("[ThumbTrace] emit x={:.1f} drain={}", el->GetLayoutX(),
                               ctx.DrainModeOnly);
@@ -2231,7 +2296,7 @@ void UIManager::GeneratePrimitivesForElement(UIElement* el, PrimitiveGenContext&
     // style input and holds a bare percentage number on a percentage corner.
     const CornerRadiiTLTRBRBL usedRadii = UsedBorderRadius(style.Visual, wL, hL);
 
-    // Stage 2: re-entrancy detector. An element being entered with the
+    // Re-entrancy detector. An element being entered with the
     // current frame counter already stored means a synchronous event handler
     // or control extension caused a recursive call back into PrimitiveGen
     // for this element on the same frame. The first visit's slot data has
@@ -2247,7 +2312,7 @@ void UIManager::GeneratePrimitivesForElement(UIElement* el, PrimitiveGenContext&
     }
     el->m_LastPrimitiveGenFrame = m_PrimitiveGenFrame;
 
-    // Stage 2: snapshot the scratch buffer position. Self-emission below
+    // Snapshot the scratch buffer position. Self-emission below
     // pushes into ctx.primitives; FinalizeElementSlots after self-emission
     // pops [scratchStart, ctx.primitives.size()) into m_PersistentPrimitives.
     const size_t scratchStart = ctx.Primitives.size();
@@ -2403,8 +2468,8 @@ void UIManager::GeneratePrimitivesForElement(UIElement* el, PrimitiveGenContext&
             overlays = BuildTextInputOverlays(input, ctx, style, x, y, w, h, isFocused);
         }
 
-        if (overlays.HasSelection)
-            ctx.Primitives.push_back(overlays.Selection);
+        for (const auto& selection : overlays.Selections)
+            ctx.Primitives.push_back(selection);
 
         // Text content (skipped for controls that handle their own text rendering)
         const std::string& text = el->GetTextContent();
@@ -2465,7 +2530,7 @@ void UIManager::GeneratePrimitivesForElement(UIElement* el, PrimitiveGenContext&
     for (size_t i = scratchStart; i < ctx.Primitives.size(); ++i)
         ctx.Primitives[i].TransformIndex = ownTransformIdx;
 
-    // Block E1: in drain mode, skip FinalizeElementSlots (caller copies the
+    // In drain mode, skip FinalizeElementSlots (caller copies the
     // scratch into the existing slot range itself) and skip child recursion
     // entirely — only the dirty element is being refreshed.
     if (ctx.DrainModeOnly)
@@ -2474,7 +2539,7 @@ void UIManager::GeneratePrimitivesForElement(UIElement* el, PrimitiveGenContext&
         return;
     }
 
-    // Stage 2: finalize this element's primitives into a persistent slot
+    // Finalize this element's primitives into a persistent slot
     // range, push DrawOrder entries in DFS pre-order, and pop the scratch.
     // After this call ctx.primitives.size() == scratchStart again.
     FinalizeElementSlots(el, ctx, scratchStart);
@@ -2828,6 +2893,7 @@ static uint64_t ComputeTextShapeCacheKey(std::string_view text, const FontAtlas*
     };
     uint64_t h = std::hash<std::string_view>{}(text);
     h = mix(h, reinterpret_cast<uintptr_t>(font));
+    h = mix(h, font ? font->GetLayoutRevision() : 0);
     uint32_t bits;
     std::memcpy(&bits, &pixelSize, sizeof(float));
     h = mix(h, static_cast<uint64_t>(bits));
@@ -2978,9 +3044,9 @@ void UIManager::EmitTextPrimitives(UIElement* el, PrimitiveGenContext& ctx,
 
         // Line metrics are captured alongside the glyphs so cache-hit quad
         // building reads them without consulting the font at all. (Reading them
-        // is now cheap and const — the metrics come from the design-unit tables
-        // and no longer size the FT face — but the cache still carries them so a
-        // cache hit stays a pure lookup.)
+        // is cheap and const — the metrics come from the design-unit tables and
+        // do not size the FT face — but the cache still carries them so a cache
+        // hit stays a pure lookup.)
         auto lm = font->GetFontLineMetrics(pixelSize);
 
         if (!cache)
@@ -3293,9 +3359,6 @@ void UIManager::EmitTextPrimitives(UIElement* el, PrimitiveGenContext& ctx,
     }
 }
 
-// Width of the caret bar in CSS-logical px; scaled to physical at emission.
-static constexpr float kCaretThicknessLogicalPx = 1.5f;
-
 void UIManager::RefreshTextInputScroll(TextInput* input, PrimitiveGenContext& ctx,
                                        const ResolvedStyle& style,
                                        float x, float y, float w, float h,
@@ -3416,34 +3479,20 @@ UIManager::TextInputOverlays UIManager::BuildTextInputOverlays(
     const int selEnd = input->GetSelectionEnd();
     const bool hasSelection = isFocused && selStart >= 0 && selEnd >= 0 && selStart != selEnd;
 
-    float selScreenL = 0.0f;
-    float selScreenR = 0.0f;
-
     if (hasSelection)
     {
-        int a = std::clamp(std::min(selStart, selEnd), 0, textLen);
-        int b = std::clamp(std::max(selStart, selEnd), 0, textLen);
-        float startLocal = (a < (int)caretMap.size()) ? caretMap[(size_t)a] : 0.0f;
-        float endLocal = (b < (int)caretMap.size()) ? caretMap[(size_t)b] : (caretMap.empty() ? 0.0f : caretMap.back());
-
-        float selX = (xBase - scrollX) + startLocal;
-        float selW = std::max(0.0f, endLocal - startLocal);
-
-        float sL = std::max(selX, clipLeft);
-        float sR = std::min(selX + selW, clipRight);
-        selW = std::max(0.0f, sR - sL);
-
-        if (selW > 0.0f)
+        const int start = std::clamp(std::min(selStart, selEnd), 0, textLen);
+        const int end = std::clamp(std::max(selStart, selEnd), 0, textLen);
+        for (const auto& [left, right] : measure.SelectionRanges(start, end))
         {
-            UI::UIPrimitive prim = UI::MakeRect(sL, selTopY, selW, selHeight,
-                UI::PackedTextSelectionFill(vs, isFocused));
-            UI::SetClip(prim, clipIdx);
-            UI::SetOpacity(prim, ctx.EffectiveOpacity);
-            out.Selection = prim;
-            out.HasSelection = true;
-
-            selScreenL = sL;
-            selScreenR = sR;
+            const float screenLeft = std::max(xBase - scrollX + left, clipLeft);
+            const float screenRight = std::min(xBase - scrollX + right, clipRight);
+            if (screenRight <= screenLeft) continue;
+            auto primitive = UI::MakeRect(screenLeft, selTopY, screenRight - screenLeft,
+                                           selHeight, UI::PackedTextSelectionFill(vs, isFocused));
+            UI::SetClip(primitive, clipIdx);
+            UI::SetOpacity(primitive, ctx.EffectiveOpacity);
+            out.Selections.push_back(primitive);
         }
     }
 
@@ -3457,21 +3506,10 @@ UIManager::TextInputOverlays UIManager::BuildTextInputOverlays(
         }
         float caretX = (xBase - scrollX) + caretLocal;
 
-        // Snap to selection edge when there's a selection
-        if (hasSelection)
-        {
-            int a = std::clamp(std::min(selStart, selEnd), 0, textLen);
-            int b = std::clamp(std::max(selStart, selEnd), 0, textLen);
-            if (clamped == b)
-                caretX = selScreenR;
-            else if (clamped == a)
-                caretX = selScreenL;
-        }
-
         // Keep the whole bar inside the content box, not just its left edge —
         // clamping to clipRight would leave the caret hanging over the border
         // when it sits at the end of scrolled-out text.
-        const float caretWidth = kCaretThicknessLogicalPx * ctx.ContentScale;
+        const float caretWidth = UI::kCaretThicknessLogicalPx * ctx.ContentScale;
         caretX = std::clamp(caretX, clipLeft, std::max(clipLeft, clipRight - caretWidth));
 
         const uint32_t caretColor = isFocused ? UI::PackFromARGB(vs.Color) : 0x00000000u;

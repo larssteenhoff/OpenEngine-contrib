@@ -65,7 +65,7 @@ void WriteLegacyLane(uint8_t* row, std::string_view name, std::initializer_list<
     std::memcpy(row + LegacyLaneByteOffset(*lane), std::data(values), LegacyLaneByteSize(*lane));
 }
 
-struct Vertex
+struct CubeVertex
 {
     float pos[3];
     float nrm[3];
@@ -73,7 +73,7 @@ struct Vertex
 };
 
 // 24-vertex cube in [-0.5, 0.5] (unique normals/UVs per face).
-void BuildCube(std::vector<Vertex>& outVerts, std::vector<uint16_t>& outIdx)
+void BuildCube(std::vector<CubeVertex>& outVerts, std::vector<uint16_t>& outIdx)
 {
     outVerts.clear();
     outIdx.clear();
@@ -82,10 +82,10 @@ void BuildCube(std::vector<Vertex>& outVerts, std::vector<uint16_t>& outIdx)
                         const Vector3& a, const Vector3& b, const Vector3& c, const Vector3& d)
     {
         const uint16_t base = static_cast<uint16_t>(outVerts.size());
-        outVerts.push_back(Vertex{{a.x, a.y, a.z}, {nx, ny, nz}, {0.0f, 0.0f}});
-        outVerts.push_back(Vertex{{b.x, b.y, b.z}, {nx, ny, nz}, {1.0f, 0.0f}});
-        outVerts.push_back(Vertex{{c.x, c.y, c.z}, {nx, ny, nz}, {1.0f, 1.0f}});
-        outVerts.push_back(Vertex{{d.x, d.y, d.z}, {nx, ny, nz}, {0.0f, 1.0f}});
+        outVerts.push_back(CubeVertex{{a.x, a.y, a.z}, {nx, ny, nz}, {0.0f, 0.0f}});
+        outVerts.push_back(CubeVertex{{b.x, b.y, b.z}, {nx, ny, nz}, {1.0f, 0.0f}});
+        outVerts.push_back(CubeVertex{{c.x, c.y, c.z}, {nx, ny, nz}, {1.0f, 1.0f}});
+        outVerts.push_back(CubeVertex{{d.x, d.y, d.z}, {nx, ny, nz}, {0.0f, 1.0f}});
         for (int i : {0, 1, 2, 0, 2, 3})
             outIdx.push_back(static_cast<uint16_t>(base + i));
     };
@@ -157,10 +157,10 @@ TEST(MaterialShaders, MaterialV2_RendersLitCube)
 #endif
 
     // Temp workspace with Assets/ so MaterialAsset can locate its workspace root.
-    const std::filesystem::path tmpRoot = std::filesystem::temp_directory_path() / "ge_material_lit_cube";
+    const TestUtils::ScopedTempDir tempWorkspace(TestUtils::MakeUniqueTempDirectory("ge_material_lit_cube"));
+    const std::filesystem::path& tmpRoot = tempWorkspace.Path();
     const std::filesystem::path assetsRoot = tmpRoot / "Assets";
     std::error_code ec;
-    std::filesystem::remove_all(tmpRoot, ec);
     std::filesystem::create_directories(assetsRoot, ec);
 
     const auto surfacePath = assetsRoot / "Shaders" / "test_surface.glsl";
@@ -234,13 +234,13 @@ TEST(MaterialShaders, MaterialV2_RendersLitCube)
     ASSERT_TRUE(depth.IsValid());
 
     // Geometry
-    std::vector<Vertex> verts;
+    std::vector<CubeVertex> verts;
     std::vector<uint16_t> idx;
     BuildCube(verts, idx);
 
-    BufferHandle vb = CreateUploadBuffer(*dev, BufferUsage::Vertex, verts.size() * sizeof(Vertex), "MaterialLit.CubeVB");
+    BufferHandle vb = CreateUploadBuffer(*dev, BufferUsage::Vertex, verts.size() * sizeof(CubeVertex), "MaterialLit.CubeVB");
     ASSERT_TRUE(vb.IsValid());
-    Upload(*dev, vb, verts.data(), verts.size() * sizeof(Vertex));
+    Upload(*dev, vb, verts.data(), verts.size() * sizeof(CubeVertex));
 
     BufferHandle ib = CreateUploadBuffer(*dev, BufferUsage::Index, idx.size() * sizeof(uint16_t), "MaterialLit.CubeIB");
     ASSERT_TRUE(ib.IsValid());
@@ -254,7 +254,7 @@ TEST(MaterialShaders, MaterialV2_RendersLitCube)
     const Matrix4x4 V = Mathematics::MakeLookAtLH(eye, Vector3(0.0f, 0.0f, 0.0f), Vector3(0.0f, 1.0f, 0.0f)).ToVulkan();
     constexpr float kNear = 0.1f;
     constexpr float kFar = 10.0f;
-    const Matrix4x4 P = Mathematics::MakePerspectiveLH_ZO_ReverseZ(Math::ToRadians(60.0f), aspect, kNear, kFar).ToVulkan();
+    const Matrix4x4 P = Mathematics::MakePerspectiveLH_ZO_ReverseZ(Rendering::Math::ToRadians(60.0f), aspect, kNear, kFar).ToVulkan();
     const Matrix4x4 VP = P * V;
 
     CameraData cam{};
@@ -348,10 +348,10 @@ TEST(MaterialShaders, MaterialV2_RendersLitCube)
     pd.SetCullingMode(CullModeFlagBits::None, FrontFace::CounterClockwise);
     pd.colorAttachmentFormats = {static_cast<uint32_t>(TextureFormat::RGBA8_UNORM)};
     pd.depthAttachmentFormat = static_cast<uint32_t>(TextureFormat::D32_FLOAT);
-    pd.vertexBindings.push_back(VertexInputBinding{0u, static_cast<uint32_t>(sizeof(Vertex)), 0u});
-    pd.vertexAttributes.push_back(VertexInputAttribute{0u, 0u, Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(Vertex, pos))});
-    pd.vertexAttributes.push_back(VertexInputAttribute{1u, 0u, Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(Vertex, nrm))});
-    pd.vertexAttributes.push_back(VertexInputAttribute{2u, 0u, Format::R32G32_FLOAT, static_cast<uint32_t>(offsetof(Vertex, uv))});
+    pd.vertexBindings.push_back(VertexInputBinding{0u, static_cast<uint32_t>(sizeof(CubeVertex)), 0u});
+    pd.vertexAttributes.push_back(VertexInputAttribute{0u, 0u, Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(CubeVertex, pos))});
+    pd.vertexAttributes.push_back(VertexInputAttribute{1u, 0u, Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(CubeVertex, nrm))});
+    pd.vertexAttributes.push_back(VertexInputAttribute{2u, 0u, Format::R32G32_FLOAT, static_cast<uint32_t>(offsetof(CubeVertex, uv))});
 
     MaterialBuilder::FormatsHint fh{};
     fh.ColorFormats = {static_cast<uint32_t>(TextureFormat::RGBA8_UNORM)};

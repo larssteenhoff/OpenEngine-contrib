@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -86,6 +87,7 @@ class PipelineVariantCache;
 class ProjectMaterialPrewarmService;
 class RenderServices;
 class SceneDrawWarm;
+class SceneBuildPump;
 class TextureService;
 
 // Owns the material stack behind rs.Materials(). See file header.
@@ -126,8 +128,7 @@ class MaterialSystem
     // the project material warm-up.
     void BeginFrame();
     // The active render pipeline blueprint (RenderServices-owned) just swapped:
-    // drain in-flight PSO prewarm before the old nodes are destroyed and drop
-    // stale per-material variant entries. Both are material-cache concerns.
+    // drain in-flight PSO prewarm before the old nodes are destroyed.
     void OnActiveRenderPipelineChanged();
     // A different project was just opened in this process. Every material-side
     // cache keyed on the old project's paths has to go; the reasons differ per
@@ -373,6 +374,22 @@ class MaterialSystem
   private:
     // The registration/prewarm parity test reads DeriveShaderIdentity directly.
     friend class MaterialShaderIdentityTest;
+    // The scene-build pump is the one caller of PrefetchMaterialShaderSources;
+    // its test drives the shutdown rejection directly.
+    friend class SceneBuildPump;
+    friend class MaterialSourcePrefetchTest;
+
+    // Reads the surface and vertex-modifier sources `doc` names on a tracked
+    // worker, so SceneBuildPump can register the material after the reads
+    // instead of doing them first on the owner thread. Owner thread only. The
+    // future is advisory and never carries a value to read: it becomes ready
+    // when the reads finish or fail, when shutdown rejects the job (then it
+    // holds broken_promise), or at once when no worker or build context is
+    // available. Registers nothing, caches nothing, and keeps the platform's
+    // file-cache policy. The job shares the Normal compile-gate queue with the
+    // base and variant compiles (SubmitTrackedPrewarm).
+    std::shared_future<void> PrefetchMaterialShaderSources(
+        const MaterialDocument& doc, const std::filesystem::path& materialAssetPath);
 
     // The base variant key, compile inputs and drawn alpha mode of a material
     // registered from `doc` at `materialAssetPath` (before caller-injected keywords).

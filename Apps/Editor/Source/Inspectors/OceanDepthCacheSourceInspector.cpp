@@ -84,6 +84,9 @@ void AddBakeAction(const InspectorContext& ctx)
         return;
 
     InspectorUI::AddTextBlock(ctx.Parent, "Bake", "inspector-section-subheader");
+    if (ctx.ShowInfoCards)
+        InspectorUI::AddInfoCard(ctx.Parent,
+                                 "Uses the bake bounds, sea level, resolution, and render layer mask above.");
 
     auto row = std::make_unique<UIElement>();
     row->AddClass("inspector-asset-actions");
@@ -110,9 +113,9 @@ void AddBakeAction(const InspectorContext& ctx)
     Button* dirtyButtonPtr = dirtyButton.get();
     rowPtr->AddChild(std::move(dirtyButton));
 
+    // The outcome of the last bake or dirty mark; empty until one runs.
     auto status = std::make_unique<Label>();
     status->AddClass("inspector-text");
-    status->SetText("Uses the bake bounds, sea level, resolution, and render layer mask above.");
     Label* statusLabel = status.get();
     rowPtr->AddChild(std::move(status));
 

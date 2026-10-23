@@ -175,8 +175,8 @@ public:
     };
 
     // Process-wide default execution policy for SyncEntities: latched once
-    // from GE_TLAS_PARALLEL_REFIT (ON unless "0", the house kill-switch
-    // idiom) at first use, so a mid-run env change cannot split behavior.
+    // from GE_TLAS_PARALLEL_REFIT (on unless switched off, like every GE_
+    // kill switch) at first use, so a mid-run env change cannot split behavior.
     // RequestCurrent's refit uses it, and so do direct-API callers (tests), letting the whole suite run under either
     // state via the env var (review A5).
     static RefitExecution DefaultRefitExecution();

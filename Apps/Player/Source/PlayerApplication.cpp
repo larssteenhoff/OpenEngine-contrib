@@ -1,3 +1,6 @@
+#if defined(GE_PLATFORM_MOBILE)
+#include "PlayerDemoControls.h"
+#endif
 #include "PlayerApplication.h"
 
 #include "Assets/AssetManager.h"
@@ -517,6 +520,7 @@ RuntimeHostDesc PlayerApplication::MakeRuntimeHostDesc() const
     desc.HdrMetadata = m_GameConfig.hdrStaticMetadata;
     desc.LodSelection = m_GameConfig.lodSelection;
     desc.RenderQuality = m_GameConfig.renderQuality;
+    desc.SortingLayers = m_GameConfig.sortingLayers;
     desc.RenderPipeline = m_GameConfig.renderPipeline;
     desc.UIScale = m_GameConfig.uiScale;
     return desc;
@@ -667,6 +671,12 @@ void PlayerApplication::LogProgramIndexCounts()
 void PlayerApplication::Update(float64 deltaTime)
 {
     m_LastRenderDeltaTime = static_cast<float>(deltaTime);
+#if defined(GE_PLATFORM_MOBILE)
+    if (!m_DemoControls && [] { const char* value = std::getenv("GE_PLAYER_DEMO_CONTROLS"); return value && value[0] == '1'; }())
+        m_DemoControls = std::make_unique<PlayerDemoControls>();
+    if (m_DemoControls && GetInputSystem() && m_Host->GetWindow())
+        m_DemoControls->Update(*GetInputSystem(), *m_Host->GetWindow(), m_LastRenderDeltaTime);
+#endif
 
     if (auto* world = EngineCore::GetInstance().GetPrimaryWorld())
         FinishStartupResolve(*world);
@@ -733,6 +743,9 @@ void PlayerApplication::Render()
 
 void PlayerApplication::OnFrameComposited(RuntimeFrameReadback& readback)
 {
+#if defined(GE_PLATFORM_MOBILE)
+    if (m_DemoControls) m_DemoControls->Render(readback, m_LastRenderDeltaTime);
+#endif
 #if GE_PLAYER_MOVIE_RECORDER
     DeclareMovieFrame(readback);
 #endif
@@ -1279,6 +1292,9 @@ void PlayerApplication::OnShutdown()
     // shutdown frees.
     m_ScreenshotTicket.reset();
     m_ScreenshotSpace.reset();
+#if defined(GE_PLATFORM_MOBILE)
+    m_DemoControls.reset();
+#endif
     m_Host->Shutdown();
 }
 

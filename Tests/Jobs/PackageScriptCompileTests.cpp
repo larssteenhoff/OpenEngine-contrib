@@ -20,6 +20,7 @@
 #include "Scripting/PackageScriptCompile.h"
 #include "Scripting/PathResolver.h"
 #include "Scripting/ScriptManager.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -39,13 +40,9 @@ namespace fs = std::filesystem;
 namespace
 {
 
-fs::path MakeTempDir(const char* tag)
+TestUtils::ScopedTempDir MakeTempDir(const char* tag)
 {
-    const fs::path dir = fs::temp_directory_path() / (std::string("ge_pkgcs_") + tag);
-    std::error_code ec;
-    fs::remove_all(dir, ec);
-    fs::create_directories(dir, ec);
-    return dir;
+    return TestUtils::ScopedTempDir(TestUtils::MakeUniqueTempDirectory(std::string("ge_pkgcs_") + tag));
 }
 
 void WriteFileAt(const fs::path& p, const std::string& text)
@@ -81,7 +78,8 @@ PackageCodeModule MakeCsModule(const fs::path& pkgRoot, bool editorKind = false)
 
 TEST(PackageCompileRequest, JsonCarriesAssemblyNameReferencesAndDefines)
 {
-    const fs::path root = MakeTempDir("req");
+    const TestUtils::ScopedTempDir scratch = MakeTempDir("req");
+    const fs::path root = scratch.Path();
     WriteFileAt(root / "src" / "Ocean.cs", "public class Ocean {}\n");
     // Filtered: generated trees + MSBuild-generated files never reach the server.
     WriteFileAt(root / "src" / "obj" / "Gen.cs", "class Gen {}\n");
@@ -152,7 +150,8 @@ TEST(PackageCompileRequest, JsonCarriesTheScriptSurfaceList)
 // file an earlier build staged beside the engine is never referenced.
 TEST(PackageModuleCsproj, ReferencesOnlyTheScriptSurfaceList)
 {
-    const fs::path pkgRoot = MakeTempDir("csproj_surface");
+    const TestUtils::ScopedTempDir scratch = MakeTempDir("csproj_surface");
+    const fs::path pkgRoot = scratch.Path();
     const PackageCodeModule module = MakeCsModule(pkgRoot);
     const fs::path engineBin = pkgRoot / "engine";
     WriteFileAt(engineBin / "GameEngine.Scripting.Bindings.dll", "");
@@ -167,7 +166,8 @@ TEST(PackageModuleCsproj, ReferencesOnlyTheScriptSurfaceList)
 
 TEST(PackageModuleCsproj, RuntimeModuleShape)
 {
-    const fs::path pkgRoot = MakeTempDir("csproj");
+    const TestUtils::ScopedTempDir scratch = MakeTempDir("csproj");
+    const fs::path pkgRoot = scratch.Path();
     const PackageCodeModule module = MakeCsModule(pkgRoot);
     const fs::path projectDir = pkgRoot / ".Cache" / "ScriptProjects";
     const fs::path outDir = fs::path("X:/ws/ScriptAssemblies/Packages");
@@ -199,7 +199,8 @@ TEST(PackageModuleCsproj, RuntimeModuleShape)
 
 TEST(PackageModuleCsproj, EditorKindReferencesEditorAssembly)
 {
-    const fs::path pkgRoot = MakeTempDir("csproj_ed");
+    const TestUtils::ScopedTempDir scratch = MakeTempDir("csproj_ed");
+    const fs::path pkgRoot = scratch.Path();
     const PackageCodeModule module = MakeCsModule(pkgRoot, /*editorKind=*/true);
     const std::string xml = GeneratePackageModuleCsprojXml(
         module, pkgRoot / ".Cache" / "ScriptProjects", fs::path("X:/out/Packages/Editor"),
@@ -220,7 +221,8 @@ TEST(PackageCompileE2E, ReferencesAndDefinesFlowThroughCompileServer)
     const std::string pipeName = CompileServerTestHost::UniquePipeName("pkgp1");
     ASSERT_TRUE(CompileServerTestHost::StartTestCompileServer(pipeName));
 
-    const fs::path root = MakeTempDir("e2e");
+    const TestUtils::ScopedTempDir scratch = MakeTempDir("e2e");
+    const fs::path root = scratch.Path();
     WriteFileAt(root / "water" / "Waves.cs",
                 "namespace WaterCore { public static class Waves { public static int Depth() => 42; } }\n");
     WriteFileAt(root / "ocean" / "Ocean.cs",
@@ -359,7 +361,7 @@ TEST(PackageCompileE2E, UnsafeBlockCompiles)
     const std::string pipeName = CompileServerTestHost::UniquePipeName("pkgunsafe");
     ASSERT_TRUE(CompileServerTestHost::StartTestCompileServer(pipeName));
     const CompileServerResponse resp =
-        CompileOneSource(pipeName, MakeTempDir("unsafe"), "UnsafeProbe", kUnsafeSource, true);
+        CompileOneSource(pipeName, MakeTempDir("unsafe").Path(), "UnsafeProbe", kUnsafeSource, true);
     EXPECT_TRUE(resp.Success) << DescribeDiagnostics(resp);
     EXPECT_FALSE(resp.AssemblyBytes.empty());
     CompileServerTestHost::ReapHostsOnPipe(pipeName);
@@ -370,7 +372,7 @@ TEST(PackageCompileE2E, ImplicitUsingsCompile)
     const std::string pipeName = CompileServerTestHost::UniquePipeName("pkgusings");
     ASSERT_TRUE(CompileServerTestHost::StartTestCompileServer(pipeName));
     const CompileServerResponse resp =
-        CompileOneSource(pipeName, MakeTempDir("usings"), "ImplicitProbe", kImplicitUsingsSource, true);
+        CompileOneSource(pipeName, MakeTempDir("usings").Path(), "ImplicitProbe", kImplicitUsingsSource, true);
     EXPECT_TRUE(resp.Success) << DescribeDiagnostics(resp);
     EXPECT_FALSE(resp.AssemblyBytes.empty());
     CompileServerTestHost::ReapHostsOnPipe(pipeName);
@@ -381,7 +383,7 @@ TEST(PackageCompileE2E, NullableContextReportsDereferenceWarning)
     const std::string pipeName = CompileServerTestHost::UniquePipeName("pkgnullable");
     ASSERT_TRUE(CompileServerTestHost::StartTestCompileServer(pipeName));
     const CompileServerResponse resp =
-        CompileOneSource(pipeName, MakeTempDir("nullable"), "NullableProbe", kNullableSource, true);
+        CompileOneSource(pipeName, MakeTempDir("nullable").Path(), "NullableProbe", kNullableSource, true);
     EXPECT_TRUE(resp.Success) << DescribeDiagnostics(resp);
     EXPECT_TRUE(HasDiagnostic(resp.Warnings, "CS8602")) << DescribeDiagnostics(resp);
     CompileServerTestHost::ReapHostsOnPipe(pipeName);
@@ -393,7 +395,8 @@ TEST(PackageCompileE2E, OldShapeRequestKeepsItsMeaning)
 {
     const std::string pipeName = CompileServerTestHost::UniquePipeName("pkgoldshape");
     ASSERT_TRUE(CompileServerTestHost::StartTestCompileServer(pipeName));
-    const fs::path root = MakeTempDir("oldshape");
+    const TestUtils::ScopedTempDir scratch = MakeTempDir("oldshape");
+    const fs::path root = scratch.Path();
     const CompileServerResponse plain = CompileOneSource(
         pipeName, root, "PlainProbe", "namespace Parity { public class Plain { public int V() => 1; } }\n", false);
     EXPECT_TRUE(plain.Success) << DescribeDiagnostics(plain);
@@ -460,7 +463,8 @@ TEST(PackageCompileE2E, GeneratedCsprojAndServerCompileTheSameModule)
         GTEST_SKIP() << "no .NET SDK: `dotnet build` of the generated csproj cannot run";
 
     const fs::path exeDir = PathUtils::GetExecutableDirectory();
-    const fs::path pkgRoot = MakeTempDir("parity");
+    const TestUtils::ScopedTempDir scratch = MakeTempDir("parity");
+    const fs::path pkgRoot = scratch.Path();
     PackageCodeModule module = MakeCsModule(pkgRoot);
     module.AssemblyName = "ParityPack";
     module.Defines.clear();
@@ -530,7 +534,7 @@ namespace
 // A workspace with no CLR and no hot reload: only the compile orchestration runs.
 struct PrebuiltWorkspace
 {
-    explicit PrebuiltWorkspace(const char* tag) : Root(MakeTempDir(tag)), Pool(2)
+    explicit PrebuiltWorkspace(const char* tag) : Scratch(MakeTempDir(tag)), Root(Scratch.Path()), Pool(2)
     {
         ScriptsConfig config{};
         config.workspaceRoot = Root;
@@ -551,6 +555,7 @@ struct PrebuiltWorkspace
     fs::path PackageAssembly(const std::string& fileName) const { return Root / "ScriptAssemblies" / "Packages" / fileName; }
 
     Tests::ScopedHotReloadTestHooks Hooks;
+    TestUtils::ScopedTempDir Scratch;
     fs::path Root;
     JobSystem::WorkStealingThreadPool Pool;
     ScriptManager Manager;

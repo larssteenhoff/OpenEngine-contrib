@@ -134,9 +134,7 @@ TEST(SkyInspectorSections, SectionsRememberTheirExpansionRatherThanHardcodingIt)
     EXPECT_NE(helper.find("SetOnExpandedChanged"), std::string::npos)
         << "the shared helper no longer records the user's choice, so nothing is remembered";
 
-    // And nothing in the sky panel pins an expansion to a literal. The panel does call
-    // SetExpanded once, for the preset foldout, but it seeds that from a remembered flag too --
-    // so the property to hold is "no hardcoded state", not "no call".
+    // And nothing in the sky panel pins an expansion to a literal.
     const std::string panel = SkyInspector();
     ASSERT_FALSE(panel.empty());
     EXPECT_EQ(CountOf(panel, "SetExpanded(true)"), 0u)

@@ -69,6 +69,7 @@ float TreeFoldoutGlyphSizePxForTreeIconSize(float treeIconSizePx);
 
 class TreeView : public UIElement
               , public UI::Interaction::IDropTarget
+              , public UI::Interaction::IDragAutoScrollTarget
               , public IVirtualizedControl
 {
   public:
@@ -262,7 +263,10 @@ class TreeView : public UIElement
     void PerformDrop(const UI::Interaction::DropRequest& request) override;
     void SetDropPreview(const UI::Interaction::DropPreviewState& state) override;
 
-    // IVirtualizedControl (C-8 per-frame provider change pump).
+    // IDragAutoScrollTarget
+    void AutoScrollDuringDrag(float mouseX, float mouseY) override;
+
+    // IVirtualizedControl (per-frame provider change pump).
     uint64_t ProviderChangeVersion() const override { return m_Provider ? m_Provider->GetChangeVersion() : 0; }
     void EnqueuePumpWork(UIManager& ui) override;
 
@@ -305,7 +309,7 @@ class TreeView : public UIElement
     uint64_t m_LastProviderChangeVersion = 0;
     // Last provider StructureVersion the consume path acted on. Movement means a
     // structural mutation (add/remove/reorder/expandability) that must rebuild
-    // the flat row set — see ChangeTrackingProviderBase's contract note (C-7).
+    // the flat row set — see ChangeTrackingProviderBase's contract note.
     uint64_t m_LastProviderStructureVersion = 0;
     TreeChangeSet m_PendingChangeSet;
     bool m_PendingChangeSetValid = false;
@@ -323,7 +327,7 @@ class TreeView : public UIElement
     //
     // Every m_On* member is here. The other callable members
     // (m_VisibilityFilter, m_DropAccepts, m_DragPayloadBuilder) are NOT — they
-    // fall outside the m_On* naming the phase-2 census was drawn on, and remain
+    // fall outside the m_On* naming this slot set covers, and remain
     // unstamped.
     static constexpr std::uint32_t kOnItemResizeGestureSlot = 1u << 0;
     static constexpr std::uint32_t kOnExpansionChangedSlot = 1u << 1;

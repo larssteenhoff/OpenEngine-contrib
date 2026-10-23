@@ -1,5 +1,6 @@
 #include "Panels/AssetsPanel.h"
 #include "Editor/EditorTreeTitleIconVars.h"
+#include "Editor/Registries/EditorMenuRegistry.h"
 #include "Panels/InspectorPanel.h"
 #include "Panels/AddTagModal.h"
 
@@ -12,6 +13,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <utility>
 #include <nlohmann/json.hpp>
 #include "Editor/Shortcuts/EditorShortcuts.h"
 #include "Panels/SettingsPanel.h"
@@ -1769,6 +1771,28 @@ void AssetsPanel::SetToolbarGridZoomSliderValue(float gridIconPx)
     m_ToolbarGridZoomSliderUpdating = true;
     m_ToolbarGridZoomSlider->SetValue(GridToolbarSliderTFromIconPx(gridIconPx));
     m_ToolbarGridZoomSliderUpdating = false;
+}
+
+void AssetsPanel::RegisterCommands()
+{
+    constexpr std::uint32_t kCommands[] = {
+        UiReplayCommandIds::AssetsNavSandboxRoot, UiReplayCommandIds::AssetsNavSandboxSrc,
+        UiReplayCommandIds::AssetsNavSandboxDst,  UiReplayCommandIds::AssetsViewGrid,
+        UiReplayCommandIds::AssetsViewList,
+    };
+    for (const std::uint32_t commandId : kCommands)
+    {
+        Editor::EditorMenuRegistry::Get().RegisterCommand({commandId, [this, commandId](std::string* outError) {
+            std::string error;
+            if (!HandleUiReplayCommand(commandId, &error))
+                error = "the Assets browser is not ready";
+            if (error.empty())
+                return true;
+            if (outError)
+                *outError = std::move(error);
+            return false;
+        }});
+    }
 }
 
 bool AssetsPanel::HandleUiReplayCommand(std::uint32_t commandId, std::string* outError)

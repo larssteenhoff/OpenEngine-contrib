@@ -9,6 +9,7 @@
 #include "Core/Engine.h"
 #include "Assets/AssetManager.h"
 #include "Assets/AssetRegistry.h"
+#include "Assets/AssetGridDragState.h"
 #include "AssetCore/GUID.h"
 #include "AssetCore/AssetTypes.h"
 #include "UI/UIElement.h"
@@ -52,16 +53,6 @@ namespace GameEngine {
 
 // Static callback for adding bookmarks
 std::function<void(const Bookmark&)> BookmarksPanel::s_OnAddBookmark = nullptr;
-
-// Static drag state to track what's being dragged across panels
-// Defined here, declared extern in AssetsBrowserController
-struct DragState {
-    bool active = false;
-    std::filesystem::path assetPath;
-    std::string scenePath;
-    std::string entityId;
-};
-DragState g_DragState;
 
 void BookmarksPanel::SetOnAddBookmark(std::function<void(const Bookmark&)> cb)
 {
@@ -772,10 +763,8 @@ void BookmarksPanel::SetupDragAndDrop(UIElement* row, UIElement* /*dragHandle*/,
     });
     
     // Row does not start the drag; panel's kEventMouseMove does when it has capture.
-    row->RegisterEventHandler(kEventMouseMove, [this, row, index](UIEvent& e)
+    row->RegisterEventHandler(kEventMouseMove, [this](UIEvent& e)
     {
-        (void)row;
-        (void)index;
         if (!m_DragPending)
             return;
         e.Stop();
@@ -2170,7 +2159,7 @@ void BookmarksPanel::SetupDropHandlers(UIElement* container)
             return;
         }
 
-        if (!g_DragState.active || g_DragState.assetPath.empty())
+        if (!g_DragState.Active || g_DragState.AssetPath.empty())
         {
             m_AssetDropInsertIndex = -1;
             insertionIndicator->Overrides().Set(Style::Display, DisplayMode::None);
@@ -2276,13 +2265,13 @@ void BookmarksPanel::SetupDropHandlers(UIElement* container)
             }
         };
         
-        if (g_DragState.active)
+        if (g_DragState.Active)
         {
-            if (!g_DragState.assetPath.empty() && std::filesystem::exists(g_DragState.assetPath))
+            if (!g_DragState.AssetPath.empty() && std::filesystem::exists(g_DragState.AssetPath))
             {
-                std::filesystem::path path = g_DragState.assetPath;
-                g_DragState.active = false;
-                g_DragState.assetPath.clear();
+                std::filesystem::path path = g_DragState.AssetPath;
+                g_DragState.Active = false;
+                g_DragState.AssetPath.clear();
                 if (m_Context)
                 {
                     HandleAssetDrop(path, insertIdx);
@@ -2291,22 +2280,10 @@ void BookmarksPanel::SetupDropHandlers(UIElement* container)
                 e.Stop();
                 return;
             }
-            else if (!g_DragState.scenePath.empty() && !g_DragState.entityId.empty())
-            {
-                std::string scenePath = g_DragState.scenePath;
-                std::string entityId = g_DragState.entityId;
-                g_DragState.active = false;
-                g_DragState.scenePath.clear();
-                g_DragState.entityId.clear();
-                HandleEntityDrop(scenePath, entityId);
-                forceRefresh();
-                e.Stop();
-                return;
-            }
         }
         
-        g_DragState.active = false;
-        g_DragState.assetPath.clear();
+        g_DragState.Active = false;
+        g_DragState.AssetPath.clear();
     });
 }
 
@@ -2430,48 +2407,49 @@ void BookmarksPanel::RefreshBookmarks()
     }
 }
 
-void BookmarksPanel::HandleEntityDrop(const std::string& scenePath, const std::string& entityId)
+namespace
 {
-    if (scenePath.empty() || entityId.empty())
-        return;
-
-    std::string entityName = entityId;
-    ECS::World* world = EngineCore::GetInstance().EnsurePrimaryWorld();
-    if (world)
-    {
-        size_t colon = entityId.find(':');
-        ECS::EntityIndex idx = static_cast<ECS::EntityIndex>(std::stoul(entityId.substr(0, colon)));
-        ECS::EntityVersion ver = (colon != std::string::npos)
-            ? static_cast<ECS::EntityVersion>(std::stoul(entityId.substr(colon + 1)))
-            : 0;
-        ECS::EntityHandle h(idx, ver);
-        if (world->IsValid(h))
-        {
-            if (auto* n = world->GetComponent<Components::Name>(h))
-                if (!n->View().empty())
-                    entityName = std::string(n->View());
-        }
-    }
-
+// Entity bookmark for `handle` in the scene at `scenePath`, named after the
+// entity's Name component, or "Entity" when it has none or the handle is stale.
+Bookmark MakeEntityBookmark(const ECS::World* world, ECS::EntityHandle handle, const std::string& scenePath)
+{
     Bookmark bookmark;
     bookmark.Type = BookmarkType::Entity;
-    bookmark.Reference = scenePath + "|" + entityId;
-    bookmark.Name = entityName;
-    bookmark.IconPath = "";
+    bookmark.Reference = scenePath + "|" + std::to_string(handle.index) + ":" + std::to_string(handle.version);
+    bookmark.Name = "Entity";
+    if (world && world->IsValid(handle))
+    {
+        if (const auto* n = world->GetComponent<Components::Name>(handle); n && !n->View().empty())
+            bookmark.Name = std::string(n->View());
+    }
+    return bookmark;
+}
+} // namespace
 
-    AddBookmark(bookmark);
+std::string BookmarksPanel::GetCurrentScenePathString() const
+{
+    if (!m_GetCurrentScenePath)
+        return {};
+    auto opt = m_GetCurrentScenePath();
+    return opt.has_value() ? opt->string() : std::string();
+}
+
+void BookmarksPanel::AddEntityBookmarks(const std::vector<ECS::EntityHandle>& entities)
+{
+    ECS::World* world = EngineCore::GetInstance().EnsurePrimaryWorld();
+    if (!world)
+        return;
+    const std::string scenePath = GetCurrentScenePathString();
+    for (const ECS::EntityHandle& handle : entities)
+    {
+        if (world->IsValid(handle))
+            AddBookmark(MakeEntityBookmark(world, handle, scenePath));
+    }
 }
 
 void BookmarksPanel::HandleEntityPayloadDrop(const std::vector<std::uint64_t>& treeIds, int insertIndex)
 {
-    std::string scenePath;
-    if (m_GetCurrentScenePath)
-    {
-        auto opt = m_GetCurrentScenePath();
-        if (opt.has_value())
-            scenePath = opt->string();
-    }
-
+    const std::string scenePath = GetCurrentScenePathString();
     ECS::World* world = EngineCore::GetInstance().EnsurePrimaryWorld();
     int at = (insertIndex >= 0) ? insertIndex : static_cast<int>(m_Bookmarks.size());
 
@@ -2481,25 +2459,8 @@ void BookmarksPanel::HandleEntityPayloadDrop(const std::vector<std::uint64_t>& t
         uint32_t raw = static_cast<uint32_t>(treeIds[i]);
         ECS::EntityIndex idx = static_cast<ECS::EntityIndex>(raw & ECS::kEntityIndexMask);
         ECS::EntityVersion ver = static_cast<ECS::EntityVersion>((raw >> ECS::kEntityIndexBits) & ECS::kEntityVersionMask);
-        ECS::EntityHandle handle(idx, ver);
-
-        std::string entityName = "Entity";
-        if (world && world->IsValid(handle))
-        {
-            if (auto* n = world->GetComponent<Components::Name>(handle))
-                if (!n->View().empty())
-                    entityName = std::string(n->View());
-        }
-
-        std::string entityId = std::to_string(idx) + ":" + std::to_string(ver);
-
-        Bookmark bookmark;
-        bookmark.Type = BookmarkType::Entity;
-        bookmark.Reference = scenePath + "|" + entityId;
-        bookmark.Name = entityName;
-        bookmark.IconPath = "";
-
-        AddBookmarkAt(bookmark, static_cast<size_t>(at + static_cast<int>(i)));
+        AddBookmarkAt(MakeEntityBookmark(world, ECS::EntityHandle(idx, ver), scenePath),
+                      static_cast<size_t>(at + static_cast<int>(i)));
     }
 }
 

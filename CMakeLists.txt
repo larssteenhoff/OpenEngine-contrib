@@ -231,6 +231,16 @@ endif()
 # flip, dlopen would fail at startup on macOS/Linux.
 # Windows has no equivalent — DLLs in the same directory as the exe are
 # found via the standard DLL search order.
+# Native mobile hosts use SDL's Android/UIKit lifecycle and surface ownership.
+set(GE_MOBILE OFF)
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(GE_MOBILE ON)
+    add_compile_definitions(GE_PLATFORM_MOBILE=1)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        add_compile_definitions(GE_PLATFORM_IOS=1)
+    endif()
+endif()
+
 if(APPLE)
     set(CMAKE_BUILD_RPATH "@executable_path;@loader_path")
     set(CMAKE_INSTALL_RPATH "@executable_path;@loader_path")
@@ -898,9 +908,13 @@ endfunction()
 if(WIN32)
 	add_definitions(-DPLATFORM_WINDOWS)
 	set(PLATFORM_LIBS "")
+elseif(ANDROID)
+    add_definitions(-DPLATFORM_ANDROID)
 elseif(UNIX AND NOT APPLE)
 	add_definitions(-DPLATFORM_LINUX)
 	set(PLATFORM_LIBS pthread dl)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # GE_PLATFORM_IOS is defined before module configuration.
 elseif(APPLE)
 	add_definitions(-DPLATFORM_MACOS)
 	set(PLATFORM_LIBS pthread dl)
@@ -1086,12 +1100,14 @@ if(EMSCRIPTEN)
     add_subdirectory(Engine/Modules/Noise)
     add_subdirectory(Engine/Modules/Image)
     add_subdirectory(Engine/Modules/Memory)
+    add_subdirectory(Engine/Modules/Sprite2D)
     add_subdirectory(Engine/Modules/Animation)
     add_subdirectory(Engine/ECSModules/Components)
     add_subdirectory(Engine/Modules/ECS)
     add_subdirectory(Engine/Modules/Platform)
     add_subdirectory(Engine/Modules/FileSystem)
     add_subdirectory(Engine/Modules/FileWatcher)
+    add_subdirectory(Engine/Modules/TileMapECS)
     add_subdirectory(Engine/Modules/Scheduler)
     add_subdirectory(Engine/Modules/NumericExpression)
     add_subdirectory(Engine/Modules/AssetDatabase)
@@ -1101,6 +1117,7 @@ if(EMSCRIPTEN)
     add_subdirectory(Engine/Modules/Physics)
     add_subdirectory(Engine/Modules/PhysicsECS)
     add_subdirectory(Engine/Modules/Pathfinding)
+    add_subdirectory(Engine/Modules/Localization)
     add_subdirectory(Engine/Modules/Text)
     add_subdirectory(Engine/Modules/Rendering)
     add_subdirectory(Engine/Modules/Graph)
@@ -1130,6 +1147,7 @@ if(EMSCRIPTEN)
     add_subdirectory(Engine/Modules/SplineGeometry)
     add_subdirectory(Engine/Modules/SplineLayout)
     add_subdirectory(Engine/Modules/SplineECS)
+    add_subdirectory(Engine/Modules/TileMap)
     add_subdirectory(Engine/Modules/MarkupECS)
     add_subdirectory(Engine/Modules/PathfindingECS)
     # This list must cover every entry of Engine/CMakeLists.txt's
@@ -1170,6 +1188,7 @@ add_subdirectory(Engine/Modules/JobSystem)     # Task execution and dependency m
 # Mathematics: shared math primitives (e.g., Ray3D) for Engine + Editor + runtime
 add_subdirectory(Engine/Modules/Mathematics)
 add_subdirectory(Engine/Modules/Serialization)
+add_subdirectory(Engine/Modules/Sprite2D)      # Sprite frame assets and 2D playback
 # Noise depends on Types: shared CPU noise primitives for terrain and any other sampler
 add_subdirectory(Engine/Modules/Noise)
 # Image depends on Logger: the one CPU image decode, resample and encode (owns stb)
@@ -1238,6 +1257,7 @@ add_subdirectory(Engine/Modules/Spline)
 add_subdirectory(Engine/Modules/SplineGeometry)
 add_subdirectory(Engine/Modules/SplineLayout)
 add_subdirectory(Engine/Modules/SplineECS)
+add_subdirectory(Engine/Modules/TileMap)
 add_subdirectory(Engine/Modules/MarkupECS)
 
 # Rendering post-process modules
@@ -1253,6 +1273,7 @@ include(cmake/Packages.cmake)
 
 add_subdirectory(Engine)
 # Always build Rendering; gate only UI and Editor
+add_subdirectory(Engine/Modules/Localization)
 add_subdirectory(Engine/Modules/Text) # Text stack (FreeType/HarfBuzz/SDF)
 
 add_subdirectory(Engine/Modules/Rendering) # Modern GPU-driven rendering library
@@ -1261,6 +1282,7 @@ add_subdirectory(Engine/Modules/Rendering) # Modern GPU-driven rendering library
 # establishes. Standalone in C1 (module + kernels + tests); Engine/ECS wiring is C2.
 add_subdirectory(Engine/Modules/CBTTerrain)
 add_subdirectory(Engine/Modules/CBTTerrainECS) # CBT terrain Engine integration (feature/node/ECS, C3)
+add_subdirectory(Engine/Modules/TileMapECS)
 add_subdirectory(Engine/Modules/Scheduler) # Reusable time-based scheduler module
 add_subdirectory(Engine/Modules/NumericExpression) # TinyExpr-backed math expression evaluation
 add_subdirectory(Engine/Modules/UI) # UI system module
@@ -1445,6 +1467,24 @@ if(BUILD_TESTING)
         set_tests_properties(McpRgpCaptureGate PROPERTIES TIMEOUT 600 LABELS "Editor")
     else()
         message(STATUS "node not found - McpRgpCaptureGate test not registered")
+    endif()
+endif()
+
+# Tool gate: build_engine, run_tests, launch_editor and editor_full_cycle run the
+# command named by GE_MCP_TOOL_GATE first, refuse (echoing its output) when it
+# exits non-zero, and run when it exits 0 or is unset. Drives the CLI against an
+# empty repository root with gate commands of its own, so nothing is built or
+# launched. Same 600s budget rationale as
+# McpEditorEndpointReport: the first run may build mcp/dist.
+if(BUILD_TESTING)
+    find_program(GE_NODE_EXECUTABLE NAMES node node.exe)
+    if(GE_NODE_EXECUTABLE)
+        add_test(NAME McpToolGate
+            COMMAND ${GE_NODE_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/Tests/Mcp/tool-gate-check.mjs)
+        set_tests_properties(McpToolGate PROPERTIES TIMEOUT 600 LABELS "Editor")
+    else()
+        message(STATUS "node not found - McpToolGate test not registered")
     endif()
 endif()
 

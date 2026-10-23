@@ -396,13 +396,13 @@ void SkyEnvironmentSystem::Update(ECS::World& world, float32 deltaTime)
 
     {
         world.Query<ECS::Write<Components::SkyEnvironment>>()
-            .Each([&](Components::SkyEnvironment& env) {
+            .Each([&](ECS::Writable<Components::SkyEnvironment> env) {
                 ++environmentCount;
                 if (foundEnvironment)
                     return;
-                if (env.AnimateTimeOfDay)
-                    TickAnimatedTimeOfDay(env, deltaTime);
-                comp = env;
+                if (env->AnimateTimeOfDay)
+                    TickAnimatedTimeOfDay(env.Mutable(), deltaTime);
+                comp = env.Get();
                 foundEnvironment = true;
             });
     }

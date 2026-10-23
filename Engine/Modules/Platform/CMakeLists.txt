@@ -4,14 +4,13 @@ project(Platform LANGUAGES CXX)
 
 set(PLATFORM_SOURCES
 	Source/Capabilities.cpp
-	Source/Platform.cpp
 	Source/Thread.cpp
 )
 
 # Desktop-only implementations: GLFW clipboard and gamepad mapping, OS shell
 # integration, curl HTTP. The wasm list below carries a web-shaped counterpart
 # for each.
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND NOT GE_MOBILE)
 	list(APPEND PLATFORM_SOURCES
 		Source/Window.cpp
 		Source/Display.cpp
@@ -43,7 +42,9 @@ else()
 endif()
 
 # Platform-specific sources
-if(EMSCRIPTEN)
+if(GE_MOBILE)
+    include(Mobile.cmake)
+elseif(EMSCRIPTEN)
 	# SystemMetrics reuses the Linux TU's constant defaults (600 ms caret
 	# half-period, 400 ms double-click) until CSS-driven metrics arrive with
 	# the browser UI slice.
@@ -71,6 +72,7 @@ if(EMSCRIPTEN)
 		Source/Clipboard_Web.cpp
 		Source/Gamepad_Web.cpp
 		Source/Shell_Web.cpp
+		Source/WebFileDownload.cpp
 		Source/WebView_Web.cpp
 		Source/WebEnvironment_Web.cpp
 		Source/WebPersistentStorage.cpp
@@ -116,9 +118,8 @@ add_library(Platform OBJECT ${PLATFORM_SOURCES})
 
 target_compile_features(Platform PUBLIC cxx_std_20)
 
-# Public headers now live under Engine/Modules/Platform/Include
-# Keep Engine/Include for existing headers like Platform/Platform.h
-# so includes like "Platform/Platform.h" continue to work.
+# Public headers live under Engine/Modules/Platform/Include; Engine/Include
+# still holds Platform/Thread.h.
 target_include_directories(Platform
     PUBLIC
         ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include
@@ -130,11 +131,15 @@ target_include_directories(Platform
 )
 
 # Dependencies
-# Logger is used by Platform.cpp
+if(GE_MOBILE)
+    find_package(SDL3 CONFIG REQUIRED)
+    find_package(CURL REQUIRED)
+    target_link_libraries(Platform PUBLIC SDL3::SDL3 PRIVATE CURL::libcurl)
+endif()
 target_link_libraries(Platform PUBLIC Logger Types)
 # MenuIconBitmap_Win32 decodes menu icons.
 target_link_libraries(Platform PRIVATE Image)
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND NOT GE_MOBILE)
     find_package(glfw3 CONFIG REQUIRED)
     find_package(CURL REQUIRED)
     target_link_libraries(Platform PRIVATE glfw CURL::libcurl)
@@ -156,13 +161,13 @@ endif()
 	    target_link_libraries(Platform PRIVATE unofficial::webview2::webview2)
  endif()
 
-if (APPLE)
+if (APPLE AND NOT GE_MOBILE)
     target_link_libraries(Platform PRIVATE "-framework CoreText" "-framework CoreFoundation" "-framework Cocoa" "-framework WebKit"
         "-framework AVFoundation" "-framework Speech")
 endif()
 
 # Emscripten sets UNIX; keep it out of the Linux desktop-integration probes.
-if (UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+if (UNIX AND NOT APPLE AND NOT EMSCRIPTEN AND NOT GE_MOBILE)
     if (CMAKE_CROSSCOMPILING)
         # Do not let CMake pick a host-architecture Fontconfig library while
         # cross-compiling a Linux player from an Apple Silicon Docker host.
@@ -220,6 +225,19 @@ endif()
 
 # Tests for Platform module (ContextMenuBuilder, etc.)
 if(BUILD_TESTING)
+    if(EMSCRIPTEN)
+        add_executable(WebFileDownloadTests Tests/WebFileDownloadTests.cpp Source/WebFileDownload.cpp)
+        target_include_directories(WebFileDownloadTests PRIVATE Include)
+        target_compile_features(WebFileDownloadTests PRIVATE cxx_std_20)
+        target_link_options(WebFileDownloadTests PRIVATE "-sENVIRONMENT=node" "-sEXIT_RUNTIME=1")
+        add_test(NAME WebFileDownloadTests COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:WebFileDownloadTests>)
+        add_executable(WebFilePickerTests Tests/WebFilePickerTests.cpp Source/Shell_Web.cpp)
+        target_include_directories(WebFilePickerTests PRIVATE Include Source ../Logger/Include ../Events/Include ../Types/Include)
+        target_compile_features(WebFilePickerTests PRIVATE cxx_std_20)
+        target_link_options(WebFilePickerTests PRIVATE "-sENVIRONMENT=node" "-sEXIT_RUNTIME=1" "-sASYNCIFY" "-sWASMFS" "-sFORCE_FILESYSTEM=1")
+        add_test(NAME WebFilePickerTests COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:WebFilePickerTests>)
+        set_tests_properties(WebFileDownloadTests WebFilePickerTests PROPERTIES LABELS "Platform;Web" TIMEOUT 30)
+    endif()
     find_package(GTest REQUIRED)
 
     add_executable(PlatformContextMenuTests

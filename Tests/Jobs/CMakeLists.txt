@@ -468,6 +468,7 @@ target_link_libraries(FileChangeTrackerTests
     GTest::GTest
     GTest::Main
 )
+target_include_directories(FileChangeTrackerTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 set_target_properties(FileChangeTrackerTests PROPERTIES
     CXX_STANDARD 20
@@ -495,6 +496,7 @@ target_link_libraries(DependencyGraphAnalyzerTests
     GTest::GTest
     GTest::Main
 )
+target_include_directories(DependencyGraphAnalyzerTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 set_target_properties(DependencyGraphAnalyzerTests PROPERTIES
     CXX_STANDARD 20
@@ -522,6 +524,7 @@ target_link_libraries(IncrementalCompilationTests
     GTest::GTest
     GTest::Main
 )
+target_include_directories(IncrementalCompilationTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 set_target_properties(IncrementalCompilationTests PROPERTIES
     CXX_STANDARD 20
@@ -557,6 +560,7 @@ target_link_libraries(HybridCompilationIntegrationTests
     GTest::GTest
     GTest::Main
 )
+target_include_directories(HybridCompilationIntegrationTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 set_target_properties(HybridCompilationIntegrationTests PROPERTIES
     CXX_STANDARD 20
@@ -584,6 +588,7 @@ target_link_libraries(HybridCompilationBenchmarkTests
     GTest::GTest
     GTest::Main
 )
+target_include_directories(HybridCompilationBenchmarkTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 set_target_properties(HybridCompilationBenchmarkTests PROPERTIES
     CXX_STANDARD 20

@@ -641,6 +641,7 @@ add_executable(ScriptingAbiIntegrationTests
     ScriptingAbi/HotReloadRobustnessTests.cpp
     ScriptingAbi/ReloadPipelineStressTests.cpp
     ScriptingAbi/NegativeCallbackTests.cpp
+    ScriptingAbi/ScriptingAbiCapabilitiesMaskTests.cpp
     Integration/ScriptingAbiNativeHotReloadFlowTests.cpp
     Integration/ScriptingAbiHotReloadMetricsTests.cpp
     Integration/ScriptingAbiAbiHandshakeTests.cpp

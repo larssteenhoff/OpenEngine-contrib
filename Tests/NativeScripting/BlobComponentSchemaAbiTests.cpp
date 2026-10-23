@@ -30,6 +30,7 @@
 #include "Scene/SceneIO.h"
 #include "Scene/SceneSchemaRegistry.h"
 #include "Scripting/ECSABI.h"
+#include "TestTempDir.h"
 
 namespace
 {
@@ -105,8 +106,12 @@ class BlobComponentSchemaAbiTests : public ::testing::Test
 
     std::filesystem::path TempScene(const char* name) const
     {
-        return std::filesystem::temp_directory_path() / name;
+        return m_TempDir.Path() / name;
     }
+
+  private:
+    GameEngine::TestUtils::ScopedTempDir m_TempDir{
+        GameEngine::TestUtils::MakeUniqueTempDirectory("ge_blob_schema_abi")};
 };
 
 // Mirror of a C# component: {float Health; int Ammo; bool Alive; <pad>; Vector3 Position}.

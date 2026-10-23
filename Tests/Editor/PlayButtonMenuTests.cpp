@@ -11,6 +11,7 @@
 #include "Editor/Settings/AudioEnabledSettings.h"
 #include "Editor/Settings/SettingsStore.h"
 #include "PlayMode/PlayButtonMenu.h"
+#include "UI/EditorIcons.h"
 
 #include "Assets/AssetManager.h"
 #include "Audio/AudioSystem.h"
@@ -102,7 +103,9 @@ TEST_F(PlayButtonMenuTest, AudioEnabledItemIsCheckedOnAFreshProfile)
 
     ASSERT_EQ(items.size(), 1u);
     EXPECT_EQ(items[0].Path, kAudioEnabledLabel);
+    EXPECT_EQ(items[0].State().IconPath, EditorIcons::kAudioEnabled);
     ASSERT_TRUE(items[0].State);
+    EXPECT_TRUE(items[0].State().Enabled);
     EXPECT_TRUE(items[0].State().Checked) << "audio is enabled until the user turns it off";
     EXPECT_FALSE(audio.IsMasterMuted());
     EXPECT_FALSE(SavedAudioEnabledPreference().has_value()) << "a fresh profile saves nothing";
@@ -124,11 +127,15 @@ TEST_F(PlayButtonMenuTest, AudioEnabledItemTogglesTheAudioSystemAndThePreference
     EXPECT_TRUE(audio.IsMasterMuted());
     EXPECT_EQ(SavedAudioEnabledPreference(), std::optional<bool>(false));
     EXPECT_FALSE(item->State().Checked);
+    EXPECT_EQ(item->State().IconPath, EditorIcons::kAudioMuted) << "the same item set shows the live icon";
+    EXPECT_TRUE(item->State().Enabled) << "muted audio remains available to unmute";
 
     item->OnActivate();
     EXPECT_FALSE(audio.IsMasterMuted());
     EXPECT_EQ(SavedAudioEnabledPreference(), std::optional<bool>(true));
     EXPECT_TRUE(item->State().Checked);
+    EXPECT_EQ(item->State().IconPath, EditorIcons::kAudioEnabled);
+    EXPECT_TRUE(item->State().Enabled);
 
     EXPECT_EQ(reported, (std::vector<bool>{false, true})) << "the toolbar tooltip hears every toggle";
 }
@@ -144,6 +151,11 @@ TEST_F(PlayButtonMenuTest, SavedDisabledAudioIsAppliedToTheNextSessionsAudioSyst
     ASSERT_FALSE(nextSession.IsMasterMuted());
     EXPECT_FALSE(Editor::AudioEnabledSettings::ApplySaved(&nextSession));
     EXPECT_TRUE(nextSession.IsMasterMuted());
+    const auto items = Editor::PlayButtonMenuItems(&nextSession, {});
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(items[0].State().IconPath, EditorIcons::kAudioMuted);
+    EXPECT_FALSE(items[0].State().Checked);
+    EXPECT_TRUE(items[0].State().Enabled);
 }
 
 TEST_F(PlayButtonMenuTest, UnsetPreferenceLeavesAudioEnabled)
@@ -164,6 +176,10 @@ TEST_F(PlayButtonMenuTest, AudioEnabledItemWorksWithoutAnAudioSystem)
     item->OnActivate();
     EXPECT_EQ(SavedAudioEnabledPreference(), std::optional<bool>(false));
     EXPECT_FALSE(item->State().Checked) << "with audio disabled the check mark reads the preference";
+    const auto mutedMenu = Editor::PlayButtonMenuItems(nullptr, {});
+    ASSERT_EQ(mutedMenu.size(), 1u);
+    EXPECT_EQ(mutedMenu[0].State().IconPath, EditorIcons::kAudioMuted);
+    EXPECT_TRUE(mutedMenu[0].State().Enabled);
 }
 
 } // namespace

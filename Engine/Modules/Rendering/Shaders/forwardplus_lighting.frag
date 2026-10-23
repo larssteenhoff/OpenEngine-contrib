@@ -57,16 +57,7 @@ layout(set = 0, binding = 5, std140) uniform ViewParamsBlock
 
 float Saturate(float x) { return clamp(x, 0.0, 1.0); }
 
-float ViewZFromDepth_ReverseZ_LH(float depth, float zNear, float zFar)
-{
-    // For MakePerspectiveLH_ZO_ReverseZ:
-    //   depth = -n/(f-n) + (n*f/(f-n)) * (1/z)
-    //   => z = n*f / (depth*(f-n) + n)
-    // Guard against depth == 0 (cleared / sky / unwritten) to avoid div-by-zero;
-    // return a very-large finite value so downstream cluster slicing won't NaN.
-    const float denom = max(depth * (zFar - zNear) + zNear, 1e-6);
-    return (zNear * zFar) / denom;
-}
+#include "Includes/cluster_projection.glsl"
 
 void main()
 {
@@ -113,7 +104,9 @@ void main()
     float zFar = ViewParams.ge_nearFar.y;
     if (zFar <= zNear + 1e-4) zFar = zNear + 1000.0;
 
-    const float viewZ = ViewZFromDepth_ReverseZ_LH(depth, zNear, zFar);
+    const float viewZ = GE_ClusterViewZ(depth,
+        ViewParams.ge_invProj[2][2], ViewParams.ge_invProj[3][2],
+        ViewParams.ge_invProj[2][3], ViewParams.ge_invProj[3][3]);
     const float invLogRatio = ViewParams.ge_nearFar.z;
     const float t = clamp(log(viewZ / zNear) * invLogRatio, 0.0, 0.999999);
     const uint slice = uint(floor(t * float(depthSlices)));

@@ -1,6 +1,7 @@
 #include "Inspectors/SkyboxInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
 
 #include "Components/Rendering/Skybox.h"
 #include "Core/Engine.h"
@@ -21,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace GameEngine
@@ -246,6 +248,16 @@ void ChangeSkyboxResolution(ECS::World* world,
 
 void RegisterSkyboxInspector()
 {
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Skybox";
+        traits.Category = "Rendering";
+        traits.Tooltip = "HDRI skybox rendered as the scene background";
+        traits.InspectorIconClass = "inspector-section-icon-sky";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::Skybox>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())

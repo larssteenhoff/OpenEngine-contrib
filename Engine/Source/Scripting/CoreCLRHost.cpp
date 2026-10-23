@@ -1,5 +1,6 @@
 #include "Scripting/CoreCLRHost.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include <algorithm>
 #include <chrono>
 #include <mutex>
@@ -13,9 +14,9 @@
 #include <atomic>
 #include <cstdint>
 
-#include <cstdlib> // getenv/atoi for configurable async delay
 #include <cstring> // strlen for UCO name lengths
 
+#include "Core/Application.h" // PathUtils
 #include "Scripting/PathResolver.h"
 
 #include "Scripting/ScriptingABI.h"
@@ -50,7 +51,7 @@ static void Host_DebugWrite(const char* msg)
 {
     try
     {
-        auto p = std::filesystem::current_path() / "coreclrhost-debug.txt";
+        auto p = GameEngine::PathUtils::GetExecutableDirectory() / "coreclrhost-debug.txt";
         std::ofstream ofs(p, std::ios::app | std::ios::out);
         ofs << msg << "\n";
     }
@@ -72,23 +73,15 @@ static std::atomic<int32_t> g_dbgUnloadDomainCount{0};
 #if defined(NETHOST_AVAILABLE)
 static std::filesystem::path ResolveCoreBridgePath(const std::filesystem::path& preferred)
 {
-    // Hardened resolver: try preferred via centralized resolver, then default resolver, then CWD
+    // Hardened resolver: try preferred via centralized resolver, then default resolver.
+    // Both anchor to the engine managed directory; the working directory is never probed.
     namespace SP = GameEngine::ScriptingPaths;
     std::filesystem::path p = SP::ResolveCoreBridgeDll(preferred);
     if (!p.empty() && std::filesystem::exists(p))
         return p;
 
-    // Fallback: try without preferred (default probes)
-    p = SP::ResolveCoreBridgeDll();
-    if (!p.empty() && std::filesystem::exists(p))
-        return p;
-
-    // Final fallback: current working directory
-    std::filesystem::path cwdCand = std::filesystem::current_path() / "GameEngine.CoreBridge.dll";
-    if (std::filesystem::exists(cwdCand))
-        return cwdCand;
-
-    return p; // may be empty
+    // Fallback: try without preferred (default probes); empty when nothing is found.
+    return SP::ResolveCoreBridgeDll();
 }
 
 namespace
@@ -1026,7 +1019,7 @@ int32 CoreCLRHost::InvokeInDomain(uint64 domain, const char* methodNameUtf8, uin
     using invoke_fn = int32 (CORECLR_DELEGATE_CALLTYPE*)(uint64, void*, uint32, int32*);
 
     // Optional diagnostics: dump HRM state only if GE_DUMP_HRM=1
-    if (std::getenv("GE_DUMP_HRM") && std::strcmp(std::getenv("GE_DUMP_HRM"), "0") != 0)
+    if (Platform::EnvironmentSwitchEnabled("GE_DUMP_HRM", false))
     {
         using dump_fn = int32 (CORECLR_DELEGATE_CALLTYPE*)();
         if (void* tmpDump = GetCoreBridgeExport(GE_HOST_STR("DebugDumpHotReloadState")))
@@ -1334,12 +1327,6 @@ void* CoreCLRHost::GetManagedFunction(const String& assemblyName,
         return nullptr;
     return fn;
 #endif
-}
-
-String CoreCLRHost::GetRuntimeVersion() const
-{
-    // TODO: Implement runtime version retrieval
-    return "Unknown";
 }
 
 bool CoreCLRHost::LoadHostfxr()

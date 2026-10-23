@@ -15,7 +15,9 @@
 #include "EditorPanelManager.h"
 #include "EditorWindowBootstrap.h"
 #include "Core/WindowPlatformApi.h"
+#include "Editor/EditorPaths.h"
 #include "Editor/Settings/EditorHiDpiPlatformSettings.h"
+#include "Editor/Settings/EditorTextBlend.h"
 #include "Editor/Settings/RenderPipelineSettings.h"
 #include "Editor/Settings/RenderProjectSettings.h"
 #include "Engine/Rendering/RenderDeviceContext.h"
@@ -39,7 +41,8 @@
 #include "UI/UIManager.h"
 #include "Input/InputSystem.h"
 #include "Panels/SettingsPanel.h"
-#include "Editor/Settings/InfoCardAppearanceSettings.h"
+#include "Editor/Settings/EditorAppearance.h"
+#include "Editor/Settings/ScriptEditorSettings.h"
 #include "UI/EditorUIFontSettings.h"
 #include "UI/UICursorHelper.h"
 
@@ -149,6 +152,10 @@ void EditorApplication::AttachDeferredNativeToolWindows()
         }
         m_Windows.emplace_back(std::move(win));
         EditorWindowContext* attached = m_Windows.back().get();
+        // Native tool windows (the colour picker) follow the appearance
+        // settings like every other editor window.
+        if (attached && attached->ui)
+            Editor::ApplyEditorAppearance(attached->ui.get());
         // Match UndockToFloatingWindow: shared-device windows must activate their swapchain target
         // before UIManager can measure against the correct dimensions; without a prime Update,
         // the first presented frame can show cleared/uninitialized color or stale compositor content.
@@ -321,10 +328,6 @@ void EditorApplication::UndockToFloatingWindow(const std::string& panelId)
         ctx->window->SetOwnedBy(ownerWindow);
         ctx->window->SetShowInTaskbar(m_FloatingShowInTaskbar);
     }
-    if (m_FloatingFullCustomChrome)
-    {
-        ctx->window->SetDecorated(false);
-    }
 
     // Capture actual framebuffer size (pixels) for swapchain creation.
     // This avoids creating a swapchain with DIP sizes on HiDPI monitors.
@@ -340,6 +343,7 @@ void EditorApplication::UndockToFloatingWindow(const std::string& panelId)
     desc.preferredAPI = LoadPreferredGraphicsApi();
     desc.enableSwapchain = true;
     desc.persistPipelineCache = true;
+    desc.pipelineCacheDirectory = (Editor::GetEditorGlobalPaths().userCacheRoot / "PipelineCache").string();
     desc.applicationName = GetConfig().Name;
     if (Engine::Renderer::ShouldEnableVkValidation())
     {
@@ -477,26 +481,17 @@ void EditorApplication::UndockToFloatingWindow(const std::string& panelId)
                                              GameEngine::kAssetSourceAliasEditor);
     }
 
-    // Keep floating windows on the same accent palette as the main editor UI.
-    // Apply after theme attach so accent overrides win by precedence.
-    ApplySavedAccentStyle(ctx->ui.get());
-    SettingsPanel::ApplySavedCompactComponentHeadersStyle(ctx->ui.get());
+    // Keep floating windows on the same appearance as the main editor UI.
+    // Apply after theme attach so the appearance overrides win by precedence.
+    Editor::ApplyEditorAppearance(ctx->ui.get());
     SettingsPanel::ApplySavedHierarchyIconsColoredStyle(ctx->ui.get());
     SettingsPanel::ApplySavedHierarchyModelThumbsAlwaysColoredStyle(ctx->ui.get());
-    SettingsPanel::ApplySavedGraySlidersStyle(ctx->ui.get());
-    SettingsPanel::ApplySavedToggleStyle(ctx->ui.get());
-    SettingsPanel::ApplySavedTabIconsStyle(ctx->ui.get());
-    SettingsPanel::ApplySavedPopupShadowStyle(ctx->ui.get());
-    Editor::InfoCardAppearanceSettings::Get().ApplyTo(ctx->ui.get());
-    SettingsPanel::ApplySavedValueBoxHeightStyle(ctx->ui.get());
     SettingsPanel::ApplySavedNodeGraphHeaderAlignmentStyle(ctx->ui.get());
-    SettingsPanel::ApplySavedTextSubpixelAA(ctx->ui.get());
-    SettingsPanel::ApplySavedTextContrast(ctx->ui.get());
-    SettingsPanel::ApplySavedTextSmoothingGamma(ctx->ui.get());
+    Editor::ApplyEditorTextBlend(*ctx->ui);
     Editor::ApplySavedEditorFontPreferences(ctx->ui.get());
     // After the font preferences: the line height resolves against the script
     // face those select.
-    SettingsPanel::ApplySavedScriptLineHeightStyle(ctx->ui.get());
+    Editor::ScriptEditorSettings::Get().ApplyTo(ctx->ui.get());
     if (UIElement* floatingRoot = ctx->ui ? ctx->ui->GetRootElement() : nullptr)
     {
         ctx->ui->MarkStyleDirtySubtree(floatingRoot);

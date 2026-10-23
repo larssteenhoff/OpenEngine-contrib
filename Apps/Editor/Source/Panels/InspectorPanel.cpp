@@ -77,6 +77,7 @@
 #include "Inspectors/InspectorEntityActivity.h"
 #include "Inspectors/PendingAssetHeader.h"
 #include "Graph/GraphInspectorRows.h"
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Inspectors/InspectorSectionHosts.h"
 #include "Inspectors/InspectorUIHelpers.h"
@@ -96,14 +97,8 @@
 #include "Assets/AssetRegistry.h"
 #include "Audio/AudioSystem.h"
 #include "Components/Hierarchy.h"
-#include "Components/Measure/MeasureComponent.h"
 #include "Components/Name.h"
-#include "Components/Rendering/Camera.h"
-#include "Components/Rendering/Light.h"
-#include "Components/Rendering/MeshGPUData.h"
 #include "Components/Rendering/MeshRenderer.h"
-#include "Components/Rendering/SkinnedMeshRenderer.h"
-#include "Components/RuntimeOnlyEntity.h"
 #include "Components/Transform.h"
 #include "Core/Engine.h"
 #include "Engine/Rendering/RenderServices.h"
@@ -114,58 +109,6 @@
 #include "ECS/UnresolvedComponentStore.h"  // preserved (unloaded) component rows
 #include "ECS/World.h"
 
-// Physics authoring components (for minimal Add Component UX)
-#include "PhysicsECS/Components/BoxColliderShape.h"
-#include "PhysicsECS/Components/CapsuleColliderShape.h"
-#include "PhysicsECS/Components/CharacterController.h"
-#include "PhysicsECS/Components/HeightFieldColliderShape.h"
-#include "PhysicsECS/Components/PhysicsBody.h"
-#include "PhysicsECS/Components/PhysicsCollider.h"
-#include "PhysicsECS/Components/PhysicsColliderOwner.h"
-#include "PhysicsECS/Components/PhysicsWorldSettingsComponent.h"
-#include "PhysicsECS/Components/PlaneColliderShape.h"
-#include "PhysicsECS/Components/SphereColliderShape.h"
-
-#include "Components/Animation/AnimatedNodeRef.h"
-#include "Components/Animation/AnimatedSprite2D.h"
-#include "Components/Animation/Animator.h"
-#include "Components/Animation/AnimatorRef.h"
-#include "Components/Animation/HumanoidRetargeterComponent.h"
-#include "Components/Animation/SkeletonRef.h"
-#include "Components/Animation/ValueCurve.h"
-#include "Components/Audio/AudioEmitter.h"
-#include "Components/Audio/AudioListener.h"
-#include "Components/Rendering/LODGroup.h"
-#include "Components/Rendering/LensFlareSource.h"
-#include "Components/Rendering/LocalBounds.h"
-#include "Components/Rendering/Ocean.h"
-#include "Components/Rendering/Particles.h"
-// Post-process effect chrome comes from PostProcessEffectRegistry; the typed
-// includes that remain serve the scanner-unreflectable Enabled fallbacks
-// (VolumetricFog, HeightFog, AtmosphericCloudLayer), the LDR StackOrder sync
-// (CAS, Vignette), and HeightFog's add-time tuning.
-#include "Components/Rendering/PostProcessEffects/AtmosphericCloudLayer.h"
-#include "Components/Rendering/PostProcessEffects/VolumetricClouds.h"
-#include "Components/Rendering/PostProcessEffects/ContrastAdaptiveSharpenEffect.h"
-#include "Components/Rendering/PostProcessEffects/VignetteEffect.h"
-#include "Components/Rendering/ReflectionProbe.h"
-#include "Components/Rendering/PostProcessEffects/HeightFogEffect.h"
-#include "Components/Rendering/PostProcessEffects/VolumetricFogEffect.h"
-#include "Components/Rendering/PostProcessVolume.h"
-#include "Components/Rendering/SkyEnvironment.h"
-#include "Components/Rendering/Skybox.h"
-#include "Components/Rendering/WindVolume.h"
-#include "Components/SceneBlueprintInstance.h"
-#include "Components/SceneEntityTag.h"
-#include "Components/SceneSubsceneInstance.h"
-#include "Components/Spline/SplineComponent.h"
-#include "Components/Terrain/Terrain.h"
-#include "Components/Terrain/TerrainGrass.h"
-#include "Components/Terrain/TerrainModifierEffects.h"
-#include "Components/Terrain/TerrainModifierVolume.h"
-#include "Components/Terrain/TerrainModifiers.h"
-#include "Components/Terrain/TerrainPlanetRelief.h"
-#include "Components/Video/VideoTextureComponent.h"
 #include "Editor/Entities/ComponentEnabledToggle.h"
 #include "Editor/Entities/ComponentRemoval.h"
 #include "Editor/Entities/EditorComponentTraits.h"
@@ -173,7 +116,6 @@
 #include "Editor/Entities/EntityDisplayName.h"
 #include "Editor/Entities/EditorInspectorPseudoComponents.h"
 #include "Engine/Rendering/PostProcessEffectRegistry.h"
-#include "TerrainECS/TerrainModifierComponents.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
 #include "Inspectors/DefaultComponentInspector.h"
 #include "ECS/ComponentFactory.h"
@@ -353,22 +295,6 @@ static void ArgbIntensityToGraphColor(uint32_t argb, float intensity, float& r, 
     b = static_cast<float>(argb & 0xFF) * scale;
 }
 
-static void StyleGraphColorSwatch(UIElement* swatch, uint32_t argb)
-{
-    if (!swatch)
-        return;
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(20.0f))
-        .Set(Style::Height, StyleLength::Px(20.0f))
-        .Set(Style::MinWidth, StyleLength::Px(20.0f))
-        .Set(Style::MinHeight, StyleLength::Px(20.0f))
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{3.0f, 3.0f, 3.0f, 3.0f})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{0xFF555555u, 0xFF555555u, 0xFF555555u, 0xFF555555u})
-        .Set(Style::BackgroundColor, argb)
-        .Set(Style::Cursor, CursorStyle::Pointer);
-}
-
 static std::string FormatGraphVariableVec3(float r, float g, float b)
 {
     char buf[64];
@@ -433,16 +359,11 @@ static void AddGraphColorSwatchRow(UIElement* parent,
 
     auto fieldContainer = std::make_unique<UIElement>();
     fieldContainer->AddClass("inspector-field");
-    fieldContainer->Overrides()
-        .Set(Style::Display, DisplayMode::Flex)
-        .Set(Style::FlexDir, FlexDirection::Row)
-        .Set(Style::AlignItems, AlignItems::Center)
-        .Set(Style::Gap, StyleLength::Px(6.0f));
+    fieldContainer->AddClass("inspector-color-swatch-field");
     UIElement* fieldContainerRaw = fieldContainer.get();
 
-    auto swatch = std::make_unique<UIElement>();
+    auto swatch = InspectorUI::MakeColorSwatch(argb);
     UIElement* swatchRaw = swatch.get();
-    StyleGraphColorSwatch(swatchRaw, argb);
     fieldContainerRaw->AddChild(std::move(swatch));
 
     auto applyWithSwatch = [applyColor = std::move(applyColor), swatchRaw](uint32_t newArgb, float newIntensity, bool commitUndo)
@@ -453,7 +374,7 @@ static void AddGraphColorSwatchRow(UIElement* parent,
         float ng = 1.0f;
         float nb = 1.0f;
         ArgbIntensityToGraphColor(newArgb, newIntensity, nr, ng, nb);
-        StyleGraphColorSwatch(swatchRaw, GraphColorToArgb(nr, ng, nb, 1.0f, std::max(1.0f, newIntensity)));
+        InspectorUI::SetColorSwatchColor(swatchRaw, GraphColorToArgb(nr, ng, nb, 1.0f, std::max(1.0f, newIntensity)));
     };
 
     auto clickHandler = [argb, intensity, openPicker, applyWithSwatch](UIEvent& e)
@@ -676,147 +597,15 @@ static std::string PrettifyTypeName(const char* typeName)
     return pretty.empty() ? std::string("Component") : pretty;
 }
 
-// Human-readable display names for known components (avoids showing mangled typeid names like N10GameEngine10components12MeshRendererE).
-static const std::unordered_map<ECS::ComponentTypeId, std::string>& GetComponentDisplayNames()
-{
-    static std::unordered_map<ECS::ComponentTypeId, std::string> s_Names;
-    static bool s_Init = false;
-    if (!s_Init)
-    {
-        s_Init = true;
-        s_Names[ECS::GetComponentTypeId<Transform>()] = "Transform";
-        s_Names[ECS::GetComponentTypeId<Components::WorldTransform>()] = "World Transform";
-        s_Names[ECS::GetComponentTypeId<Name>()] = "Name";
-        s_Names[ECS::GetComponentTypeId<Parent>()] = "Parent";
-        s_Names[ECS::GetComponentTypeId<MeshRenderer>()] = "Mesh Renderer";
-        s_Names[ECS::GetComponentTypeId<SkinnedMeshRenderer>()] = "Skinned Mesh Renderer";
-        s_Names[ECS::GetComponentTypeId<Camera>()] = "Camera";
-        s_Names[ECS::GetComponentTypeId<Light>()] = "Light";
-        s_Names[ECS::GetComponentTypeId<PhysicsBody>()] = "Physics Body";
-        s_Names[ECS::GetComponentTypeId<CharacterController>()] = "Character Controller";
-        s_Names[ECS::GetComponentTypeId<PhysicsCollider>()] = "Physics Collider";
-        s_Names[ECS::GetComponentTypeId<PhysicsColliderOwner>()] = "Physics Collider Owner";
-        s_Names[ECS::GetComponentTypeId<PhysicsWorldSettingsComponent>()] = "Physics World Settings";
-        s_Names[ECS::GetComponentTypeId<BoxColliderShape>()] = "Box Collider";
-        s_Names[ECS::GetComponentTypeId<SphereColliderShape>()] = "Sphere Collider";
-        s_Names[ECS::GetComponentTypeId<PlaneColliderShape>()] = "Plane Collider";
-        s_Names[ECS::GetComponentTypeId<CapsuleColliderShape>()] = "Capsule Collider";
-
-        s_Names[ECS::GetComponentTypeId<LODGroup>()] = "LOD Group";
-        s_Names[ECS::GetComponentTypeId<SkyEnvironment>()] = "Sky Environment";
-        s_Names[ECS::GetComponentTypeId<Skybox>()] = "Skybox";
-        s_Names[ECS::GetComponentTypeId<Components::ReflectionProbe>()] = "Reflection Probe";
-        s_Names[ECS::GetComponentTypeId<PostProcessVolume>()] = "Post Process Volume";
-        s_Names[ECS::GetComponentTypeId<Components::WindVolume>()] = "Wind Volume";
-        // Post-process effect names come from the PostProcessEffectRegistry
-        // descriptors (ComponentTitle consults it before this map).
-        s_Names[ECS::GetComponentTypeId<LocalBounds>()] = "World Bounds";
-
-        s_Names[ECS::GetComponentTypeId<AudioEmitter>()] = "Audio Emitter";
-        s_Names[ECS::GetComponentTypeId<AudioListener>()] = "Audio Listener";
-
-        s_Names[ECS::GetComponentTypeId<Animator>()] = "Animator";
-        s_Names[ECS::GetComponentTypeId<ValueCurve>()] = "Value Curve";
-        s_Names[ECS::GetComponentTypeId<AnimatedNodeRef>()] = "Animated Node";
-
-        s_Names[ECS::GetComponentTypeId<SceneEntityTag>()] = "Scene Entity Tag";
-        s_Names[ECS::GetComponentTypeId<SceneBlueprintInstance>()] = "Scene Blueprint Instance";
-        s_Names[ECS::GetComponentTypeId<SceneSubsceneInstance>()] = "Scene Subscene Instance";
-
-        s_Names[ECS::GetComponentTypeId<Components::Terrain>()] = "Terrain";
-        s_Names[ECS::GetComponentTypeId<Components::TerrainPlanetRelief>()] = "Planet Relief";
-        s_Names[ECS::GetComponentTypeId<Components::TerrainGrass>()] = "Terrain Grass";
-        s_Names[ECS::GetComponentTypeId<Components::TerrainModifierVolume>()] = "Terrain Modifier Volume";
-        // Terrain effect names come from the canonical effect list in TerrainECS
-        // (ComponentTitle consults it before this map), as post-process effect
-        // names come from the PostProcessEffectRegistry.
-        s_Names[ECS::GetComponentTypeId<Components::SplineComponent>()] = "Spline";
-        s_Names[ECS::GetComponentTypeId<Components::VideoTextureComponent>()] = "Video Texture";
-
-        s_Names[ECS::GetComponentTypeId<Editor::MeshRendererMaterialInspectorSection>()] = "Material";
-    }
-    return s_Names;
-}
-
+// Add Component picker category a component registers in its editor traits.
 static std::string ComponentCategory(ECS::ComponentTypeId typeId)
 {
-    if (Editor::EditorComponentTraits traits;
-        Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) && !traits.InspectorCategory.empty())
+    Editor::EditorComponentTraits traits;
+    if (!Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits))
+        return "Component";
+    if (!traits.InspectorCategory.empty())
         return traits.InspectorCategory;
-    static const ECS::ComponentTypeId transformId = ECS::GetComponentTypeId<Transform>();
-
-    static const ECS::ComponentTypeId meshRendererId = ECS::GetComponentTypeId<MeshRenderer>();
-    static const ECS::ComponentTypeId skinnedMeshRendererId = ECS::GetComponentTypeId<SkinnedMeshRenderer>();
-    static const ECS::ComponentTypeId lodGroupId = ECS::GetComponentTypeId<LODGroup>();
-    static const ECS::ComponentTypeId skyEnvId = ECS::GetComponentTypeId<SkyEnvironment>();
-    static const ECS::ComponentTypeId skyboxId = ECS::GetComponentTypeId<Skybox>();
-    static const ECS::ComponentTypeId reflectionProbeId = ECS::GetComponentTypeId<Components::ReflectionProbe>();
-    static const ECS::ComponentTypeId postProcessId = ECS::GetComponentTypeId<PostProcessVolume>();
-    static const ECS::ComponentTypeId windVolumeId = ECS::GetComponentTypeId<Components::WindVolume>();
-    static const ECS::ComponentTypeId videoTextureId = ECS::GetComponentTypeId<Components::VideoTextureComponent>();
-
-
-    static const ECS::ComponentTypeId physicsBodyId = ECS::GetComponentTypeId<PhysicsBody>();
-    static const ECS::ComponentTypeId physicsColliderId = ECS::GetComponentTypeId<PhysicsCollider>();
-    static const ECS::ComponentTypeId physicsColliderOwnerId = ECS::GetComponentTypeId<PhysicsColliderOwner>();
-    static const ECS::ComponentTypeId physicsWorldSettingsId = ECS::GetComponentTypeId<PhysicsWorldSettingsComponent>();
-    static const ECS::ComponentTypeId boxColliderId = ECS::GetComponentTypeId<BoxColliderShape>();
-    static const ECS::ComponentTypeId sphereColliderId = ECS::GetComponentTypeId<SphereColliderShape>();
-    static const ECS::ComponentTypeId planeColliderId = ECS::GetComponentTypeId<PlaneColliderShape>();
-    static const ECS::ComponentTypeId capsuleColliderId = ECS::GetComponentTypeId<CapsuleColliderShape>();
-
-    static const ECS::ComponentTypeId audioEmitterId = ECS::GetComponentTypeId<AudioEmitter>();
-    static const ECS::ComponentTypeId audioListenerId = ECS::GetComponentTypeId<AudioListener>();
-
-    static const ECS::ComponentTypeId animatorId = ECS::GetComponentTypeId<Animator>();
-    static const ECS::ComponentTypeId valueCurveId = ECS::GetComponentTypeId<ValueCurve>();
-    static const ECS::ComponentTypeId animatedNodeRefId = ECS::GetComponentTypeId<AnimatedNodeRef>();
-    static const ECS::ComponentTypeId animatedSpriteId = ECS::GetComponentTypeId<AnimatedSprite2D>();
-    static const ECS::ComponentTypeId humanoidRetargeterId = ECS::GetComponentTypeId<HumanoidRetargeterComponent>();
-
-    static const ECS::ComponentTypeId terrainId = ECS::GetComponentTypeId<Components::Terrain>();
-    static const ECS::ComponentTypeId terrainGrassId = ECS::GetComponentTypeId<Components::TerrainGrass>();
-    static const ECS::ComponentTypeId terrainModifierVolumeId =
-        ECS::GetComponentTypeId<Components::TerrainModifierVolume>();
-    static const ECS::ComponentTypeId splineId = ECS::GetComponentTypeId<Components::SplineComponent>();
-
-    static const ECS::ComponentTypeId measureId = ECS::GetComponentTypeId<MeasureComponent>();
-
-    if (typeId == transformId)
-        return "Transform";
-
-    if (typeId == meshRendererId || typeId == skinnedMeshRendererId || typeId == lodGroupId ||
-        typeId == skyEnvId || typeId == skyboxId ||
-        typeId == reflectionProbeId || typeId == postProcessId || typeId == windVolumeId || typeId == videoTextureId)
-        return "Rendering";
-
-    // Post-process effects don't reach the generic component picker (they add
-    // through the Volume inspector), so they need no category here.
-
-    if (typeId == physicsBodyId || typeId == physicsColliderId || typeId == physicsColliderOwnerId ||
-        typeId == physicsWorldSettingsId || typeId == boxColliderId || typeId == sphereColliderId ||
-        typeId == planeColliderId || typeId == capsuleColliderId)
-        return "Physics";
-
-    if (typeId == audioEmitterId || typeId == audioListenerId)
-        return "Audio";
-
-    if (typeId == animatorId || typeId == valueCurveId || typeId == animatedNodeRefId ||
-        typeId == animatedSpriteId || typeId == humanoidRetargeterId)
-        return "Animation";
-
-    // Terrain EFFECTS are absent: they add through the volume inspector's Add
-    // Effect picker rather than the Add Component one, so they reach no category.
-    if (typeId == terrainId || typeId == terrainGrassId || typeId == terrainModifierVolumeId)
-        return "Terrain";
-
-    if (typeId == splineId)
-        return "Spline";
-
-    if (typeId == measureId)
-        return "Tools";
-
-    return "Component";
+    return traits.Category.empty() ? std::string("Component") : traits.Category;
 }
 
 static bool ShouldHideComponent(ECS::ComponentTypeId typeId)
@@ -824,30 +613,16 @@ static bool ShouldHideComponent(ECS::ComponentTypeId typeId)
     if (Editor::EditorComponentTraits traits;
         Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) && traits.HideInInspector)
         return true;
-    static const ECS::ComponentTypeId meshGpuId = ECS::GetComponentTypeId<MeshGPUData>();
-    static const ECS::ComponentTypeId nameId = ECS::GetComponentTypeId<Name>();
-    static const ECS::ComponentTypeId parentId = ECS::GetComponentTypeId<Parent>();
-    static const ECS::ComponentTypeId sceneEntityTagId = ECS::GetComponentTypeId<SceneEntityTag>();
-    static const ECS::ComponentTypeId localBoundsId = ECS::GetComponentTypeId<LocalBounds>();
-    static const ECS::ComponentTypeId heightFieldColliderId = ECS::GetComponentTypeId<HeightFieldColliderShape>();
-    static const ECS::ComponentTypeId worldTransformId = ECS::GetComponentTypeId<Components::WorldTransform>();
-    static const ECS::ComponentTypeId hierarchyOrderId = ECS::GetComponentTypeId<Components::HierarchyOrder>();
-    static const ECS::ComponentTypeId animatorRefId = ECS::GetComponentTypeId<AnimatorRef>();
-    static const ECS::ComponentTypeId skeletonRefId = ECS::GetComponentTypeId<SkeletonRef>();
-    static const ECS::ComponentTypeId runtimeOnlyId = ECS::GetComponentTypeId<RuntimeOnlyEntity>();
-
     return ECS::ComponentRegistry::IsEnableStateTag(typeId) || // shown as the entity toggle and the section dots
-           typeId == meshGpuId ||
-           typeId == nameId ||                // Name is shown and edited in the header; no separate section
-           typeId == parentId ||              // Hierarchy relationship; managed by the Hierarchy panel, no inspector UI
-           typeId == sceneEntityTagId ||      // Serialization ID; assigned automatically by SceneIO, not user-editable
-           typeId == localBoundsId ||         // Derived from mesh geometry; no user-editable state
-           typeId == heightFieldColliderId || // Auto-wired from TerrainService; all fields system-managed
-           typeId == worldTransformId ||      // System-computed from Transform + hierarchy; read-only, no section
-           typeId == hierarchyOrderId ||      // Editor sibling order; maintained by hierarchy reparent/reorder
-           typeId == animatorRefId ||         // Internal runtime playback state; exposed via Animator inspector
-           typeId == skeletonRefId ||         // Internal skeleton handle; not user-editable
-           typeId == runtimeOnlyId;           // Generator-output marker; surfaced as the notice above the sections
+           Editor::EditorComponentTraitsRegistry::Get().IsHiddenInInspector(typeId);
+}
+
+// Every component type on a live entity.
+static std::vector<ECS::ComponentTypeId> EntityComponentTypeIds(ECS::World& world, ECS::EntityHandle entity)
+{
+    if (ECS::Archetype* archetype = world.GetEntityArchetype(entity))
+        return archetype->GetSignature().GetComponents();
+    return {};
 }
 
 // The entity's sorted component signature restricted to types that render a section.
@@ -857,127 +632,20 @@ static bool ShouldHideComponent(ECS::ComponentTypeId typeId)
 static std::vector<ECS::ComponentTypeId> CollectVisibleComponentSignature(ECS::World* world,
                                                                           ECS::EntityHandle entity)
 {
-    std::vector<ECS::ComponentTypeId> ids;
     if (!world || !entity.IsValid() || !world->IsValid(entity))
-        return ids;
-    if (ECS::Archetype* a = world->GetEntityArchetype(entity))
-    {
-        ids = a->GetSignature().GetComponents();
-        ids.erase(std::remove_if(ids.begin(), ids.end(), ShouldHideComponent), ids.end());
-        std::sort(ids.begin(), ids.end());
-    }
+        return {};
+    std::vector<ECS::ComponentTypeId> ids = EntityComponentTypeIds(*world, entity);
+    ids.erase(std::remove_if(ids.begin(), ids.end(), ShouldHideComponent), ids.end());
+    std::sort(ids.begin(), ids.end());
     return ids;
 }
 
 static int SortKeyForComponent(ECS::ComponentTypeId typeId)
 {
-    // Stable, human-friendly ordering: core -> rendering -> everything else.
-    static const ECS::ComponentTypeId transformId = ECS::GetComponentTypeId<Transform>();
-    static const ECS::ComponentTypeId nameId = ECS::GetComponentTypeId<Name>();
-    static const ECS::ComponentTypeId parentId = ECS::GetComponentTypeId<Parent>();
-
-    static const ECS::ComponentTypeId terrainId = ECS::GetComponentTypeId<Components::Terrain>();
-    static const ECS::ComponentTypeId terrainReliefId = ECS::GetComponentTypeId<Components::TerrainPlanetRelief>();
-    static const ECS::ComponentTypeId terrainGrassId = ECS::GetComponentTypeId<Components::TerrainGrass>();
-    static const ECS::ComponentTypeId physicsBodyId = ECS::GetComponentTypeId<PhysicsBody>();
-    static const ECS::ComponentTypeId physicsColliderId = ECS::GetComponentTypeId<PhysicsCollider>();
-    static const ECS::ComponentTypeId physicsColliderOwnerId = ECS::GetComponentTypeId<PhysicsColliderOwner>();
-    static const ECS::ComponentTypeId boxColliderId = ECS::GetComponentTypeId<BoxColliderShape>();
-    static const ECS::ComponentTypeId sphereColliderId = ECS::GetComponentTypeId<SphereColliderShape>();
-    static const ECS::ComponentTypeId planeColliderId = ECS::GetComponentTypeId<PlaneColliderShape>();
-    static const ECS::ComponentTypeId capsuleColliderId = ECS::GetComponentTypeId<CapsuleColliderShape>();
-
-    static const ECS::ComponentTypeId meshRendererId = ECS::GetComponentTypeId<MeshRenderer>();
-    static const ECS::ComponentTypeId meshMaterialInspectorSectionId =
-        ECS::GetComponentTypeId<Editor::MeshRendererMaterialInspectorSection>();
-    static const ECS::ComponentTypeId skinnedMeshRendererId = ECS::GetComponentTypeId<SkinnedMeshRenderer>();
-    static const ECS::ComponentTypeId animatorId = ECS::GetComponentTypeId<Animator>();
-    static const ECS::ComponentTypeId valueCurveId = ECS::GetComponentTypeId<ValueCurve>();
-    static const ECS::ComponentTypeId animatedNodeRefId = ECS::GetComponentTypeId<AnimatedNodeRef>();
-    static const ECS::ComponentTypeId cameraId = ECS::GetComponentTypeId<Camera>();
-    static const ECS::ComponentTypeId lightId = ECS::GetComponentTypeId<Light>();
-    static const ECS::ComponentTypeId reflectionProbeId = ECS::GetComponentTypeId<Components::ReflectionProbe>();
-
-    if (Editor::EditorComponentTraits traits;
-        Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) && traits.LeadsInspector)
-        return -1;
-    if (typeId == transformId)
-        return 0;
-    if (typeId == nameId)
-        return 10;
-    if (typeId == parentId)
-        return 20;
-
-    // Mesh/skinned renderer sit directly under Transform for primitive and
-    // model entities. Terrain (mutually exclusive with MeshRenderer on the
-    // same entity) shares the same slot, with physics body/collider family
-    // immediately below.
-    if (typeId == meshRendererId)
-        return 30;
-    if (typeId == meshMaterialInspectorSectionId)
-        return 31;
-    if (typeId == skinnedMeshRendererId)
-        return 32;
-    if (typeId == animatorId)
-        return 33;
-    if (typeId == valueCurveId)
-        return 34;
-    if (typeId == animatedNodeRefId)
-        return 35;
-    if (typeId == terrainId)
-        return 37;
-    if (typeId == terrainReliefId)
-        return 38;
-    if (typeId == terrainGrassId)
-        return 39;
-
-    if (typeId == physicsBodyId)
-        return 40;
-    if (typeId == physicsColliderId)
-        return 41;
-    if (typeId == physicsColliderOwnerId)
-        return 42;
-    if (typeId == boxColliderId)
-        return 43;
-    if (typeId == sphereColliderId)
-        return 44;
-    if (typeId == planeColliderId)
-        return 45;
-    if (typeId == capsuleColliderId)
-        return 46;
-
-    // A modifier volume sits above the effects that stack inside it, so the
-    // section order the user drags is already the stack order. Effects take
-    // consecutive keys in canonical-list order, derived rather than restated, so
-    // one added to ModifierEffectComponents sorts among its siblings with no
-    // edit here.
-    constexpr int kModifierVolumeSortKey = 50;
-    constexpr int kFirstTerrainEffectSortKey = kModifierVolumeSortKey + 1;
-    constexpr int kCameraSortKey = 120;
-    static_assert(kFirstTerrainEffectSortKey
-                          + static_cast<int>(TerrainECS::kTerrainEffectTypeCount)
-                      <= kCameraSortKey,
-                  "the terrain effect band grew into the camera's section slot: move the keys "
-                  "below apart before adding another effect.");
-
-    if (typeId == ECS::GetComponentTypeId<Components::TerrainModifierVolume>())
-        return kModifierVolumeSortKey;
-    int effectSortKey = kFirstTerrainEffectSortKey;
-    for (const TerrainECS::TerrainEffectTypeInfo& info : TerrainECS::TerrainEffectTypes())
-    {
-        if (info.TypeId == typeId)
-            return effectSortKey;
-        ++effectSortKey;
-    }
-
-    if (typeId == cameraId)
-        return kCameraSortKey;
-    if (typeId == lightId)
-        return 130;
-    if (typeId == reflectionProbeId)
-        return 140;
-
-    return 1000;
+    Editor::EditorComponentTraits traits;
+    if (!Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits))
+        return Editor::kDefaultInspectorSortKey;
+    return traits.InspectorSortOrder ? *traits.InspectorSortOrder : traits.SortKey;
 }
 
 // --- Component clipboard (copy/paste an entire component as text) ----------
@@ -1101,24 +769,13 @@ static bool DecodeComponentsClipboard(const std::string& clip,
 
 static bool TryFindComponentTypeIdByName(const std::string& name, ECS::ComponentTypeId& out)
 {
-    const auto& displayNames = GetComponentDisplayNames();
-    for (const auto& kv : displayNames)
+    // Registered display names, built-in and package alike (clipboard paste and
+    // preset resolution round-trip them, e.g. "Tree Generator").
+    if (const ECS::ComponentTypeId traitsId = Editor::EditorComponentTraitsRegistry::Get().FindByDisplayName(name);
+        traitsId != ECS::ComponentTypeId{})
     {
-        if (kv.second == name)
-        {
-            out = kv.first;
-            return true;
-        }
-    }
-    // Plugin-registered display names (clipboard paste / preset resolution
-    // must round-trip package components, e.g. "Tree Generator").
-    for (const auto& [typeId, traits] : Editor::EditorComponentTraitsRegistry::Get().Snapshot())
-    {
-        if (traits.DisplayName == name)
-        {
-            out = typeId;
-            return true;
-        }
+        out = traitsId;
+        return true;
     }
     // Post-process effect display names live in the effect registry.
     ECS::ComponentTypeId effectId{};
@@ -1138,9 +795,8 @@ static bool TryFindComponentTypeIdByName(const std::string& name, ECS::Component
 
 static std::string ComponentTitle(ECS::ComponentTypeId typeId)
 {
-    // 0. Plugin-registered traits (editor package modules) — checked live, not
-    //    folded into the static map: modules register at project open, after
-    //    the map's one-time build.
+    // 0. Registered traits, built-in and package alike — checked live:
+    //    modules register at project open.
     if (Editor::EditorComponentTraits traits;
         Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) && !traits.DisplayName.empty())
         return traits.DisplayName;
@@ -1148,21 +804,11 @@ static std::string ComponentTitle(ECS::ComponentTypeId typeId)
     if (const auto* effect = Rendering::PostProcessEffectRegistry::Find(typeId);
         effect && !effect->DisplayName.empty())
         return std::string(effect->DisplayName);
-    // 0c. Terrain effects carry theirs in the canonical effect list, so the
-    //     section header and the Add Effect picker cannot drift apart.
-    if (const auto* terrainEffect = TerrainECS::FindTerrainEffectType(typeId))
-        return std::string(terrainEffect->Title);
-    // 1. Explicit override for names that don't derive cleanly (acronyms like
-    //    "CRT"/"LUT", or renamed labels like LocalBounds -> "World Bounds").
-    const auto& displayNames = GetComponentDisplayNames();
-    auto it = displayNames.find(typeId);
-    if (it != displayNames.end())
-        return it->second;
-    // 2. Reflected components carry a normalized, cross-compiler-stable name;
+    // 1. Reflected components carry a normalized, cross-compiler-stable name;
     //    derive the title from it so no per-component map entry is needed.
     if (const std::string_view canonical = ECS::ComponentFieldRegistry::GetCanonicalName(typeId); !canonical.empty())
         return PrettifyTypeName(std::string(canonical).c_str());
-    // 3. Fallback for a component with no reflected field table: the handler's
+    // 2. Fallback for a component with no reflected field table: the handler's
     //    canonical type name, which is the same normalized spelling on every
     //    compiler.
     if (ECS::IComponentHandler* handler = ECS::ComponentRegistry::GetHandler(typeId))
@@ -1170,16 +816,21 @@ static std::string ComponentTitle(ECS::ComponentTypeId typeId)
     return "Component " + std::to_string(static_cast<std::size_t>(typeId));
 }
 
-// Inspector header context menu — Transform copy/paste wording reflects local-space TRS.
+// " (<note>)" for a component that registers a ClipboardValuesNote, else empty.
+static std::string ClipboardValuesNoteSuffix(ECS::ComponentTypeId typeId)
+{
+    Editor::EditorComponentTraits traits;
+    if (!Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) || traits.ClipboardValuesNote.empty())
+        return {};
+    return " (" + traits.ClipboardValuesNote + ")";
+}
+
 static std::string BuildInspectorCopyMenuLabel(const std::vector<ECS::ComponentTypeId>& selection)
 {
-    static const ECS::ComponentTypeId transformId = ECS::GetComponentTypeId<Transform>();
     if (selection.empty())
         return "Copy Component";
-    if (selection.size() == 1 && selection[0] == transformId)
-        return "Copy Transform (local position, rotation & scale)";
     if (selection.size() == 1)
-        return "Copy " + ComponentTitle(selection[0]);
+        return "Copy " + ComponentTitle(selection[0]) + ClipboardValuesNoteSuffix(selection[0]);
     return "Copy " + std::to_string(selection.size()) + " Components";
 }
 
@@ -1190,87 +841,21 @@ static std::string BuildInspectorPasteMenuLabel(bool multiClipValid,
                                                 bool entityHasClipType,
                                                 ECS::ComponentTypeId clipTypeId)
 {
-    static const ECS::ComponentTypeId transformId = ECS::GetComponentTypeId<Transform>();
-
     if (multiClipValid && multiClipEntryCount > 0)
         return "Paste " + std::to_string(multiClipEntryCount) + " component values";
     if (!clipValid)
         return "Paste Component";
-
-    const bool clipboardIsTransform = (clipTypeId == transformId);
-
-    if (entityHasClipType && clipboardIsTransform)
-        return "Paste Transform component values (local position, rotation & scale)";
     if (entityHasClipType)
-        return "Paste " + clipTypeName + " component values";
-    if (clipboardIsTransform)
-        return "Paste Transform as New Component";
+        return "Paste " + clipTypeName + " component values" + ClipboardValuesNoteSuffix(clipTypeId);
     return "Paste " + clipTypeName + " as New Component";
 }
 
-static const char* ComponentTooltip(ECS::ComponentTypeId typeId)
+static std::string ComponentTooltip(ECS::ComponentTypeId typeId)
 {
-    static const ECS::ComponentTypeId transformId = ECS::GetComponentTypeId<Transform>();
-    static const ECS::ComponentTypeId meshRendererId = ECS::GetComponentTypeId<MeshRenderer>();
-    static const ECS::ComponentTypeId meshMaterialInspectorSectionId =
-        ECS::GetComponentTypeId<Editor::MeshRendererMaterialInspectorSection>();
-    static const ECS::ComponentTypeId skinnedMeshId = ECS::GetComponentTypeId<SkinnedMeshRenderer>();
-    static const ECS::ComponentTypeId cameraId = ECS::GetComponentTypeId<Camera>();
-    static const ECS::ComponentTypeId lightId = ECS::GetComponentTypeId<Light>();
-    static const ECS::ComponentTypeId physicsBodyId = ECS::GetComponentTypeId<PhysicsBody>();
-    static const ECS::ComponentTypeId physicsColliderId = ECS::GetComponentTypeId<PhysicsCollider>();
-    static const ECS::ComponentTypeId boxColliderId = ECS::GetComponentTypeId<BoxColliderShape>();
-    static const ECS::ComponentTypeId sphereColliderId = ECS::GetComponentTypeId<SphereColliderShape>();
-    static const ECS::ComponentTypeId planeColliderId = ECS::GetComponentTypeId<PlaneColliderShape>();
-    static const ECS::ComponentTypeId capsuleColliderId = ECS::GetComponentTypeId<CapsuleColliderShape>();
-    static const ECS::ComponentTypeId audioEmitterId = ECS::GetComponentTypeId<AudioEmitter>();
-    static const ECS::ComponentTypeId audioListenerId = ECS::GetComponentTypeId<AudioListener>();
-    static const ECS::ComponentTypeId animatorId = ECS::GetComponentTypeId<Animator>();
-    static const ECS::ComponentTypeId valueCurveId = ECS::GetComponentTypeId<ValueCurve>();
-    static const ECS::ComponentTypeId skyEnvId = ECS::GetComponentTypeId<SkyEnvironment>();
-    static const ECS::ComponentTypeId skyboxId = ECS::GetComponentTypeId<Skybox>();
-    static const ECS::ComponentTypeId postProcessId = ECS::GetComponentTypeId<PostProcessVolume>();
-
-    if (typeId == transformId)
-        return "Position, rotation, and scale in local space";
-    if (typeId == meshRendererId)
-        return "Renders a static mesh with a material";
-    if (typeId == meshMaterialInspectorSectionId)
-        return "Material slots and shader properties for this mesh renderer";
-    if (typeId == skinnedMeshId)
-        return "Renders a mesh deformed by a skeleton for animation";
-    if (typeId == cameraId)
-        return "Defines a view frustum used to render the scene";
-    if (typeId == lightId)
-        return "Emits light into the scene (directional, point, spot, or ambient)";
-    if (typeId == physicsBodyId)
-        return "Simulated rigid body with mass, damping, and collision response";
-    if (typeId == physicsColliderId)
-        return "Collision shape attached to a physics body";
-    if (typeId == boxColliderId)
-        return "Axis-aligned box collision shape";
-    if (typeId == sphereColliderId)
-        return "Sphere collision shape";
-    if (typeId == planeColliderId)
-        return "Infinite plane collision shape";
-    if (typeId == capsuleColliderId)
-        return "Capsule (cylinder + hemispherical caps) collision shape";
-    if (typeId == audioEmitterId)
-        return "Plays audio clips from this entity's position";
-    if (typeId == audioListenerId)
-        return "Marks this entity as the audio listener (usually the camera)";
-    if (typeId == animatorId)
-        return "Controls playback of skeletal animations on a mesh";
-    if (typeId == valueCurveId)
-        return "Tween curve with easing, duration, and looping behavior";
-    if (typeId == skyEnvId)
-        return "Procedural sky with atmospheric scattering and stars";
-    if (typeId == skyboxId)
-        return "HDRI skybox rendered as the scene background";
-    if (typeId == postProcessId)
-        return "Post-processing volume for spatial blending and core overrides";
-    // Post-process effect tooltips come from the effect registry (Description).
-    return nullptr;
+    Editor::EditorComponentTraits traits;
+    if (!Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits))
+        return {};
+    return traits.Tooltip;
 }
 
 static std::string_view RequiredPackageForComponent(ECS::ComponentTypeId typeId)
@@ -1282,24 +867,14 @@ static std::string_view RequiredPackageForComponent(ECS::ComponentTypeId typeId)
 
 static bool IsRemovableComponent(ECS::ComponentTypeId typeId)
 {
-    // Preserve core authoring invariants: most entities assume Transform + Name.
-    static const ECS::ComponentTypeId transformId = ECS::GetComponentTypeId<Transform>();
-    static const ECS::ComponentTypeId nameId = ECS::GetComponentTypeId<Name>();
-    static const ECS::ComponentTypeId meshMaterialInspectorSectionId =
-        ECS::GetComponentTypeId<Editor::MeshRendererMaterialInspectorSection>();
-    if (typeId == transformId || typeId == nameId || typeId == meshMaterialInspectorSectionId)
-    {
-        return false;
-    }
-    return true;
+    Editor::EditorComponentTraits traits;
+    return !Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) || traits.Removable;
 }
 
 static bool ShouldCollapseByDefault(ECS::ComponentTypeId typeId)
 {
-    static const ECS::ComponentTypeId skeletonRefId = ECS::GetComponentTypeId<SkeletonRef>();
-    static const ECS::ComponentTypeId animatorRefId = ECS::GetComponentTypeId<AnimatorRef>();
-    static const ECS::ComponentTypeId animatedNodeRefId = ECS::GetComponentTypeId<AnimatedNodeRef>();
-    return typeId == skeletonRefId || typeId == animatorRefId || typeId == animatedNodeRefId;
+    Editor::EditorComponentTraits traits;
+    return Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) && traits.CollapsedByDefault;
 }
 
 static void NotifyComponentChanged(Editor::EditorChangeNotifications* notifications,
@@ -1454,119 +1029,18 @@ class AddPresetComponentsCommand final : public Editor::IEditorCommand
     const char* GetName() const override { return m_Name.c_str(); }
     void Do() override { Redo(); }
 
+    // Removes only what Redo added, newest first.
     void Undo() override
     {
         if (!m_World || !m_Entity.IsValid() || !m_World->IsValid(m_Entity))
             return;
 
-        // Remove only what we added in Redo().
-        if (m_AddedCamera)
+        for (auto it = m_AddedTypeIds.rbegin(); it != m_AddedTypeIds.rend(); ++it)
         {
-            m_World->RemoveComponentImmediate<Components::Camera>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::Camera>());
+            if (m_World->RemoveComponentByTypeIdImmediate(m_Entity, *it))
+                NotifyComponentChanged(m_Notifications, m_World, m_Entity, *it);
         }
-        if (m_AddedLight)
-        {
-            m_World->RemoveComponentImmediate<Components::Light>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::Light>());
-        }
-        if (m_AddedSkyEnvironment)
-        {
-            m_World->RemoveComponentImmediate<Components::SkyEnvironment>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::SkyEnvironment>());
-        }
-        if (m_AddedSkybox)
-        {
-            m_World->RemoveComponentImmediate<Components::Skybox>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::Skybox>());
-        }
-        if (m_AddedPhysicsBody)
-        {
-            m_World->RemoveComponentImmediate<Components::PhysicsBody>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::PhysicsBody>());
-        }
-        if (m_AddedCharacterController)
-        {
-            m_World->RemoveComponentImmediate<Components::CharacterController>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::CharacterController>());
-        }
-        if (m_AddedBoxShape)
-        {
-            m_World->RemoveComponentImmediate<Components::BoxColliderShape>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::BoxColliderShape>());
-        }
-        if (m_AddedSphereShape)
-        {
-            m_World->RemoveComponentImmediate<Components::SphereColliderShape>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::SphereColliderShape>());
-        }
-        if (m_AddedPlaneShape)
-        {
-            m_World->RemoveComponentImmediate<Components::PlaneColliderShape>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::PlaneColliderShape>());
-        }
-        // After the shapes: a collider shape requires the collider.
-        if (m_AddedPhysicsCollider)
-        {
-            m_World->RemoveComponentImmediate<Components::PhysicsCollider>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::PhysicsCollider>());
-        }
-        if (m_AddedAudioEmitter)
-        {
-            m_World->RemoveComponentImmediate<Components::AudioEmitter>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::AudioEmitter>());
-        }
-        if (m_AddedAudioListener)
-        {
-            m_World->RemoveComponentImmediate<Components::AudioListener>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::AudioListener>());
-        }
-        if (m_AddedPostProcessVolume)
-        {
-            m_World->RemoveComponentImmediate<Components::PostProcessVolume>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::PostProcessVolume>());
-        }
-        if (m_AddedWindVolume)
-        {
-            m_World->RemoveComponentImmediate<Components::WindVolume>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::WindVolume>());
-        }
-        if (m_AddedParticleEmitter)
-        {
-            m_World->RemoveComponentImmediate<Components::ParticleEmitter3D>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::ParticleEmitter3D>());
-        }
-        if (m_AddedParticleCollisionEvents)
-        {
-            m_World->RemoveComponentImmediate<Components::ParticleCollisionEventsBuffer>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::ParticleCollisionEventsBuffer>());
-        }
-        if (m_AddedTerrainEffectTypeId != 0
-            && m_World->RemoveComponentByTypeIdImmediate(m_Entity, m_AddedTerrainEffectTypeId))
-        {
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, m_AddedTerrainEffectTypeId);
-        }
-        if (m_AddedTerrainModifierVolume)
-        {
-            m_World->RemoveComponentImmediate<Components::TerrainModifierVolume>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity,
-                                   ECS::GetComponentTypeId<Components::TerrainModifierVolume>());
-        }
-        if (m_AddedSplineComponent)
-        {
-            m_World->RemoveComponentImmediate<Components::SplineComponent>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::SplineComponent>());
-        }
-        if (m_AddedValueCurve)
-        {
-            m_World->RemoveComponentImmediate<Components::ValueCurve>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::ValueCurve>());
-        }
-        if (m_AddedVideoTexture)
-        {
-            m_World->RemoveComponentImmediate<Components::VideoTextureComponent>(m_Entity);
-            NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<Components::VideoTextureComponent>());
-        }
+        m_AddedTypeIds.clear();
     }
 
     void Redo() override
@@ -1574,223 +1048,19 @@ class AddPresetComponentsCommand final : public Editor::IEditorCommand
         if (!m_World || !m_Entity.IsValid() || !m_World->IsValid(m_Entity))
             return;
 
-        // Reset "added" flags on redo so repeated redo/undo behaves correctly.
-        m_AddedCamera = false;
-        m_AddedLight = false;
-        m_AddedSkyEnvironment = false;
-        m_AddedSkybox = false;
-        m_AddedPhysicsBody = false;
-        m_AddedCharacterController = false;
-        m_AddedPhysicsCollider = false;
-        m_AddedBoxShape = false;
-        m_AddedSphereShape = false;
-        m_AddedPlaneShape = false;
-        m_AddedAudioEmitter = false;
-        m_AddedAudioListener = false;
-        m_AddedPostProcessVolume = false;
-        m_AddedWindVolume = false;
-        m_AddedParticleEmitter = false;
-        m_AddedParticleCollisionEvents = false;
-        m_AddedTerrainModifierVolume = false;
-        m_AddedTerrainEffectTypeId = 0;
-        m_AddedSplineComponent = false;
-        m_AddedValueCurve = false;
-        m_AddedVideoTexture = false;
-
-        auto addIfMissing = [&](auto tag, auto value)
-        {
-            using T = typename decltype(tag)::type;
-            if (!m_World->HasComponent<T>(m_Entity))
-            {
-                m_World->AddComponentImmediate<T>(m_Entity, value);
-                NotifyComponentChanged(m_Notifications, m_World, m_Entity, ECS::GetComponentTypeId<T>());
-                return true;
-            }
-            return false;
-        };
-
-        // Terrain area presets are answered by the table that pairs a preset
-        // with its effect, never by a case label: a sixth canonical effect
-        // reaches this command from its table row alone.
-        if (const Editor::TerrainAreaPreset* area = Editor::FindTerrainAreaPreset(m_Preset))
-        {
-            const Editor::TerrainAreaPresetAdditions added =
-                Editor::ApplyTerrainAreaPreset(*m_World, m_Entity, *area);
-            m_AddedTerrainModifierVolume = added.AddedVolume;
-            m_AddedTerrainEffectTypeId = added.AddedEffectTypeId;
-            m_AddedSplineComponent = added.AddedSpline;
-            if (added.AddedSpline)
-            {
-                NotifyComponentChanged(m_Notifications, m_World, m_Entity,
-                                       ECS::GetComponentTypeId<Components::SplineComponent>());
-            }
-            if (added.AddedVolume)
-            {
-                NotifyComponentChanged(m_Notifications, m_World, m_Entity,
-                                       ECS::GetComponentTypeId<Components::TerrainModifierVolume>());
-            }
-            if (added.AddedEffectTypeId != 0)
-                NotifyComponentChanged(m_Notifications, m_World, m_Entity, added.AddedEffectTypeId);
-            return;
-        }
-
-        switch (m_Preset)
-        {
-        case ComponentPreset::TerrainFlattenArea:
-        case ComponentPreset::TerrainHeightOffsetArea:
-        case ComponentPreset::TerrainNoiseArea:
-        case ComponentPreset::TerrainStampArea:
-        case ComponentPreset::TerrainPaintArea:
-        case ComponentPreset::TerrainRulesArea:
-        case ComponentPreset::TerrainGroundClaimArea:
-        case ComponentPreset::TerrainGrassArea:
-            break; // Handled by FindTerrainAreaPreset above.
-        case ComponentPreset::Count:
-            break; // Sentinel, not a preset.
-        case ComponentPreset::Camera:
-            m_AddedCamera = addIfMissing(ECS::TypeTag<Components::Camera>{}, Components::Camera{});
-            break;
-        case ComponentPreset::Light:
-            m_AddedLight = addIfMissing(ECS::TypeTag<Components::Light>{}, Editor::MakeDefaultDirectionalLight());
-            break;
-        case ComponentPreset::SkyEnvironment:
-            m_AddedSkyEnvironment = addIfMissing(ECS::TypeTag<Components::SkyEnvironment>{}, Components::SkyEnvironment{});
-            break;
-        case ComponentPreset::Skybox:
-            m_AddedSkybox = addIfMissing(ECS::TypeTag<Components::Skybox>{}, Components::Skybox{});
-            break;
-        case ComponentPreset::PhysicsDynamicBox:
-        {
-            Components::PhysicsBody body{};
-            body.motionType = Physics::MotionType::Dynamic;
-            m_AddedPhysicsBody = addIfMissing(ECS::TypeTag<Components::PhysicsBody>{}, body);
-            m_AddedPhysicsCollider = addIfMissing(ECS::TypeTag<Components::PhysicsCollider>{}, Components::PhysicsCollider{});
-            m_AddedBoxShape = addIfMissing(ECS::TypeTag<Components::BoxColliderShape>{}, Components::BoxColliderShape{});
-            break;
-        }
-        case ComponentPreset::PhysicsDynamicSphere:
-        {
-            Components::PhysicsBody body{};
-            body.motionType = Physics::MotionType::Dynamic;
-            m_AddedPhysicsBody = addIfMissing(ECS::TypeTag<Components::PhysicsBody>{}, body);
-            m_AddedPhysicsCollider = addIfMissing(ECS::TypeTag<Components::PhysicsCollider>{}, Components::PhysicsCollider{});
-            m_AddedSphereShape = addIfMissing(ECS::TypeTag<Components::SphereColliderShape>{}, Components::SphereColliderShape{});
-            break;
-        }
-        case ComponentPreset::PhysicsStaticPlane:
-        {
-            Components::PhysicsBody body{};
-            body.motionType = Physics::MotionType::Static;
-            m_AddedPhysicsBody = addIfMissing(ECS::TypeTag<Components::PhysicsBody>{}, body);
-            m_AddedPhysicsCollider = addIfMissing(ECS::TypeTag<Components::PhysicsCollider>{}, Components::PhysicsCollider{});
-            Components::PlaneColliderShape plane{};
-            plane.normalX = 0.0f;
-            plane.normalY = 1.0f;
-            plane.normalZ = 0.0f;
-            plane.d = 0.0f;
-            plane.halfExtent = 50.0f;
-            m_AddedPlaneShape = addIfMissing(ECS::TypeTag<Components::PlaneColliderShape>{}, plane);
-            break;
-        }
-        case ComponentPreset::PhysicsStaticBox:
-        {
-            Components::PhysicsBody body{};
-            body.motionType = Physics::MotionType::Static;
-            m_AddedPhysicsBody = addIfMissing(ECS::TypeTag<Components::PhysicsBody>{}, body);
-            m_AddedPhysicsCollider = addIfMissing(ECS::TypeTag<Components::PhysicsCollider>{}, Components::PhysicsCollider{});
-            m_AddedBoxShape = addIfMissing(ECS::TypeTag<Components::BoxColliderShape>{}, Components::BoxColliderShape{});
-            break;
-        }
-        case ComponentPreset::PhysicsCharacterController:
-            m_AddedCharacterController =
-                addIfMissing(ECS::TypeTag<Components::CharacterController>{}, Components::CharacterController{});
-            break;
-        case ComponentPreset::AudioEmitter:
-            m_AddedAudioEmitter = addIfMissing(ECS::TypeTag<Components::AudioEmitter>{}, Components::AudioEmitter{});
-            break;
-        case ComponentPreset::AudioListener:
-            m_AddedAudioListener = addIfMissing(ECS::TypeTag<Components::AudioListener>{}, Components::AudioListener{});
-            break;
-        case ComponentPreset::PostProcessVolume:
-            m_AddedPostProcessVolume = addIfMissing(ECS::TypeTag<Components::PostProcessVolume>{}, Components::PostProcessVolume{});
-            break;
-        case ComponentPreset::WindVolume:
-            m_AddedWindVolume = addIfMissing(ECS::TypeTag<Components::WindVolume>{}, Components::WindVolume{});
-            break;
-        case ComponentPreset::ParticleEmitter2D:
-            m_AddedParticleEmitter = addIfMissing(ECS::TypeTag<Components::ParticleEmitter3D>{}, Components::MakeParticleEmitter2DDefaults());
-            break;
-        case ComponentPreset::ParticleEmitter3D:
-            m_AddedParticleEmitter = addIfMissing(ECS::TypeTag<Components::ParticleEmitter3D>{}, Components::ParticleEmitter3D{});
-            break;
-        case ComponentPreset::ParticleCollisionEvents:
-            m_AddedParticleCollisionEvents = addIfMissing(ECS::TypeTag<Components::ParticleCollisionEventsBuffer>{}, Components::ParticleCollisionEventsBuffer{});
-            break;
-        case ComponentPreset::TerrainSplineFlatten:
-        {
-            // The spline supplies the region, so the volume takes its shape from
-            // it. Adding the SplineComponent here is the point: the pre-volume
-            // spline preset added a modifier that silently did nothing without one.
-            m_AddedSplineComponent = addIfMissing(
-                ECS::TypeTag<Components::SplineComponent>{}, Components::SplineComponent{});
-            Components::TerrainModifierVolume volume{};
-            volume.Shape = Components::TerrainVolumeShape::SplineArea;
-            m_AddedTerrainModifierVolume =
-                addIfMissing(ECS::TypeTag<Components::TerrainModifierVolume>{}, volume);
-            AddTerrainEffect(ECS::GetComponentTypeId<Components::TerrainFlattenEffect>());
-            break;
-        }
-        case ComponentPreset::SplineComponent:
-            m_AddedSplineComponent = addIfMissing(ECS::TypeTag<Components::SplineComponent>{}, Components::SplineComponent{});
-            break;
-        case ComponentPreset::ValueCurve:
-            m_AddedValueCurve = addIfMissing(ECS::TypeTag<Components::ValueCurve>{}, Components::ValueCurve{});
-            break;
-        case ComponentPreset::VideoTexture:
-            m_AddedVideoTexture = addIfMissing(ECS::TypeTag<Components::VideoTextureComponent>{}, Components::VideoTextureComponent{});
-            break;
-        }
+        m_AddedTypeIds = Editor::ApplyComponentPreset(*m_World, m_Entity, m_Preset);
+        for (ECS::ComponentTypeId addedTypeId : m_AddedTypeIds)
+            NotifyComponentChanged(m_Notifications, m_World, m_Entity, addedTypeId);
     }
 
   private:
-    // Adds one terrain effect by type id, stacked above any already there.
-    // Records it so Undo removes exactly what this preset created.
-    void AddTerrainEffect(ECS::ComponentTypeId effectTypeId)
-    {
-        const int32 stackOrder = TerrainECS::NextEffectStackOrder(*m_World, m_Entity);
-        if (!TerrainECS::AddTerrainEffectDefault(*m_World, m_Entity, effectTypeId, stackOrder))
-            return;
-        m_AddedTerrainEffectTypeId = effectTypeId;
-        NotifyComponentChanged(m_Notifications, m_World, m_Entity, effectTypeId);
-    }
-
     std::string m_Name;
     ECS::World* m_World = nullptr;                                // not owned
     Editor::EditorChangeNotifications* m_Notifications = nullptr; // not owned
     ECS::EntityHandle m_Entity{};
     ComponentPreset m_Preset{};
-
-    bool m_AddedCamera = false;
-    bool m_AddedLight = false;
-    bool m_AddedSkyEnvironment = false;
-    bool m_AddedSkybox = false;
-    bool m_AddedPhysicsBody = false;
-    bool m_AddedCharacterController = false;
-    bool m_AddedPhysicsCollider = false;
-    bool m_AddedBoxShape = false;
-    bool m_AddedSphereShape = false;
-    bool m_AddedPlaneShape = false;
-    bool m_AddedAudioEmitter = false;
-    bool m_AddedAudioListener = false;
-    bool m_AddedTerrainModifierVolume = false;
-    ECS::ComponentTypeId m_AddedTerrainEffectTypeId = 0;
-    bool m_AddedSplineComponent = false;
-    bool m_AddedValueCurve = false;
-    bool m_AddedPostProcessVolume = false;
-    bool m_AddedWindVolume = false;
-    bool m_AddedParticleEmitter = false;
-    bool m_AddedParticleCollisionEvents = false;
-    bool m_AddedVideoTexture = false;
+    // What the last Redo added, in add order; the entity already carried the rest.
+    std::vector<ECS::ComponentTypeId> m_AddedTypeIds;
 };
 
 // Map context menu add-command IDs to ComponentPreset (kCmdInspectorAddPresetBase + ordinal).
@@ -1958,20 +1228,12 @@ private:
 
         // Components a curated preset already adds shouldn't also appear as a
         // standalone single (avoids Camera/Light duplicating their presets).
-        std::unordered_set<ECS::ComponentTypeId> presetCovered;
-        for (const auto& preset : ComponentPresetCatalog())
-            for (ECS::ComponentTypeId id : ComponentTypeIdsForPreset(preset.Preset))
-                presetCovered.insert(id);
-
-        // The modifier volume is the exception: every terrain preset adds one,
-        // but none of them IS one. An empty volume authored on its own — region
-        // first, effects from its Add Effect picker after — is a real flow, so
-        // it keeps its standalone entry instead of being deduplicated away.
-        presetCovered.erase(ECS::GetComponentTypeId<Components::TerrainModifierVolume>());
+        const std::vector<ECS::ComponentTypeId> presetOnly = Editor::ComponentTypeIdsOfferedOnlyByPresets();
+        const std::unordered_set<ECS::ComponentTypeId> presetCovered(presetOnly.begin(), presetOnly.end());
 
         // Any component with a default-construct factory is addable, unless the
-        // inspector hides it, a preset covers it, or it is a volume-owned stack
-        // effect (post-process effects add only through Add Post FX, terrain
+        // inspector hides it, a preset covers it, or another component hosts its
+        // section (post-process effects add only through Add Post FX, terrain
         // effects only through the modifier volume's Add Effect). Title +
         // filtering are derived (reflection + ShouldHideComponent) — no
         // per-component chrome.
@@ -1979,9 +1241,9 @@ private:
         {
             if (ShouldHideComponent(typeId) || presetCovered.count(typeId) != 0)
                 continue;
-            if (Rendering::PostProcessEffectRegistry::Find(typeId) != nullptr)
-                continue;
-            if (TerrainECS::IsTerrainEffectComponent(typeId))
+            ECS::ComponentTypeId hostTypeId{};
+            Editor::EditorComponentTraits hostTraits;
+            if (Editor::EditorComponentTraitsRegistry::Get().TryGetSectionHost(typeId, hostTypeId, hostTraits))
                 continue;
             m_Singles.push_back({ComponentTitle(typeId), ComponentCategory(typeId), typeId});
         }
@@ -2383,19 +1645,53 @@ void InspectorPanel::ExecuteRemoveComponent(ECS::ComponentTypeId typeId)
     ShowEntity(m_World, m_Entity, /*force=*/true);
 }
 
-void InspectorPanel::EnsurePostProcessVolumeRemoveModal()
+void InspectorPanel::RequestRemoveComponent(ECS::ComponentTypeId typeId)
 {
-    if (m_RemovePostProcessConfirmModal)
+    if (!IsRemovableComponent(typeId))
+        return;
+
+    // A volume that takes its stack effects with it asks first when it has any.
+    Editor::EditorComponentTraits traits;
+    bool hasStackEffects = false;
+    if (m_World && Editor::EditorComponentTraitsRegistry::Get().TryGet(typeId, traits) &&
+        traits.RemovingRemovesStackEffects && traits.HostsInspectorSection)
+    {
+        const std::vector<ECS::ComponentTypeId> entityComponents = EntityComponentTypeIds(*m_World, m_Entity);
+        hasStackEffects =
+            std::any_of(entityComponents.begin(), entityComponents.end(), traits.HostsInspectorSection);
+    }
+    if (!hasStackEffects)
+    {
+        ExecuteRemoveComponent(typeId);
+        return;
+    }
+
+    m_PendingRemoveComponentTypeId = typeId;
+    EnsureStackVolumeRemoveModal();
+    if (m_RemoveStackVolumeConfirmModal)
+    {
+        const std::string title = ComponentTitle(typeId);
+        m_RemoveStackVolumeConfirmModal->Show("Remove " + title,
+                                              "This entity still has volume effect components.\n"
+                                              "Removing the volume also removes those effect components.\n\n"
+                                              "Remove " + title + " anyway?",
+                                              "Remove");
+    }
+}
+
+void InspectorPanel::EnsureStackVolumeRemoveModal()
+{
+    if (m_RemoveStackVolumeConfirmModal)
         return;
 
     auto modal = std::make_unique<ConfirmActionModal>();
-    m_RemovePostProcessConfirmModal = modal.get();
-    m_RemovePostProcessConfirmModal->SetOnConfirm([this]()
+    m_RemoveStackVolumeConfirmModal = modal.get();
+    m_RemoveStackVolumeConfirmModal->SetOnConfirm([this]()
                                                   {
         if (m_PendingRemoveComponentTypeId)
             ExecuteRemoveComponent(m_PendingRemoveComponentTypeId);
         m_PendingRemoveComponentTypeId = {}; });
-    m_RemovePostProcessConfirmModal->SetOnCancel([this]()
+    m_RemoveStackVolumeConfirmModal->SetOnCancel([this]()
                                                  { m_PendingRemoveComponentTypeId = {}; });
 
     UIManager* ui = GetOwnerManager();
@@ -2745,14 +2041,6 @@ bool InspectorSelectionHistoryEntry::Equals(const InspectorSelectionHistoryEntry
         return SmartFolderId == o.SmartFolderId && SmartFolderMgr == o.SmartFolderMgr;
     }
     return false;
-}
-
-void InspectorPanel::ClearInspectorHistory()
-{
-    m_InspectorSelectionHistory.clear();
-    m_InspectorHistoryIndex = 0;
-    m_HistoryHasCursor = false;
-    m_SuppressInspectorHistory = false;
 }
 
 void InspectorPanel::RecordInspectorHistory(InspectorSelectionHistoryEntry entry)
@@ -3155,34 +2443,24 @@ void InspectorPanel::PersistComponentOrderFromSections()
     if (!m_World || !m_Entity.IsValid() || !m_World->IsValid(m_Entity))
         return;
 
-    // Keep reorderable LDR post-FX components in sync with the visual order.
-    static const ECS::ComponentTypeId casId = ECS::GetComponentTypeId<Components::ContrastAdaptiveSharpenEffect>();
-    static const ECS::ComponentTypeId vignetteId = ECS::GetComponentTypeId<Components::VignetteEffect>();
-
-    int nextOrder = 0;
+    // Each stack numbers its entries from zero in the visual order, through its
+    // host's writer. Sections the writer declines (another stack's entries,
+    // entries that keep no order) consume no slot.
+    std::vector<ECS::ComponentTypeId> numberedHosts;
     for (ECS::ComponentTypeId orderedId : m_ComponentOrder)
     {
-        if (orderedId == casId)
-        {
-            if (auto* c = m_World->GetComponentForWrite<Components::ContrastAdaptiveSharpenEffect>(m_Entity))
-                c->StackOrder = nextOrder++;
-        }
-        else if (orderedId == vignetteId)
-        {
-            if (auto* c = m_World->GetComponentForWrite<Components::VignetteEffect>(m_Entity))
-                c->StackOrder = nextOrder++;
-        }
+        ECS::ComponentTypeId hostTypeId{};
+        Editor::EditorComponentTraits hostTraits;
+        if (!Editor::EditorComponentTraitsRegistry::Get().TryGetSectionHost(orderedId, hostTypeId, hostTraits) ||
+            !hostTraits.SetStackEffectOrder ||
+            std::find(numberedHosts.begin(), numberedHosts.end(), hostTypeId) != numberedHosts.end())
+            continue;
+        numberedHosts.push_back(hostTypeId);
+        int32 nextOrder = 0;
+        for (ECS::ComponentTypeId entryId : m_ComponentOrder)
+            if (hostTraits.SetStackEffectOrder(*m_World, m_Entity, entryId, nextOrder))
+                ++nextOrder;
     }
-
-    // Terrain modifier effects run their own stack under their own volume, so
-    // they number from zero independently of the LDR post-FX chain above. The
-    // stamp folds the canonical effect list, so a section for an effect added
-    // there is renumbered without an edit here; sections that are not effects on
-    // this entity decline and consume no stack slot.
-    int32 nextTerrainOrder = 0;
-    for (ECS::ComponentTypeId orderedId : m_ComponentOrder)
-        if (TerrainECS::SetTerrainEffectStackOrder(*m_World, m_Entity, orderedId, nextTerrainOrder))
-            ++nextTerrainOrder;
 }
 
 void InspectorPanel::BindSectionHeaderDragReorder(
@@ -4329,9 +3607,14 @@ void InspectorPanel::ShowEntity(World* world, EntityHandle entity, bool force, b
         componentIds = std::move(shared);
     }
 
+    // Keys looked up once: each lookup copies the component's registered traits.
+    std::unordered_map<ECS::ComponentTypeId, int> sortKeys;
+    sortKeys.reserve(componentIds.size());
+    for (ECS::ComponentTypeId typeId : componentIds)
+        sortKeys.emplace(typeId, SortKeyForComponent(typeId));
     std::stable_sort(componentIds.begin(), componentIds.end(),
-                     [](ECS::ComponentTypeId a, ECS::ComponentTypeId b)
-                     { return SortKeyForComponent(a) < SortKeyForComponent(b); });
+                     [&sortKeys](ECS::ComponentTypeId a, ECS::ComponentTypeId b)
+                     { return sortKeys.at(a) < sortKeys.at(b); });
 
     // Apply persisted drag-reorder for this entity on top of the default sort.
     if (m_ComponentOrderEntity == entity && !m_ComponentOrder.empty())
@@ -4415,11 +3698,13 @@ void InspectorPanel::ShowEntity(World* world, EntityHandle entity, bool force, b
         m_ComponentSectionOrder.push_back(typeId);
         if (m_ComponentSelectionAnchor == ECS::ComponentTypeId{})
             m_ComponentSelectionAnchor = typeId;
-        // Effects carry a per-effect icon image in their registration; every other
-        // component styles its header icon through a CSS class. This runs before the
+        // Effects carry a per-effect icon (a CSS class or an image) in their registration;
+        // every other component styles its header icon through a CSS class. This runs before the
         // orphan/missing-package warnings below: those tint the icon, and assigning an
         // image path resets the tint override.
-        if (effectDesc && !effectDesc->IconPath.empty())
+        if (effectDesc && !effectDesc->IconClass.empty())
+            sectionRaw->SetHeaderIconClass(std::string(effectDesc->IconClass));
+        else if (effectDesc && !effectDesc->IconPath.empty())
             sectionRaw->SetHeaderIconImagePath(std::string(effectDesc->IconPath));
         else
             sectionRaw->SetHeaderIconClass(ComponentIconClass(m_World, entity, typeId));
@@ -4427,8 +3712,8 @@ void InspectorPanel::ShowEntity(World* world, EntityHandle entity, bool force, b
             sectionRaw->SetHeaderTooltip(std::string(effectDesc->Description));
         else if (!traits.InspectorTooltip.empty())
             sectionRaw->SetHeaderTooltip(traits.InspectorTooltip);
-        else if (const char* tip = ComponentTooltip(typeId))
-            sectionRaw->SetHeaderTooltip(tip);
+        else if (std::string tip = ComponentTooltip(typeId); !tip.empty())
+            sectionRaw->SetHeaderTooltip(std::move(tip));
         if (hostSection)
         {
             sectionRaw->AddClass("inspector-hosted-section");
@@ -4835,40 +4120,7 @@ void InspectorPanel::ShowEntity(World* world, EntityHandle entity, bool force, b
 
                                                                                             if (cmd == kCmdInspectorRemoveComponent)
                                                                                             {
-                                                                                                if (!IsRemovableComponent(m_ContextComponentTypeId))
-                                                                                                    return;
-
-                                                                                                const ECS::ComponentTypeId postProcessVolumeId =
-                                                                                                    ECS::GetComponentTypeId<Components::PostProcessVolume>();
-                                                                                                const bool removingPostProcessVolume =
-                                                                                                    (m_ContextComponentTypeId == postProcessVolumeId);
-                                                                                                bool hasPostProcessEffects = false;
-                                                                                                if (m_World)
-                                                                                                {
-                                                                                                    Rendering::PostProcessEffectRegistry::ForEach(
-                                                                                                        [&](const Rendering::PostProcessEffectDescriptor& d)
-                                                                                                        {
-                                                                                                            if (!hasPostProcessEffects && m_World->HasComponent(m_Entity, d.Type))
-                                                                                                                hasPostProcessEffects = true;
-                                                                                                        });
-                                                                                                }
-                                                                                                if (removingPostProcessVolume && hasPostProcessEffects)
-                                                                                                {
-                                                                                                    m_PendingRemoveComponentTypeId = m_ContextComponentTypeId;
-                                                                                                    EnsurePostProcessVolumeRemoveModal();
-                                                                                                    if (m_RemovePostProcessConfirmModal)
-                                                                                                    {
-                                                                                                        m_RemovePostProcessConfirmModal->Show(
-                                                                                                            "Remove Post Process Volume",
-                                                                                                            "This entity still has volume effect components.\n"
-                                                                                                            "Removing the volume also removes those effect components.\n\n"
-                                                                                                            "Remove Post Process Volume anyway?",
-                                                                                                            "Remove");
-                                                                                                    }
-                                                                                                    return;
-                                                                                                }
-
-                                                                                                ExecuteRemoveComponent(m_ContextComponentTypeId);
+                                                                                                RequestRemoveComponent(m_ContextComponentTypeId);
                                                                                                 return;
                                                                                             }
 
@@ -5771,43 +5023,6 @@ void InspectorPanel::ClearVariableFieldHighlight()
     }
 }
 
-void InspectorPanel::FocusScriptVariableField(const std::string& varName)
-{
-    if (varName.empty())
-    {
-        return;
-    }
-
-    auto apply = [this, varName]()
-    {
-        HighlightVariableField(varName);
-        auto it = m_ScriptVariableFields.find(varName);
-        if (it == m_ScriptVariableFields.end() || !it->second)
-        {
-            return;
-        }
-        TextField* field = it->second;
-        const std::string& id = field->GetId();
-        if (id.empty())
-        {
-            return;
-        }
-        if (UIManager* ui = field->GetOwnerManager())
-        {
-            ui->SetFocusById(id);
-        }
-    };
-
-    if (UIElement::IsInEventDispatch())
-    {
-        PostAction(std::move(apply));
-    }
-    else
-    {
-        apply();
-    }
-}
-
 void InspectorPanel::AdjustValueByDrag(const std::string& varName, TextField* field, float totalDeltaX)
 {
     if (!field || m_DragStartValue.empty())
@@ -6431,12 +5646,10 @@ void InspectorPanel::ShowGraphTransition(const std::string& linkId,
         UIElement* conditionsContent = conditionsSection->GetContentRoot();
         m_ContentRoot->AddChild(std::move(conditionsSection));
 
-        if (m_GraphTransitionDesc.Conditions.empty())
+        if (m_GraphTransitionDesc.Conditions.empty() && GetInspectorShowInfoCardsPreference())
         {
-            auto hint = std::make_unique<Label>();
-            hint->AddClass("inspector-transition-hint");
-            hint->SetText("Add at least one condition. Compile skips unconditioned transitions.");
-            conditionsContent->AddChild(std::move(hint));
+            InspectorUI::AddInfoCard(conditionsContent,
+                                     "Add at least one condition. Compile skips unconditioned transitions.");
         }
 
         for (size_t i = 0; i < m_GraphTransitionDesc.Conditions.size(); ++i)

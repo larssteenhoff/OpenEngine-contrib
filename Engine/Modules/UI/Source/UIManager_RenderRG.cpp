@@ -54,10 +54,10 @@ UIManager::TextCoverageConstants UIManager::ResolveTextCoverageConstants(
     // space — LinearSdr and the three HDR flavours — is a linear-light
     // attachment: the ROP interpolates linear values and the terminal encode
     // owns the OETF. blendGamma names the TARGET space in both arms, so it
-    // passes through un-gated: at its 0 default the linear arm is the
-    // identity retarget by mathematics, while the encoded arm selects the
-    // full Skia-direction correction (area-exact ink out of an encoded
-    // source-over — Chrome's SK_GAMMA_SRGB configuration).
+    // passes through un-gated: each arm is the identity retarget at its own
+    // space (the linear arm at 0, the encoded arm at 1.0) and otherwise
+    // solves for the coverage whose blend lands where the target space's
+    // blend would.
     const int blendSpaceEncoded =
         targetSpace.GetKind() == UI::UITargetSpace::Kind::EncodedSrgb ? 1 : 0;
     return TextCoverageConstants{std::clamp(contrast, 0.0f, 1.0f),

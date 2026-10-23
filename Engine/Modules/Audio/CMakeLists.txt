@@ -13,6 +13,11 @@ set(AUDIO_SOURCES
     Source/miniaudio_impl.c
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    enable_language(OBJC)
+    set_source_files_properties(Source/miniaudio_impl.c PROPERTIES LANGUAGE OBJC)
+endif()
+
 add_library(Audio OBJECT ${AUDIO_PUBLIC_HEADERS} ${AUDIO_SOURCES})
 
 set_target_properties(Audio PROPERTIES
@@ -58,3 +63,7 @@ if(APPLE)
 endif()
 
 
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_link_libraries(Audio PRIVATE "-framework AVFoundation")
+endif()

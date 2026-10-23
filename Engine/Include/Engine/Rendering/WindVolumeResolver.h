@@ -21,11 +21,35 @@ struct ResolvedWind
     float32 GustFrequency = 0.5f;
     float32 GustScale = 70.0f;
     float32 Weight = 0.0f;
+    float32 RainAmount = 1.0f;
 };
+
+// std140 mirror of Includes/weather_wind_fields.glsl. The highest-priority
+// 32 enabled volumes are retained in the same deterministic order as ResolveAt.
+inline constexpr uint32 kMaxWeatherWindVolumes = 32;
+struct alignas(16) WeatherWindVolumeGPU
+{
+    float32 CenterBlend[4]{};
+    float32 AxisXExtent[4]{};
+    float32 AxisYExtent[4]{};
+    float32 AxisZExtent[4]{};
+    float32 VelocityWeight[4]{};
+    float32 Gust[4]{}; // turbulence, frequency, scale, global
+    float32 Mode[4]{}; // shape, blend mode, rain amount, reserved
+};
+struct alignas(16) WeatherWindGPU
+{
+    // x=volume count, y=water drop size, z=ripple speed, w=reserved.
+    float32 Count[4]{0.0f, 1.0f, 1.0f, 0.0f};
+    WeatherWindVolumeGPU Volumes[kMaxWeatherWindVolumes]{};
+};
+static_assert(sizeof(WeatherWindVolumeGPU) == 112);
+static_assert(sizeof(WeatherWindGPU) == 3600);
 
 class WindVolumeResolver
 {
 public:
+    static WeatherWindGPU ExtractForGpu(ECS::World& world);
     static ResolvedWind ResolveAt(ECS::World& world,
                                   float32 worldX,
                                   float32 worldY,

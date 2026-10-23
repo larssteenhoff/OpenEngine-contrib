@@ -90,13 +90,18 @@ struct SortedTransparentRunMaterialKey
     bool DoubleSided = false;
     bool IgnoreVertexColor = false;
 
+    // Compatibility binds one material texture set for the entire direct draw.
+    // Bindless runs leave this null because each instance fetches its material.
+    const Material* BoundMaterial = nullptr;
+
     bool operator==(const SortedTransparentRunMaterialKey&) const = default;
 };
 
-inline SortedTransparentRunMaterialKey MakeSortedTransparentRunMaterialKey(const Material& mat)
+inline SortedTransparentRunMaterialKey MakeSortedTransparentRunMaterialKey(const Material& mat, bool bindMaterialTextures = false)
 {
     const MaterialCompileSpec& spec = mat.GetCompileSpec();
     SortedTransparentRunMaterialKey key{};
+    key.BoundMaterial = bindMaterialTextures ? &mat : nullptr;
     key.SurfaceShaderPath = spec.surfaceShaderPath;
     key.VertexModifierPath = spec.vertexModifierPath;
     key.LightingModel = spec.lightingModel;

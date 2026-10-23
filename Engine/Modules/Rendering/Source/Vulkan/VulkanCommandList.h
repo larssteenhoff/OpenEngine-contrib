@@ -48,7 +48,7 @@ namespace Rendering {
         // Releases command-buffer-scoped helpers through the device's deferred
         // destruction path, then nulls out m_CommandBuffer so the destructor won't
         // double-recycle it.
-        void OnSubmitted();
+        void OnSubmitted(SemaphoreHandle timeline = {}, uint64_t timelineValue = 0);
 
         // Access the underlying VkCommandBuffer (for submit/tracking).
         VkCommandBuffer GetVkCommandBuffer() const { return m_CommandBuffer; }
@@ -240,6 +240,15 @@ namespace Rendering {
         // VulkanPipeline::layoutPushStageFlags when the pipeline recorded it.
         VkShaderStageFlags ResolvePushConstantStageFlags(const VulkanPipeline* pipeline,
                                                          VkShaderStageFlags metadataStages) const;
+
+        // Raster state is consumed by draws. Keeping it pending avoids dirtying
+        // graphics state before compute-only work on Adreno Vulkan 1.1 drivers.
+        void ApplyRasterState();
+        VkPipeline m_BoundGraphicsPipeline = VK_NULL_HANDLE;
+        VkViewport m_Viewport{};
+        VkRect2D m_Scissor{};
+        bool m_ViewportPending = false;
+        bool m_ScissorPending = false;
 
         VulkanDevice* m_Device;
         VkCommandBuffer m_CommandBuffer = VK_NULL_HANDLE;

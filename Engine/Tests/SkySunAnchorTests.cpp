@@ -40,6 +40,7 @@
 #include "Rendering/Sky/SkySettings.h"
 #include "Scene/SceneIO.h"
 #include "SkySunAnchorHarness.h"
+#include "TestTempDir.h"
 #include "Types/ColorUtils.h"
 
 using namespace GameEngine;
@@ -539,8 +540,8 @@ TEST(SkyLinkedSun, ChangingTheUnitAtNightKeepsTheNightAndTheDay)
 // system, noon must deliver the sun the author set, not the night's moonlight.
 TEST(SkyLinkedSun, ASceneSavedAtNightReloadsWithItsDaySun)
 {
-    const std::filesystem::path scenePath =
-        std::filesystem::temp_directory_path() / "SkyLinkedSun_saved_at_night.scene";
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("SkyLinkedSun")};
+    const std::filesystem::path scenePath = directory.Path() / "SkyLinkedSun_saved_at_night.scene";
     {
         LinkedSunHarness saved(kShippedSunLux);
         saved.SetHours(kMidnightHours);

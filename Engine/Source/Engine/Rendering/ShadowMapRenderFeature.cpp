@@ -4,6 +4,7 @@
 #include "Engine/Rendering/RenderServices.h"
 
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/CameraDerivation.h"
 #include "Rendering/Common/Frustum.h"
 #include "Rendering/Core/BindlessResourceManager.h"
@@ -21,6 +22,8 @@
 #include <limits>
 
 #include <glm/gtc/matrix_access.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 namespace GameEngine
 {
@@ -29,6 +32,41 @@ namespace Engine::Renderer
 using namespace ::GameEngine::Rendering;
 
 using Mathematics::AABB;
+
+void RebaseDirectionalShadowData(ShadowDataGPU& data, const CameraData& source, const CameraData& receiver)
+{
+    const auto origin = [](const CameraData& c)
+    {
+        glm::vec3 p;
+        SectorToWorld(ComputeRenderOriginSector(c.cameraPos[0], c.cameraPos[1], c.cameraPos[2]),
+                      p.x, p.y, p.z);
+        return p;
+    };
+    const auto receiverOrigin = origin(receiver);
+    const auto originDelta = receiverOrigin - origin(source);
+    const auto translation = glm::translate(glm::mat4(1), originDelta);
+    // Terrain coordinates carry the same render origin as the cascade matrices.
+    data.terrainShadowGrid0[0] -= originDelta.x;
+    data.terrainShadowGrid0[1] -= originDelta.z;
+    data.terrainShadowGrid0[2] -= originDelta.x;
+    data.terrainShadowGrid0[3] -= originDelta.z;
+    data.terrainShadowGrid3[2] -= originDelta.y;
+    for (auto& matrix : data.shadowVP)
+    {
+        const auto rebased = glm::make_mat4(matrix) * translation;
+        std::memcpy(matrix, glm::value_ptr(rebased), sizeof(matrix));
+    }
+    // Source view depth (LH +Z), not the reflected camera's depth. Use double
+    // for cancellation of a large absolute camera translation with its sector.
+    double offset = source.view[14];
+    for (int i = 0; i < 3; ++i)
+    {
+        data.ShadowReferenceDepth[i] = source.view[i * 4 + 2];
+        offset += static_cast<double>(data.ShadowReferenceDepth[i]) * receiverOrigin[i];
+    }
+    data.ShadowReferenceDepth[3] = static_cast<float>(offset);
+}
+
 using Mathematics::Matrix4x4;
 using Mathematics::Vector3;
 using Mathematics::Vector4;
@@ -127,11 +165,7 @@ namespace
 // in-tree, deleted only after the flip soaks.
 bool IsCasterReductionEnabled()
 {
-    static const bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_SHADOW_CASTER_REDUCTION");
-        return !env || std::strcmp(env, "0") != 0;
-    }();
+    static const bool s_Enabled = Platform::EnvironmentSwitchEnabled("GE_SHADOW_CASTER_REDUCTION", true);
     return s_Enabled;
 }
 
@@ -236,6 +270,14 @@ Rendering::BufferDesc SdsmSlotDesc()
 ShadowMapRenderFeature::ShadowMapRenderFeature()
     : m_SdsmRingRG(SdsmSlotDesc(), "SDSM_DepthBounds.RenderGraph.View")
 {
+    // Mirrors the editor's temporary Shadow Debug view in standalone Players.
+    if (const char* value = std::getenv("GE_SHADOW_DEBUG_MODE"))
+    {
+        char* end = nullptr;
+        const long mode = std::strtol(value, &end, 10);
+        if (end != value && *end == '\0' && mode >= 0 && mode < static_cast<long>(ShadowDebugMode::Count))
+            m_DebugMode = static_cast<ShadowDebugMode>(mode);
+    }
     // Motion round-robin: the built-in default (cap 2 / maxAge 2, the measured
     // lane from the 2026-07 design gates) applies unless the environment
     // overrides it (runtime setters can still override; the env is the
@@ -246,8 +288,12 @@ ShadowMapRenderFeature::ShadowMapRenderFeature()
         SetMotionMaxAge(static_cast<uint32_t>(std::strtoul(age, nullptr, 10)));
     // Fit freeze: default ON; GE_SHADOW_FIT_FREEZE=0 forces the per-frame
     // refit baseline (the A/B lane and kill switch).
-    if (const char* freeze = std::getenv("GE_SHADOW_FIT_FREEZE"))
-        m_FitFreezeEnabled = std::strcmp(freeze, "0") != 0;
+    m_FitFreezeEnabled = Platform::EnvironmentSwitchEnabled("GE_SHADOW_FIT_FREEZE", m_FitFreezeEnabled);
+    // The compatibility profile (the browser, and any device without bindless) defaults to DPCF:
+    // the same contact hardening from one tap set, without PCSS's blocker search. RenderServices
+    // applies the profile before any feature is created.
+    if (Rendering::IsCompatShaderProfile())
+        m_FilterQuality = ShadowFilterQuality::DPCF;
 }
 
 ShadowMapRenderFeature::~ShadowMapRenderFeature()

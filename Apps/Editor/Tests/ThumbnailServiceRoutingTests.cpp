@@ -20,6 +20,7 @@
 #include "FileSystem/FileSystem.h"
 #include "Logger/CallbackSink.h"
 #include "Logger/Logger.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
@@ -32,7 +33,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 using GameEngine::AssetManager;
@@ -53,16 +53,14 @@ TEST(ThumbnailServiceRouting, SpawnSettlePolicy)
 namespace
 {
 
+// Every root lives under one per-process directory, removed at process exit.
 std::filesystem::path MakeTempRoot(const char* label)
 {
+    static const GameEngine::TestUtils::ScopedTempDir processRoot(GameEngine::TestUtils::MakeUniqueTempDirectory("ge-thumbroute"));
     static std::atomic<uint32_t> counter{0};
-    const auto tid = static_cast<uint64_t>(
-        std::hash<std::thread::id>{}(std::this_thread::get_id()));
-    std::filesystem::path root = std::filesystem::temp_directory_path() /
-        ("ge-thumbroute-" + std::string(label) + "-" + std::to_string(tid) + "-" +
-         std::to_string(counter.fetch_add(1)));
+    std::filesystem::path root =
+        processRoot.Path() / (std::string(label) + "-" + std::to_string(counter.fetch_add(1)));
     std::error_code ec;
-    std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
     return root;
 }
@@ -143,6 +141,20 @@ struct Recorder
     {
         std::unique_lock<std::mutex> lock(Mutex);
         return Cv.wait_for(lock, timeout, [&] { return Results.size() >= count; });
+    }
+
+    // The service hands results to the UI thread in BeginFrame; the editor's
+    // frame loop pumps it, so the test does the same while it waits.
+    bool PumpUntilCount(ThumbnailService& service, size_t count)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!WaitForCount(count, std::chrono::milliseconds(5)))
+        {
+            if (std::chrono::steady_clock::now() > deadline)
+                return false;
+            service.BeginFrame();
+        }
+        return true;
     }
 };
 
@@ -282,7 +294,7 @@ TEST(ThumbnailServiceRouting, TextureAssetsReachTheTextureHandler)
     // full-resolution source merely to fill a browser cell.
     EXPECT_TRUE(immediate.empty());
 
-    ASSERT_TRUE(recorder.WaitForCount(1));
+    ASSERT_TRUE(recorder.PumpUntilCount(fixture.Service, 1));
     const auto expected =
         fixture.CacheRoot / TextureThumbnailHandler::MakeCacheFileName(source);
     EXPECT_EQ(recorder.Results[0], expected.generic_string());
@@ -318,7 +330,7 @@ TEST(ThumbnailServiceRouting, CacheRootReachesHandlersRegisteredEitherSide)
 
     Recorder recorder;
     service.GetOrRequest(source, 128, recorder.Callback());
-    ASSERT_TRUE(recorder.WaitForCount(1));
+    ASSERT_TRUE(recorder.PumpUntilCount(service, 1));
     EXPECT_EQ(recorder.Results[0],
               (cacheRoot / TextureThumbnailHandler::MakeCacheFileName(source)).generic_string());
 }

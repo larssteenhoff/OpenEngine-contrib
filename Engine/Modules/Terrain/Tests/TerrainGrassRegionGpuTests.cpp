@@ -15,11 +15,11 @@
 #include "Rendering/Materials/ShaderCompileService.h"
 #include "Rendering/Materials/MaterialBuilder.h"
 #include "Source/Vulkan/VulkanDevice.h"
+#include "TestTempDir.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -58,7 +58,7 @@ protected:
     PipelineHandle Pipeline{};
     DescriptorSetHandle DescriptorSet{};
     SamplerHandle Sampler{};
-    std::filesystem::path Cache;
+    const TestUtils::ScopedTempDir Cache{TestUtils::MakeUniqueTempDirectory("GrassRegionGpu")};
 
     void SetUp() override
     {
@@ -70,8 +70,6 @@ protected:
         if (!Device->Initialize(desc)) GTEST_SKIP() << "Vulkan unavailable";
         Feature = std::make_unique<TerrainRenderFeature>();
         ASSERT_TRUE(Feature->Initialize(Device.get()));
-        Cache = std::filesystem::temp_directory_path() / ("GrassRegionGpu-" + std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count()));
     }
     void TearDown() override
     {
@@ -86,10 +84,6 @@ protected:
             if (Pipeline.IsValid()) Device->DestroyPipeline(Pipeline);
             Device->Shutdown();
         }
-        std::error_code error;
-        if (!Cache.empty() && Cache.parent_path() == std::filesystem::temp_directory_path()
-            && Cache.filename().string().starts_with("GrassRegionGpu-"))
-            std::filesystem::remove_all(Cache, error);
     }
     BufferHandle Buffer(const void* data, size_t size, BufferUsage usage)
     {
@@ -141,7 +135,7 @@ protected:
         ShaderProgramCompileRequest request{};
         const auto modules = std::filesystem::path(GRASS_REGION_MODULES_DIR);
         request.baseDirectory = modules / "TerrainGrass/Shaders/TerrainGrass";
-        request.cacheRoot = Cache;
+        request.cacheRoot = Cache.Path();
         request.includeDirs = {modules / "TerrainGrass/Shaders", modules / "CBTTerrain/Shaders/CBT",
             modules / "Rendering/Shaders", request.baseDirectory};
         ShaderStageCompileSpec stage{};

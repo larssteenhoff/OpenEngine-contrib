@@ -87,6 +87,8 @@ struct Vector3
     explicit operator glm::vec3() const { return glm::vec3(x, y, z); }
 };
 
+// Three packed floats: the float[3] drawing and upload APIs read a Vector3
+// through &v.x.
 static_assert(std::is_standard_layout_v<Vector3>);
 static_assert(sizeof(Vector3) == 3 * sizeof(float));
 

@@ -137,6 +137,65 @@ struct PostProcessSettings
     // View-only, never blended and never reflected: the Tonemap node reads it directly.
     PostProcessViewOutput ViewOutput = PostProcessViewOutput::Look;
 
+    // Depth-based pixelation, disabled until a volume enables it.
+    float32 DepthPixelationIntensity = 0.0f;
+    int32 DepthPixelationAutoBandResolution = 0;
+    int32 DepthPixelationAutoFarPixelSize = 1;
+    int32 DepthPixelationSimpleScreenSpace = 0;
+    int32 DepthPixelationStabilizationMode = 0;
+    float32 DepthPixelationNearEnd = 10.0f;
+    float32 DepthPixelationMiddleEnd = 40.0f;
+    float32 DepthPixelationNearResolution = 360.0f;
+    float32 DepthPixelationMiddleResolution = 180.0f;
+    float32 DepthPixelationFarResolution = 90.0f;
+    float32 DepthPixelationSkyResolution = 90.0f;
+    int32 DepthPixelationDistanceMode = 0;
+    int32 DepthPixelationBandCount = 3;
+    float32 DepthPixelationBand3End = 100.0f;
+    float32 DepthPixelationBand4End = 160.0f;
+    float32 DepthPixelationBand5End = 240.0f;
+    float32 DepthPixelationBand6End = 360.0f;
+    float32 DepthPixelationBand7End = 520.0f;
+    float32 DepthPixelationBand8End = 720.0f;
+    float32 DepthPixelationBand9End = 1000.0f;
+    float32 DepthPixelationBand4Resolution = 90.0f;
+    float32 DepthPixelationBand5Resolution = 90.0f;
+    float32 DepthPixelationBand6Resolution = 90.0f;
+    float32 DepthPixelationBand7Resolution = 90.0f;
+    float32 DepthPixelationBand8Resolution = 90.0f;
+    float32 DepthPixelationBand9Resolution = 90.0f;
+    float32 DepthPixelationBand10Resolution = 90.0f;
+    float32 DepthPixelationBand4Divisor = 4.0f;
+    float32 DepthPixelationBand5Divisor = 4.0f;
+    float32 DepthPixelationBand6Divisor = 4.0f;
+    float32 DepthPixelationBand7Divisor = 4.0f;
+    float32 DepthPixelationBand8Divisor = 4.0f;
+    float32 DepthPixelationBand9Divisor = 4.0f;
+    float32 DepthPixelationBand10Divisor = 4.0f;
+    int32 DepthPixelationResolutionMode = 0;
+    float32 DepthPixelationNearDivisor = 24.0f;
+    float32 DepthPixelationMiddleDivisor = 10.0f;
+    float32 DepthPixelationFarDivisor = 4.0f;
+    float32 DepthPixelationSkyDivisor = 4.0f;
+    int32 DepthPixelationDebugRanges = 0;
+
+    // Indices 0..9 are geometry bands; index 10 is the independent sky grid.
+    float32 GetDepthPixelationBandResolution(int index) const
+    {
+        const float32 values[] = {DepthPixelationNearResolution, DepthPixelationMiddleResolution, DepthPixelationFarResolution, DepthPixelationBand4Resolution, DepthPixelationBand5Resolution, DepthPixelationBand6Resolution, DepthPixelationBand7Resolution, DepthPixelationBand8Resolution, DepthPixelationBand9Resolution, DepthPixelationBand10Resolution, DepthPixelationSkyResolution};
+        return values[index >= 0 && index < 11 ? index : 10];
+    }
+    float32 GetDepthPixelationBandDivisor(int index) const
+    {
+        const float32 values[] = {DepthPixelationNearDivisor, DepthPixelationMiddleDivisor, DepthPixelationFarDivisor, DepthPixelationBand4Divisor, DepthPixelationBand5Divisor, DepthPixelationBand6Divisor, DepthPixelationBand7Divisor, DepthPixelationBand8Divisor, DepthPixelationBand9Divisor, DepthPixelationBand10Divisor, DepthPixelationSkyDivisor};
+        return values[index >= 0 && index < 11 ? index : 10];
+    }
+    float32 GetDepthPixelationBandEnd(int index) const
+    {
+        const float32 values[] = {DepthPixelationNearEnd, DepthPixelationMiddleEnd, DepthPixelationBand3End, DepthPixelationBand4End, DepthPixelationBand5End, DepthPixelationBand6End, DepthPixelationBand7End, DepthPixelationBand8End, DepthPixelationBand9End};
+        return values[index >= 0 && index < 9 ? index : 8];
+    }
+
     // Radial red/blue separation applied in the LDR post-process stack.
     float32 ChromaticAberrationIntensity = 0.0f;
     float32 ChromaticAberrationStartOffset = 0.25f;
@@ -622,6 +681,12 @@ struct PostProcessSettings
     // blend region never pops an envelope whose floor sits below the no-op endpoint.
     float32 ExposureClampMinWeight = 0.0f;
     float32 ExposureClampMaxWeight = 0.0f;
+
+    // Shared rain controls; absent effects preserve the preceding volume settings.
+    int32 RainSettingsActive = 0;
+    float32 WaterDropSize = 1.0f;
+    float32 FallingRainSizeOffset = 0.0f;
+    float32 WaterRippleSpeed = 1.0f;
 
     bool IsBloomActive(float32 epsilon = 1.0f / 1024.0f) const;
     void ResolveBloomPyramid(uint32 renderHeight);

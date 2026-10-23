@@ -17,31 +17,22 @@ namespace GameEngine::InspectorUI
 {
 
 /// The inspector's colour chip: one size and border for every colour row, whatever owns the
-/// value behind it. Callers hand it sRGB-encoded ARGB — the picker and the CSS palette both
-/// speak sRGB bytes, so a linear value is encoded on the way in.
-inline constexpr float kColorSwatchSizePx = 20.0f;
-inline constexpr float kColorSwatchBorderRadiusPx = 3.0f;
-inline constexpr float kColorSwatchGapPx = 6.0f;
-inline constexpr std::uint32_t kColorSwatchBorderArgb = 0xFF555555u;
-
-inline void StyleColorSwatch(UIElement* swatch, std::uint32_t argb)
+/// value behind it. `.inspector-color-swatch` in inspector.css owns the size, radius, border and
+/// cursor; code sets only the colour. Callers hand it sRGB-encoded ARGB — the picker and the CSS
+/// palette both speak sRGB bytes, so a linear value is encoded on the way in.
+inline void SetColorSwatchColor(UIElement* swatch, std::uint32_t argb)
 {
     if (!swatch)
         return;
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(kColorSwatchSizePx))
-        .Set(Style::Height, StyleLength::Px(kColorSwatchSizePx))
-        .Set(Style::MinWidth, StyleLength::Px(kColorSwatchSizePx))
-        .Set(Style::MinHeight, StyleLength::Px(kColorSwatchSizePx))
-        .Set(Style::BorderRadius,
-             CornerRadiiTLTRBRBL{kColorSwatchBorderRadiusPx, kColorSwatchBorderRadiusPx,
-                                 kColorSwatchBorderRadiusPx, kColorSwatchBorderRadiusPx})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor,
-             BorderColorsTRBL{kColorSwatchBorderArgb, kColorSwatchBorderArgb,
-                              kColorSwatchBorderArgb, kColorSwatchBorderArgb})
-        .Set(Style::BackgroundColor, argb)
-        .Set(Style::Cursor, CursorStyle::Pointer);
+    swatch->Overrides().Set(Style::BackgroundColor, argb);
+}
+
+inline std::unique_ptr<UIElement> MakeColorSwatch(std::uint32_t argb)
+{
+    auto swatch = std::make_unique<UIElement>();
+    swatch->AddClass("inspector-color-swatch");
+    SetColorSwatchColor(swatch.get(), argb);
+    return swatch;
 }
 
 /// What the colour picker opens on for an HDR linear colour: a normalized swatch and an intensity
@@ -78,6 +69,8 @@ inline std::string FormatColorRgb(float r, float g, float b)
 
 struct ColorSwatchRow
 {
+    Label* Title = nullptr;
+    UIElement* Field = nullptr;
     UIElement* Swatch = nullptr;
     Label* Value = nullptr;
 };
@@ -94,28 +87,25 @@ inline ColorSwatchRow AddColorSwatchRow(UIElement* parent, const std::string& la
         return row;
 
     UIElement* rowElement = InspectorUI::AddRow(parent);
-    if (Label* label = InspectorUI::AddLabel(rowElement, labelText, tooltip))
-        label->AddClass("inspector-label-no-drag");
+    row.Title = InspectorUI::AddLabel(rowElement, labelText, tooltip);
+    if (row.Title)
+        row.Title->AddClass("inspector-label-no-drag");
 
-    UIElement* field = InspectorUI::AddFieldContainer(rowElement);
-    if (!field)
+    row.Field = InspectorUI::AddFieldContainer(rowElement);
+    if (!row.Field)
         return row;
-    field->Overrides()
-        .Set(Style::FlexDir, FlexDirection::Row)
-        .Set(Style::AlignItems, AlignItems::Center)
-        .Set(Style::Gap, StyleLength::Px(kColorSwatchGapPx));
+    row.Field->AddClass("inspector-color-swatch-field");
 
-    auto swatch = std::make_unique<UIElement>();
+    auto swatch = MakeColorSwatch(argb);
     row.Swatch = swatch.get();
-    StyleColorSwatch(row.Swatch, argb);
-    field->AddChild(std::move(swatch));
+    row.Field->AddChild(std::move(swatch));
 
     auto value = std::make_unique<Label>();
     row.Value = value.get();
     row.Value->AddClass("inspector-text");
+    row.Value->AddClass("inspector-color-swatch-value");
     row.Value->SetText(valueText);
-    row.Value->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-    field->AddChild(std::move(value));
+    row.Field->AddChild(std::move(value));
 
     return row;
 }

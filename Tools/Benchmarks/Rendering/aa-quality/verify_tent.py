@@ -37,7 +37,7 @@ if __name__ == "__main__":
     args.output.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for scale in [1.25, 1.5, 2.0]:
-        editor.call("set_aa_mode", mode="ssaa")
+        editor.call("set_aa_mode", mode="off")
         editor.call("set_taa_render_scale", scale=scale)
         editor.call("set_camera", position=[0,0,-18], yawDeg=90, pitchDeg=0)
         editor.warm()

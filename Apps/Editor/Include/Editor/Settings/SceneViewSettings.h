@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "Editor/SceneViewPixelPerfect.h"
 #include "Editor/Settings/SettingsStore.h"
 #include "Components/Rendering/PostProcessVolume.h" // kDefaultManualExposureEv, ExposureMeter
 
@@ -117,6 +118,24 @@ public:
     static constexpr float kExposureSliderStep = 0.1f;
     static constexpr double kEvSeedDecimalGrid = 1e6;
     static constexpr float kMaxMoveAccelerationTime = 1.0f;
+    // Look sensitivity in degrees per pixel.
+    static constexpr float kDefaultLookSensitivity = 0.2f;
+    static constexpr float kMinLookSensitivity = 0.01f;
+    static constexpr float kMaxLookSensitivity = 2.0f;
+    static constexpr bool kDefaultInvertY = false;
+    static constexpr bool kDefaultGridVisibleOnStartup = false;
+    // Editor-side render scale override; above 1.0 supersamples (SSAA).
+    static constexpr float kDefaultRenderScale = 1.0f;
+    static constexpr float kMinRenderScale = 0.25f;
+    static constexpr float kMaxRenderScale = 2.0f;
+    static constexpr bool kDefaultDirectionalLightGizmoDetailsOnlyOnSelection = true;
+    static constexpr bool kDefaultPointLightGizmoDetailsOnlyOnSelection = false;
+    static constexpr bool kDefaultSpotLightGizmoDetailsOnlyOnSelection = false;
+    static constexpr uint32_t kDefaultGridColor3D = 0xFF000000u;
+    // Semi-transparent white, so the grid sits gently over 2D backdrops.
+    static constexpr uint32_t kDefaultGridColor2D = 0x7AFFFFFFu;
+    static constexpr float kDefaultGridOpacity3D = 0.3f;
+    static constexpr float kDefaultGridOpacity2D = 0.15f;
 
     static SceneViewSettings& Get()
     {
@@ -280,8 +299,9 @@ public:
         {
             double scaleD = static_cast<double>(m_PixelPerfectScale);
             prefs.TryGetDouble("sceneView.pixelPerfectScale", scaleD);
-            int scaleInt = static_cast<int>(scaleD);
-            if (scaleInt >= 1 && scaleInt <= 6)
+            const int scaleInt = static_cast<int>(scaleD);
+            // The stored value is the scale itself (1x..64x), not the menu index.
+            if (scaleInt >= kPixelPerfectScaleMin && scaleInt <= kPixelPerfectScaleMax)
                 m_PixelPerfectScale = scaleInt;
         }
         {
@@ -797,32 +817,44 @@ public:
         Save();
     }
 
-    void SetGridColor3D(uint32_t value) { m_GridColor3D = value; Save(); }
-    void SetGridColor2D(uint32_t value) { m_GridColor2D = value; Save(); }
+    void SetGridColor3D(uint32_t value, bool save = true)
+    {
+        m_GridColor3D = value;
+        if (save)
+            Save();
+    }
+    void SetGridColor2D(uint32_t value, bool save = true)
+    {
+        m_GridColor2D = value;
+        if (save)
+            Save();
+    }
     uint32_t GetGridColor3D() const { return m_GridColor3D; }
     uint32_t GetGridColor2D() const { return m_GridColor2D; }
 
-    void SetGridOpacity3D(float value)
+    void SetGridOpacity3D(float value, bool save = true)
     {
         if (value < 0.0f) value = 0.0f;
         if (value > 1.0f) value = 1.0f;
         m_GridOpacity3D = value;
-        Save();
+        if (save)
+            Save();
     }
-    void SetGridOpacity2D(float value)
+    void SetGridOpacity2D(float value, bool save = true)
     {
         if (value < 0.0f) value = 0.0f;
         if (value > 1.0f) value = 1.0f;
         m_GridOpacity2D = value;
-        Save();
+        if (save)
+            Save();
     }
     float GetGridOpacity3D() const { return m_GridOpacity3D; }
     float GetGridOpacity2D() const { return m_GridOpacity2D; }
 
     void SetPixelPerfectScale(int value)
     {
-        if (value < 1) value = 1;
-        if (value > 64) value = 64;
+        if (value < kPixelPerfectScaleMin) value = kPixelPerfectScaleMin;
+        if (value > kPixelPerfectScaleMax) value = kPixelPerfectScaleMax;
         m_PixelPerfectScale = value;
         Save();
     }
@@ -1047,8 +1079,8 @@ public:
 
     void SetRenderScale(float value, bool save = true)
     {
-        if (value < 0.25f) value = 0.25f;
-        if (value > 2.0f) value = 2.0f; // above 1.0 = supersampling (SSAA)
+        if (value < kMinRenderScale) value = kMinRenderScale;
+        if (value > kMaxRenderScale) value = kMaxRenderScale;
         m_RenderScale = value;
         if (save)
             Save();
@@ -1137,11 +1169,11 @@ private:
 
         // Look sensitivity (degrees per pixel, must be positive)
         if (!(m_LookSensitivity > 0.0f))
-            m_LookSensitivity = 0.2f;
-        if (m_LookSensitivity < 0.01f)
-            m_LookSensitivity = 0.01f;
-        if (m_LookSensitivity > 2.0f)
-            m_LookSensitivity = 2.0f;
+            m_LookSensitivity = kDefaultLookSensitivity;
+        if (m_LookSensitivity < kMinLookSensitivity)
+            m_LookSensitivity = kMinLookSensitivity;
+        if (m_LookSensitivity > kMaxLookSensitivity)
+            m_LookSensitivity = kMaxLookSensitivity;
 
         // Fly-camera acceleration time constant (seconds; 0 = instant)
         if (!(m_MoveAccelerationTime >= 0.0f))
@@ -1193,18 +1225,17 @@ private:
         if (revealInt < 0 || revealInt > 2)
             m_RevealHiddenHoverModifier = HoverHighlightModifier::Shift;
 
-        // Render-scale clamp ([0.25, 2.0], above 1.0 = supersampling); guard
-        // against corrupt/old prefs.
+        // Render-scale clamp; guards against corrupt or old prefs.
         if (!(m_RenderScale > 0.0f))
-            m_RenderScale = 1.0f;
-        if (m_RenderScale < 0.25f)
-            m_RenderScale = 0.25f;
-        if (m_RenderScale > 2.0f)
-            m_RenderScale = 2.0f;
+            m_RenderScale = kDefaultRenderScale;
+        if (m_RenderScale < kMinRenderScale)
+            m_RenderScale = kMinRenderScale;
+        if (m_RenderScale > kMaxRenderScale)
+            m_RenderScale = kMaxRenderScale;
     }
 
-    float m_LookSensitivity = 0.2f;
-    bool  m_InvertY = false;
+    float m_LookSensitivity = kDefaultLookSensitivity;
+    bool  m_InvertY = kDefaultInvertY;
     void NotifyCameraSettingsChanged()
     {
         const auto listeners = m_CameraSettingsChangedListeners;
@@ -1230,11 +1261,11 @@ private:
     float m_MaxDistance = 2000.0f;
     bool m_ScrollWheelDollyEnabled = true;
     bool m_ScrollWheelDollyReversed = true;
-    bool m_GridVisibleOnStartup = false;
+    bool m_GridVisibleOnStartup = kDefaultGridVisibleOnStartup;
     bool m_ExactPickMode = false;
-    bool m_DirectionalLightGizmoDetailsOnlyOnSelection = true;
-    bool m_PointLightGizmoDetailsOnlyOnSelection = false;
-    bool m_SpotLightGizmoDetailsOnlyOnSelection = false;
+    bool m_DirectionalLightGizmoDetailsOnlyOnSelection = kDefaultDirectionalLightGizmoDetailsOnlyOnSelection;
+    bool m_PointLightGizmoDetailsOnlyOnSelection = kDefaultPointLightGizmoDetailsOnlyOnSelection;
+    bool m_SpotLightGizmoDetailsOnlyOnSelection = kDefaultSpotLightGizmoDetailsOnlyOnSelection;
     bool m_ShowRotationGizmo = true;
     std::array<bool, 4> m_ShowRotationGizmoInSplitViews{true, true, true, true};
     bool m_HoverNamePillEnabled = true;
@@ -1252,10 +1283,10 @@ private:
     // unused on the GPU side but preserved through prefs for future use.
     // Default 0xFF000000 keeps the legacy "darken-by-blend" look that the
     // shader produced before colors were configurable.
-    uint32_t m_GridColor3D = 0xFF000000u;
-    uint32_t m_GridColor2D = 0x7AFFFFFFu; // semi-transparent white default for 2D mode
-    float m_GridOpacity3D = 0.3f;
-    float m_GridOpacity2D = 0.15f;
+    uint32_t m_GridColor3D = kDefaultGridColor3D;
+    uint32_t m_GridColor2D = kDefaultGridColor2D;
+    float m_GridOpacity3D = kDefaultGridOpacity3D;
+    float m_GridOpacity2D = kDefaultGridOpacity2D;
     bool m_ToolOverlayBorderless = false;
     HoverHighlightMode m_HoverHighlightMode = HoverHighlightMode::WithModifier;
     HoverHighlightModifier m_HoverHighlightModifier = HoverHighlightModifier::Control;
@@ -1310,7 +1341,7 @@ private:
     // where the pixel count is 4x logical. Clamped to [0.25, 1.0]; the clustered
     // light grid, depth min/max and the rest of the world half follow the reduced
     // extent, while overlays, gizmos and UI composite at full resolution.
-    float m_RenderScale = 1.0f;
+    float m_RenderScale = kDefaultRenderScale;
 };
 
 } // namespace Editor

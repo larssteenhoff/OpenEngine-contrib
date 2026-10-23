@@ -77,8 +77,8 @@ class Archetype
     // Same locking contract as AddEntityUnsafe: caller must hold worldMutex.
     EntityHandle RemoveEntityUnsafe(EntityLocation loc);
 
-    // Initialize the colocated ArchetypeTable from registered component sizes.
-    void InitializeTable(const std::unordered_map<ComponentTypeId, std::size_t>& componentSizes);
+    // Initialize the colocated ArchetypeTable from the owning World's registered component sizes.
+    void InitializeTable();
 
     const ComponentSignature& GetSignature() const { return signature; }
     std::size_t GetEntityCount() const { return m_Table ? m_Table->GetEntityCount() : 0; }
@@ -195,24 +195,6 @@ class Archetype
     // Look up or build the outbound move-plan for a target archetype. Caller
     // must hold worldMutex exclusively — mutates m_MovePlans on first use.
     const std::vector<CopyStep>& GetOrBakeMovePlan(Archetype* target);
-
-    // Remove any graph edge that points to an archetype in the given set.
-    // Called after PruneEmptyArchetypes to avoid dangling edge pointers.
-    void EraseEdgesTo(const std::unordered_set<Archetype*>& pruned)
-    {
-        for (auto it = m_AddEdges.begin(); it != m_AddEdges.end();)
-            it = pruned.count(it->second) ? m_AddEdges.erase(it) : std::next(it);
-        for (auto it = m_RemoveEdges.begin(); it != m_RemoveEdges.end();)
-            it = pruned.count(it->second) ? m_RemoveEdges.erase(it) : std::next(it);
-        if (m_DisableEdge && pruned.count(m_DisableEdge))
-            m_DisableEdge = nullptr;
-        if (m_EnableEdge && pruned.count(m_EnableEdge))
-            m_EnableEdge = nullptr;
-        // Move plans are keyed on target archetype pointers — drop any plan
-        // whose target was pruned to avoid dangling keys.
-        for (auto it = m_MovePlans.begin(); it != m_MovePlans.end();)
-            it = pruned.count(it->first) ? m_MovePlans.erase(it) : std::next(it);
-    }
 
   private:
     // ------------------------------------------------------------------

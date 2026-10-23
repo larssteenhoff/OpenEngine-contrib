@@ -5,13 +5,16 @@ import { z } from "zod";
 import { freeDebugPort } from "../build/debug-port.js";
 import { defaultCaptureDir, launchEditorProcess, type RenderDocLaunch, resolveRenderdoccmd, waitForEditorReady } from "../build/editor-process.js";
 import { buildArgs, ctestArgs, detectArch, detectPreset, editorExePath, isCustomBuild, normalizePreset } from "../build/preset.js";
+import { runToolGate } from "../build/tool-gate.js";
 import { repoRoot } from "../paths.js";
 import { defineTool, type ToolDef, ToolError } from "../registry.js";
 
 const execFileAsync = promisify(execFile);
 
 // Building and launching happen on this host, not in the editor — these are the
-// only tools in the registry with no debug-server method behind them.
+// only tools in the registry with no debug-server method behind them. Every tool
+// here that starts a build, a test run or an editor runs the tool gate first
+// (build/tool-gate.ts), before it touches a process.
 
 export const tools: ToolDef[] = [
   defineTool({
@@ -26,6 +29,7 @@ export const tools: ToolDef[] = [
       preset: z.string().optional().describe("CMake preset (auto-detected from platform/arch/VS version if omitted)"),
     },
     run: async ({ target, config, jobs, preset }) => {
+      await runToolGate();
       const t = target ?? "Editor";
       const c = config ?? "DebugFast";
       const j = String(jobs ?? 12);
@@ -67,6 +71,7 @@ export const tools: ToolDef[] = [
       preset: z.string().optional().describe("CMake preset (auto-detected if omitted)"),
     },
     run: async ({ testFilter, config, preset }) => {
+      await runToolGate();
       const c = config ?? "DebugFast";
       const p = normalizePreset(preset ?? detectPreset(c));
       const args = ctestArgs(p, c, testFilter);
@@ -100,6 +105,7 @@ export const tools: ToolDef[] = [
       captureDir: z.string().optional().describe("renderdoc=true: directory for .rdc files (default: <editor exe dir>/Captures). The editor is pointed at the same directory via GE_RENDERDOC_CAPTURE_DIR."),
     },
     run: async ({ config, preset, extraArgs, renderdoc, captureCompat, captureDir }) => {
+      await runToolGate();
       const c = config ?? "DebugFast";
       const p = normalizePreset(preset ?? detectPreset(c));
       const exe = editorExePath(p, c);
@@ -183,6 +189,7 @@ export const tools: ToolDef[] = [
       jobs: z.coerce.number().optional().describe("Parallel jobs (default: 12)"),
     },
     run: async ({ config, target, jobs }) => {
+      await runToolGate();
       const c = config ?? "DebugFast";
       const t = target ?? "Editor";
       const j = String(jobs ?? 12);
@@ -211,7 +218,9 @@ export const tools: ToolDef[] = [
         throw new ToolError(`BUILD FAILED (exit ${err.code}):\n${output}`);
       }
 
-      // Step 3: Launch editor.
+      // Step 3: Launch editor. The gate runs again: what it guards may have
+      // changed while the build ran.
+      await runToolGate();
       const exe = editorExePath(p, c);
       if (!fs.existsSync(exe)) throw new ToolError(`Editor exe not found at ${exe} after build.`);
       const { pid } = launchEditorProcess(exe);

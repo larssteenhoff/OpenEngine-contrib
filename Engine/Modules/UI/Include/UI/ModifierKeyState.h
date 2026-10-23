@@ -19,10 +19,14 @@ class ModifierKeyState
     void ApplyKeyEvent(int key, bool released, int mods);
 
     /// Reconcile against the platform mask on an event that is not a key event,
-    /// such as a mouse button. This is the only way a modifier held from before
-    /// the window took focus becomes visible: no key event ever arrives for it,
-    /// and the platform sends no synthetic press on focus gain.
-    void ApplyEventMask(int mods) { Derive(mods, 0); }
+    /// such as a mouse button. The mask is the OS's live modifier state at that
+    /// instant, so it is authoritative both ways: it is the only report of a
+    /// modifier held from before the window took focus (no key event ever
+    /// arrives for it), and it releases a modifier whose key-up this manager
+    /// never saw — a release swallowed by a native menu's nested loop, or one
+    /// delivered to another window. Without that release the modifier would
+    /// stick, and every later plain click would arrive as a modifier-click.
+    void ApplyEventMask(int mods);
 
     /// Reconcile against a live query of the platform's modifier state, which
     /// outranks the physical key state this object tracked from events. A

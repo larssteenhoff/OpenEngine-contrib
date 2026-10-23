@@ -65,6 +65,8 @@
 #include "AssetCore/AssetEvents.h" // AssetEvent/AssetEventType for the hot-reload drive
 #include "AssetCore/GUID.h"
 
+#include "TestTempDir.h"
+
 using namespace GameEngine;
 using namespace GameEngine::Rendering;
 using namespace GameEngine::UIParsing;
@@ -114,12 +116,11 @@ std::filesystem::path WriteUxml(const std::filesystem::path& dir, const char* na
 struct HudFixture
 {
     HudFixture(IDevice* dev, const char* dirName, const char* uxmlBody)
-        : Root(std::filesystem::temp_directory_path() / dirName)
+        : Directory(TestUtils::MakeUniqueTempDirectory(dirName))
+        , Root(Directory.Path())
         , Pool(2)
         , Rg(dev)
     {
-        std::error_code ec;
-        std::filesystem::remove_all(Root, ec);
         if (!Assets.Initialize(Root, &Pool))
             return;
 
@@ -207,6 +208,8 @@ struct HudFixture
     static constexpr float kOutsideY = 10.0f;
 
     bool Ok = false;
+    // Declared before every reader so the directory outlives the pool, the asset manager and the host.
+    TestUtils::ScopedTempDir Directory;
     std::filesystem::path Root;
     std::filesystem::path UxmlPath;
     std::filesystem::path CssPath;
@@ -897,10 +900,9 @@ TEST(GameUIElementHandleTests, InstanceIdStaysValidWhileOverlayIsSuppressed)
         GTEST_SKIP() << "Device init failed";
     UIRegistration::RegisterBuiltInControls();
 
+    const TestUtils::ScopedTempDir tempDir(TestUtils::MakeUniqueTempDirectory("gameui_handle_arm7"));
     JobSystem::WorkStealingThreadPool pool(2);
-    const auto root = std::filesystem::temp_directory_path() / "gameui_handle_arm7";
-    std::error_code ec;
-    std::filesystem::remove_all(root, ec);
+    const auto root = tempDir.Path();
     AssetManager assets;
     ASSERT_TRUE(assets.Initialize(root, &pool));
 

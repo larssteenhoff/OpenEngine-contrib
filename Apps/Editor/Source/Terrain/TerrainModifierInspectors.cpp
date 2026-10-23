@@ -688,19 +688,55 @@ void AddEmptyVolumeNotice(const InspectorContext& ctx)
 
 void RegisterTerrainModifierInspectors()
 {
-    // The Surface Rules effect's two editor icons, registered rather than added to the inspector's
-    // and the hierarchy's built-in type chains. Those chains are the central hubs this registry
-    // exists to keep closed, and the effect's editor surface is owned here.
-    //
-    // The hierarchy class is what makes the row read as the rules rather than as the volume: the
-    // entity carries TerrainModifierVolume too, and the traits lookup runs ahead of the volume
-    // branches, so the rules win the row without either chain naming this type.
+    // A modifier volume sits above the effects that stack inside it, so the section order the
+    // user drags is already the stack order. Effects take consecutive keys in canonical-list
+    // order, derived rather than restated, so one added to ModifierEffectComponents sorts among
+    // its siblings with no edit here. The band ends below the camera's section (CameraInspector).
+    constexpr int kModifierVolumeSortKey = 50;
+    constexpr int kFirstTerrainEffectSortKey = kModifierVolumeSortKey + 1;
+    constexpr int kTerrainEffectBandEnd = 120;
+    static_assert(kFirstTerrainEffectSortKey + static_cast<int>(TerrainECS::kTerrainEffectTypeCount)
+                      <= kTerrainEffectBandEnd,
+                  "the terrain effect band grew into the camera's section slot: move the keys "
+                  "apart before adding another effect.");
     {
         Editor::EditorComponentTraits traits;
-        traits.InspectorIconClass = "inspector-section-icon-terrain-surface-rules";
-        traits.HierarchyRowClass = "hierarchy-entity-terrain-surface-rules";
+        traits.DisplayName = "Terrain Modifier Volume";
+        traits.Category = "Terrain";
+        traits.SortKey = kModifierVolumeSortKey;
+        traits.InspectorIconClass = "inspector-section-icon-terrain";
+        traits.HostsInspectorSection = TerrainECS::IsTerrainEffectComponent;
+        traits.HostedEnableToggleTooltip = "Switch this effect on or off. Off skips it and keeps its settings.";
+        traits.MissingHostBadge = "No Volume";
+        traits.MissingHostWarning =
+            "This effect has no Terrain Modifier Volume on its entity, so it is inactive. "
+            "Add a Terrain Modifier Volume (the effect nests under it, and the volume defines "
+            "the region it applies to), or remove the effect.";
+        // The write folds the canonical effect list, so an effect added there is
+        // renumbered with no edit here.
+        traits.SetStackEffectOrder = &TerrainECS::SetTerrainEffectStackOrder;
+        traits.EnableToggleTooltip = "Switch this component on or off. Off suspends every effect in this volume.";
         Editor::EditorComponentTraitsRegistry::Get().Register(
-            ECS::GetComponentTypeId<TerrainSurfaceRulesEffect>(), std::move(traits));
+            ECS::GetComponentTypeId<TerrainModifierVolume>(), std::move(traits));
+    }
+
+    // The Surface Rules effect also carries its two editor icons. The hierarchy class is what
+    // makes the row read as the rules rather than as the volume: the entity carries
+    // TerrainModifierVolume too, and the traits lookup runs ahead of the volume branches, so the
+    // rules win the row without either chain naming this type.
+    int effectSortKey = kFirstTerrainEffectSortKey;
+    for (const TerrainECS::TerrainEffectTypeInfo& info : TerrainECS::TerrainEffectTypes())
+    {
+        Editor::EditorComponentTraits traits;
+        // The canonical title, so the section header and the Add Effect picker cannot drift apart.
+        traits.DisplayName = std::string(info.Title);
+        traits.SortKey = effectSortKey++;
+        if (info.TypeId == ECS::GetComponentTypeId<TerrainSurfaceRulesEffect>())
+        {
+            traits.InspectorIconClass = "inspector-section-icon-terrain-surface-rules";
+            traits.HierarchyRowClass = "hierarchy-entity-terrain-surface-rules";
+        }
+        Editor::EditorComponentTraitsRegistry::Get().Register(info.TypeId, std::move(traits));
     }
 
     // ---- Modifier Volume: the region every effect on this entity shares ----
@@ -725,7 +761,8 @@ void RegisterTerrainModifierInspectors()
                               || comp->Shape == TerrainVolumeShape::SplineArea;
         if (splineShape)
         {
-            InspectorUI::AddLine(ctx.Parent, "Region comes from the Spline on this entity");
+            if (ctx.ShowInfoCards)
+                InspectorUI::AddInfoCard(ctx.Parent, "Region comes from the Spline on this entity");
             if (!ctx.World->GetComponent<SplineComponent>(ctx.Entity))
             {
                 ctx.Parent->AddChild(std::make_unique<EditorUI::InspectorNotice>(
@@ -834,19 +871,6 @@ void RegisterTerrainModifierInspectors()
 
         AddTerrainEffectButton(ctx);
     });
-    {
-        Editor::EditorComponentTraits traits;
-        traits.EnableToggleTooltip = "Switch this component on or off. Off suspends every effect in this volume.";
-        traits.HostsInspectorSection = TerrainECS::IsTerrainEffectComponent;
-        traits.HostedEnableToggleTooltip = "Switch this effect on or off. Off skips it and keeps its settings.";
-        traits.MissingHostBadge = "No Volume";
-        traits.MissingHostWarning =
-            "This effect has no Terrain Modifier Volume on its entity, so it is inactive. "
-            "Add a Terrain Modifier Volume (the effect nests under it, and the volume defines "
-            "the region it applies to), or remove the effect.";
-        Editor::EditorComponentTraitsRegistry::Get().Register(
-            ECS::GetComponentTypeId<TerrainModifierVolume>(), std::move(traits));
-    }
 
     // ---- Flatten effect ----
     InspectorRegistry::Get().RegisterComponentInspector<TerrainFlattenEffect>(

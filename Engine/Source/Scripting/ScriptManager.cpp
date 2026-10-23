@@ -15,6 +15,7 @@
 #include "Jobs/IncrementalCompileHints.h"
 #include "Jobs/WorkspaceId.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Scripting/PathResolver.h"
 #include "Scene/KeptComponentResolver.h"
 #include <algorithm>
@@ -29,8 +30,6 @@
 #include <utility>
 
 #include "Scripting/ScriptingABI.h"
-
-#include <cstdlib>
 
 #ifdef _WIN32
 #include <libloaderapi.h>
@@ -169,7 +168,10 @@ bool ScriptManager::Initialize(const ScriptsConfig& config, JobSystem::WorkSteal
 
     m_WorkspaceRoot = config.workspaceRoot;
     m_ScriptsDirectory = config.scriptsRoot;
-    m_AssembliesDirectory = config.assembliesRoot;
+    {
+        std::lock_guard<std::mutex> lock(m_AssembliesDirectoryMutex);
+        m_AssembliesDirectory = config.assembliesRoot;
+    }
     m_GeneratedProjectRoot = config.generatedProjectRoot;
     Logger::Log::Info("Generated scripts project: {}", GeneratedProjectPath().string());
     m_AutoProjectGenerationEnabled = config.enableAutoProjectGeneration;
@@ -659,7 +661,10 @@ bool ScriptManager::RebindProjectScripts(const ScriptsConfig& newConfig)
     m_ScriptTypeCount.store(0);
     m_WorkspaceRoot = newConfig.workspaceRoot;
     m_ScriptsDirectory = newConfig.scriptsRoot;
-    m_AssembliesDirectory = newConfig.assembliesRoot;
+    {
+        std::lock_guard<std::mutex> lock(m_AssembliesDirectoryMutex);
+        m_AssembliesDirectory = newConfig.assembliesRoot;
+    }
     m_GeneratedProjectRoot = newConfig.generatedProjectRoot;
 
     // 4. Create directories if missing.
@@ -732,10 +737,12 @@ void ScriptManager::Shutdown()
     m_EditorScriptsWatchSubscription.reset();
     m_PackageModuleWatchSubscriptions.clear();
 
-    // Unsubscribing does not wait for a change event already being dispatched.
-    // Once this lock is held, every reload start either published its future
-    // and task handle (joined below) or will see m_ShuttingDown and refuse, so
-    // none reaches m_HotReloadPipeline after it is reset.
+    // Unsubscribing waits for this manager's OnFileChanged calls already
+    // running, so none runs from here on; other threads can still start a reload
+    // through RecompileAndReloadAsync or ReloadScriptAssemblies. Once this lock
+    // is held, every reload start either published its future and task handle
+    // (joined below) or will see m_ShuttingDown and refuse, so none reaches
+    // m_HotReloadPipeline after it is reset.
     std::vector<JobSystem::TaskHandle> trackedCompileTasks;
     {
         std::lock_guard<std::mutex> lock(m_HotReloadStartMutex);
@@ -951,8 +958,7 @@ ScriptCompilationResult ScriptManager::CompileScripts(const std::atomic<bool>* c
 // Default to CompileServer; allow opt-out via GE_DISABLE_COMPILE_SERVER=1
 static bool DisableCompileServer()
 {
-    const char* env = std::getenv("GE_DISABLE_COMPILE_SERVER");
-    return env && std::string(env) == "1";
+    return Platform::EnvironmentSwitchEnabled("GE_DISABLE_COMPILE_SERVER", false);
 }
 
 ScriptCompilationResult ScriptManager::CompileProject(const std::filesystem::path& projectPath, const std::atomic<bool>* cancelRequested)
@@ -1093,8 +1099,7 @@ ScriptCompilationResult ScriptManager::CompileCsUnit(const std::filesystem::path
     {
         EditorIPC::NotifyCompileServerFallbackOnce();
     }
-    const char* allowEnv = std::getenv("GE_ALLOW_CLI_FALLBACK");
-    if (allowEnv && std::string(allowEnv) == "1")
+    if (Platform::EnvironmentSwitchEnabled("GE_ALLOW_CLI_FALLBACK", false))
     {
         // dotnet writes the output DLL itself and cannot be gated
         // mid-build, so a supersede that landed during the failed server
@@ -2205,6 +2210,18 @@ UniquePtr<FileWatchSubscription> ScriptManager::WatchScriptDirectory(const std::
 
     // OnFileChanged runs on a FileWatchingService watcher thread. The host app
     // arms and stops the service (the editor does both); this only subscribes.
+    //
+    // Releasing the returned handle waits for this subscription's running
+    // OnFileChanged, never for another subscriber's callback, and the main
+    // thread releases it (Shutdown, RebindProjectScripts, SetHotReloadEnabled).
+    // So OnFileChanged must never wait for the main thread. It takes
+    // m_HotReloadStartMutex and short leaf locks, none held by those callers
+    // while they unsubscribe. Its one wait on another thread is
+    // HotReloadPipeline::ExecuteAsync waiting for the run it just cancelled to
+    // clear its executing flag; that run does so at its next token check in
+    // MonitorExecution, before it waits for its stages (the main-thread swap
+    // among them). The future it replaces in m_CurrentAsyncFuture is
+    // promise-backed and does not block when destroyed.
     FilePattern pattern(directory, ".*", {".cs", ".csproj"}, /*recursive*/ true);
     return MakeUnique<FileWatchSubscription>(FileWatchingService::GetInstance().Subscribe(
         pattern, [this](const FileChangeEvent& event) { OnFileChanged(event); }));
@@ -2360,13 +2377,15 @@ void ScriptManager::SetAsyncHotReloadEnabled(bool enabled)
 
 std::filesystem::path ScriptManager::GetAssembliesDirectory() const
 {
-    // Assemblies directory is provided by ScriptsConfig and kept stable for the lifetime of ScriptManager
+    // A copy taken under the lock: RebindProjectScripts can replace the directory
+    // while a compile job or a watcher thread reads it.
+    std::lock_guard<std::mutex> lock(m_AssembliesDirectoryMutex);
     return m_AssembliesDirectory;
 }
 
 std::filesystem::path ScriptManager::GetScriptsAssemblyPath() const
 {
-    return m_AssembliesDirectory / ScriptingPaths::kScriptsAssemblyFileName;
+    return GetAssembliesDirectory() / ScriptingPaths::kScriptsAssemblyFileName;
 }
 
 namespace
@@ -2601,7 +2620,7 @@ bool ScriptManager::EnsureAutoProject(std::filesystem::path& outProjectPath) con
         // project directory.
         bool outputIsRelative = false;
         const std::string assembliesDirStr =
-            AnchorGeneratedPath(m_AssembliesDirectory, projectDir, m_WorkspaceRoot, outputIsRelative);
+            AnchorGeneratedPath(GetAssembliesDirectory(), projectDir, m_WorkspaceRoot, outputIsRelative);
         xml << "    <OutputPath>" << assembliesDirStr << "</OutputPath>\n";
         // Engine managed DLLs live in the engine managed directory (beside the executable;
         // Contents/Resources/Managed inside a macOS bundle). The baked value is a
@@ -2885,8 +2904,9 @@ bool ScriptManager::EnsureEditorAutoProject(std::filesystem::path& outProjectPat
 
 void ScriptManager::OnFileChanged(const FileChangeEvent& event)
 {
-    // Shutdown does not wait for an event already being dispatched. This is an
-    // early out; StartHotReload re-checks the flag under the start mutex.
+    // Shutdown sets m_ShuttingDown and then unsubscribes, which waits for a call
+    // already running here. This is an early out; StartHotReload re-checks the
+    // flag under the start mutex.
     if (!m_HotReloadEnabled || m_ShuttingDown.load(std::memory_order_relaxed))
     {
         return;

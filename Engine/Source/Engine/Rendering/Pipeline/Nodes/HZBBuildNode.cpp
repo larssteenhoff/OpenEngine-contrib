@@ -7,6 +7,7 @@
 
 #include "Assets/ShaderProgramAsset.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Common/Utils.h"
 #include "Rendering/Core/Device.h"
 #include "Rendering/Core/GPUCulling.h"
@@ -17,7 +18,6 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <cstdlib>
 #include <string>
 #include <string_view>
 
@@ -72,10 +72,7 @@ constexpr uint32_t kSpdFinalizeSharedMemoryBytes = 22016u;
 // restores the per-mip chain (A/B parity + escape hatch).
 bool SpdEnabled()
 {
-    static const bool enabled = [] {
-        const char* v = std::getenv("GE_HZB_SPD");
-        return !(v && std::string_view(v) == "0");
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_HZB_SPD", true);
     return enabled;
 }
 

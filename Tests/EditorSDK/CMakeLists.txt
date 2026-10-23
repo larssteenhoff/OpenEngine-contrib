@@ -18,6 +18,7 @@ find_package(GTest REQUIRED)
 # ---------------------------------------------------------------------------
 add_executable(EditorSdkRegistryTests
     EditorSdkRegistryTests.cpp
+    EditorSdkPluginLifecycleTests.cpp
     EditorSdkPanelRegistryTests.cpp
     EditorSdkMenuRegistryTests.cpp
     EditorSdkSceneCommandsTests.cpp
@@ -25,6 +26,9 @@ add_executable(EditorSdkRegistryTests
     EditorSdkSettingsRegistryTests.cpp
     # Link the shared SDK registry, as the Build panel and package modules do.
     BuildExporterRegistryTests.cpp
+    MobileBuildExporterTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/BuildSettingsStore.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/BuildExporters/MobileBuildExporter.cpp
     DebugRequestGateRegistryTests.cpp
     DirectionalShadowSettingsPageTests.cpp
     ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/DirectionalShadowSettingsPage.cpp
@@ -47,11 +51,41 @@ add_executable(EditorSdkRegistryTests
     RenderLayersSettingsPageTests.cpp
     ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/RenderLayersSettingsPage.cpp
     ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Inspectors/RenderLayerField.cpp
+    # Project Settings pages that moved from SettingsPanel to the registry: same
+    # registration-shape gate.
+    AudioSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/AudioSettingsPage.cpp
+    SceneSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/SceneSettingsPage.cpp
+    InputSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/InputSettingsPage.cpp
+    PhysicsSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/PhysicsSettingsPage.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/PhysicsProjectSettings.cpp
     # Game UI scale policy: the editor-side write and the Game UI Scaling page,
     # which SettingsPageOpenIsNotAnEditTests also seeds. Same arrangement.
     UIScaleProjectSettingsWriterTests.cpp
     ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/UIScaleProjectSettingsWriter.cpp
     ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/GameUIScaleSettingsPage.cpp
+    GridSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/GridSettingsPage.cpp
+    GizmoSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/GizmoSettingsPage.cpp
+    PerformanceSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/PerformanceSettingsPage.cpp
+    ScriptSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/ScriptSettingsPage.cpp
+    # The page's line-height row calls ScriptEditorSettings::SetLineHeight, which
+    # lives in the Editor target with the script font stack it reads, so both cpps
+    # compile in here directly.
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/ScriptEditorSettings.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/UI/EditorUIFontSettings.cpp
+    AssetImportSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/AssetImportSettingsPage.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/SvgRasterSizeField.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/SvgRasterSettings.cpp
+    AnimationSettingsPageTests.cpp
+    ${CMAKE_SOURCE_DIR}/Apps/Editor/Source/Editor/Settings/AnimationSettingsPage.cpp
     # Node Graph page: same registration-shape gate. GraphCanvas/GraphPanel
     # statics are stubbed; GraphNodeRegistry + NodeColorSettings compile in so
     # the type-color rows exist without the canvas TU.
@@ -101,6 +135,7 @@ target_include_directories(EditorSdkRegistryTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Apps/Editor/Source)
 target_link_libraries(EditorSdkRegistryTests PRIVATE
     Engine EditorSDK GTest::gtest GTest::gtest_main)
+target_include_directories(EditorSdkRegistryTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 ge_set_output_tests(EditorSdkRegistryTests)
 ge_stage_runtime_dependencies(EditorSdkRegistryTests)
@@ -213,3 +248,5 @@ add_test(NAME EditorModuleBuildLoadTest COMMAND $<TARGET_FILE:EditorModuleBuildL
 set_tests_properties(EditorModuleBuildLoadTest PROPERTIES
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     TIMEOUT 900)
+
+target_compile_definitions(EditorSdkRegistryTests PRIVATE GE_MOBILE_ENGINE_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")

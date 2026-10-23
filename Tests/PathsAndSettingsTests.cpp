@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace
@@ -284,9 +285,8 @@ TEST(Paths, BundleResourcesDirectory_ResolvesOnlyFromABundleExecutableDirectory)
 TEST(Paths, EngineManagedDirectory_IsTheBundleManagedResourcesInsideAnAppBundle)
 {
     namespace fs = std::filesystem;
-    const fs::path root = fs::temp_directory_path() / "GE_EngineManagedDirProbe";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("GE_EngineManagedDirProbe");
     std::error_code ec;
-    fs::remove_all(root, ec);
     const fs::path exeDir = root / "Probe.app" / "Contents" / "MacOS";
     const fs::path managedDir = root / "Probe.app" / "Contents" / "Resources" / "Managed";
     ASSERT_TRUE(fs::create_directories(exeDir, ec)) << ec.message();
@@ -308,6 +308,39 @@ TEST(Paths, EngineManagedDirectory_IsTheBundleManagedResourcesInsideAnAppBundle)
     EXPECT_EQ(GameEngine::ScriptingPaths::ResolveEngineManagedDirectoryFrom(flatDir), flatDir);
 
     fs::remove_all(root, ec);
+}
+
+// The native library resolves from the executable directory only: a library that happens to
+// sit in the working directory of a host launched from elsewhere is never picked up.
+TEST(Paths, NativeLibrary_IgnoresALibraryInTheWorkingDirectory)
+{
+    namespace fs = std::filesystem;
+#if defined(_WIN32)
+    const char* libraryName = "GameEngine.Native.dll";
+#elif defined(__APPLE__)
+    const char* libraryName = "libGameEngine.Native.dylib";
+#else
+    const char* libraryName = "libGameEngine.Native.so";
+#endif
+    const GameEngine::TestUtils::ScopedTempDir tree(
+        GameEngine::TestUtils::MakeUniqueTempDirectory("gameengine-native-library-cwd"));
+    const fs::path exeDir = tree.Path() / "bin" / "Tests";
+    const fs::path workingDir = tree.Path() / "work";
+    ASSERT_TRUE(fs::create_directories(exeDir));
+    ASSERT_TRUE(fs::create_directories(workingDir));
+    ASSERT_TRUE(std::ofstream(workingDir / libraryName).good());
+
+    {
+        ScopedCurrentPath cwdGuard(workingDir);
+        ASSERT_TRUE(cwdGuard.IsActive());
+        EXPECT_EQ(GameEngine::ScriptingPaths::ResolveNativeLibraryDirectoryFrom(exeDir), exeDir);
+        EXPECT_TRUE(GameEngine::ScriptingPaths::ResolveNativeLibraryPathFrom(exeDir).empty());
+    }
+
+    // Positive control: the same file name next to the executable is found, so the
+    // assertions above are not passing on a name the resolver never probes.
+    ASSERT_TRUE(std::ofstream(exeDir / libraryName).good());
+    EXPECT_EQ(GameEngine::ScriptingPaths::ResolveNativeLibraryPathFrom(exeDir), exeDir / libraryName);
 }
 
 #if defined(_WIN32)

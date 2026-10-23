@@ -1,5 +1,7 @@
 #include "Scene/SceneEditorController.h"
 
+#include "Automation/UiReplayCommandIds.h"
+#include "Editor/Registries/EditorMenuRegistry.h"
 #include "EditorInputActions.h"
 #include "Editor/Settings/BuildSettingsStore.h"
 #include "Editor/Settings/SettingsStore.h"
@@ -1316,6 +1318,12 @@ bool SceneEditorController::SaveActiveSceneAs(const std::filesystem::path& scene
     if (m_OnAfterSave)
         m_OnAfterSave(scenePath);
     return true;
+}
+
+void SceneEditorController::RegisterCommands()
+{
+    EditorMenuRegistry::Get().RegisterCommand(
+        {UiReplayCommandIds::SaveScene, [this](std::string* outError) { return SaveActiveScene(outError); }});
 }
 
 void SceneEditorController::AddRecentScenePath(const std::filesystem::path& path) const

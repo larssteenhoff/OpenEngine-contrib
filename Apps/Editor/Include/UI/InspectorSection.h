@@ -92,6 +92,9 @@ public:
     // When false, the dot toggle is hidden and the section always appears enabled.
     void SetShowEnabledToggle(bool show);
 
+    // When false, the header's options button is hidden: for a section with no options popup.
+    void SetShowOptions(bool show);
+
     // Reserves the same horizontal space as the enabled dot (invisible, no interaction)
     // so headers align with sections that show the real dot.
     void SetEnabledTogglePlaceholder(bool placeholder);

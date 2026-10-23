@@ -12,6 +12,8 @@
 #include "Engine/Rendering/RenderServices.h"
 #include "Engine/Rendering/TerrainShadowMap.h"
 #include "Logger/Logger.h"
+#include "Types/Fnv1a.h"
+#include "Platform/Environment.h"
 #include "Mathematics/MatrixOps.h"
 #include "Rendering/CameraTypes.h"
 #include "Rendering/Core/Device.h"
@@ -350,14 +352,8 @@ void RTShadowMaskService::Schedule(Rendering::RenderGraph::RGFrame& frame, uint6
 
         // FNV-1a over the record bytes, seeded with the count so N zeroed
         // records can never alias N-1 of them.
-        refreshHash = 1469598103934665603ull ^ count;
-        const auto* bytes = reinterpret_cast<const uint8_t*>(m_InstanceScratch.data());
-        const size_t byteCount = count * sizeof(Rendering::TlasInstanceData);
-        for (size_t b = 0; b < byteCount; ++b)
-        {
-            refreshHash ^= bytes[b];
-            refreshHash *= 1099511628211ull;
-        }
+        refreshHash = Hashing::Fnv1a64(m_InstanceScratch.data(), count * sizeof(Rendering::TlasInstanceData),
+                                       Hashing::kFnv1a64OffsetBasis ^ count);
         doTlasBuild = !m_TlasContentValid || refreshHash != m_BuiltInstanceHash;
     }
 
@@ -420,11 +416,7 @@ void RTShadowMaskService::Schedule(Rendering::RenderGraph::RGFrame& frame, uint6
     // but skips the TLAS build entirely, splitting the two halves of the
     // pipeline for device-loss triage. (TLAS content never confirms in that
     // lane, so the mask pass gate stays closed — by design.)
-    static const bool s_BlasOnly = []
-    {
-        const char* v = std::getenv("GE_RT_SHADOW_MASK_BLAS_ONLY");
-        return v && std::strcmp(v, "0") != 0;
-    }();
+    static const bool s_BlasOnly = Platform::EnvironmentSwitchEnabled("GE_RT_SHADOW_MASK_BLAS_ONLY", false);
 
     // 6. The build pass, on the graphics queue: build-order hazards (scratch
     //    reuse, BLAS->TLAS, prior frames) are handled with AS-stage barriers on
@@ -852,11 +844,7 @@ Rendering::RenderGraph::RGTexture RTShadowMaskService::DeclareMaskPass(
     // entirely and hand back the raw mask.
     // A/B + debugging kill switch: GE_RT_SHADOW_DENOISE=0 returns the raw
     // (grainy) mask so the denoise can be compared against it from one binary.
-    static const bool s_DenoiseEnabled = []
-    {
-        const char* v = std::getenv("GE_RT_SHADOW_DENOISE");
-        return !(v && std::strcmp(v, "0") == 0);
-    }();
+    static const bool s_DenoiseEnabled = Platform::EnvironmentSwitchEnabled("GE_RT_SHADOW_DENOISE", true);
 
     if (s_DenoiseEnabled && tanHalfAngle > 0.0f)
     {

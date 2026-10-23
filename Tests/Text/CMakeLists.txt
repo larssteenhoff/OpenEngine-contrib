@@ -56,8 +56,14 @@ foreach(_ge_t IN ITEMS FontAtlasCoreTests FontAtlasShapingTests)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${PROJECT_SOURCE_DIR}/Apps/Editor/Assets/Fonts/Roboto-Regular.ttf"
             "${PROJECT_SOURCE_DIR}/Apps/Editor/Assets/Fonts/Roboto-Italic.ttf"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/NotoSans-Regular.ttf"
             "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/NotoSansArabic-Regular.ttf"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/NotoSansDevanagari-Regular.ttf"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/NotoSansHebrew-Regular.ttf"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/NotoSansJP-Regular.otf"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/NotoSansThai-Regular.ttf"
             "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/Noto-OFL.txt"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Fonts/NotoCJK-OFL.txt"
             "$<TARGET_FILE_DIR:${_ge_t}>/TestData/Text"
         VERBATIM)
 endforeach()

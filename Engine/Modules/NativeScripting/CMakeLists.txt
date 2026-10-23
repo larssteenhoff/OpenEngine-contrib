@@ -29,6 +29,10 @@ endif()
 
 add_library(NativeScripting OBJECT ${NATIVE_SCRIPTING_SOURCES})
 
+# GE_NATIVE_MODULE_NO_UNLOAD reads through Platform's header-only environment switch.
+set_property(SOURCE Source/NativeScriptManager.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include)
+
 target_compile_features(NativeScripting PUBLIC cxx_std_20)
 
 target_include_directories(NativeScripting

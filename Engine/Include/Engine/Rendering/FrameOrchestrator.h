@@ -417,6 +417,8 @@ class FrameOrchestrator
         Compiled,
         // The engine's pipeline already stands in, from the same source; `out` is untouched.
         AlreadyApplied,
+        // Its asynchronous asset load is still running; retry on a later frame.
+        Pending,
         // There is no stand-in here (a packaged game: no 'editor' mount); `failure` says so.
         NoStandIn,
         // It cannot stand in; `failure` says why.
@@ -508,6 +510,8 @@ class FrameOrchestrator
     // cleared once the refresh runs. The fallback-retry arm re-arms via
     // m_ActiveRenderPipelineIsFallback while a transient fallback is applied.
     bool m_BlueprintRefreshNeeded = true;
+    // Retry pending loads even while a last-good pipeline or the default remains active.
+    bool m_RenderPipelineLoadPending = false;
     // The asset backing the currently-applied blueprint (when it came from a
     // requested .rendergraph, not the stand-in). Captured at resolve inside
     // EnsureActiveRenderPipelineBlueprint; cleared on path switch / resolve

@@ -87,10 +87,11 @@ bool AgentConversationRow::Build(UIManager& ui)
     m_Reply = TakeElement<MarkdownText>(*this, "AgentRowReply", m_Index);
     m_Calls = TakeElement<UIElement>(*this, "AgentRowCalls", m_Index);
     m_Status = TakeElement<UIElement>(*this, "AgentRowStatus", m_Index);
+    m_StatusText = TakeElement<TextArea>(*this, "AgentRowStatusText", m_Index);
     m_Actions = TakeElement<UIElement>(*this, "AgentRowActions", m_Index);
     m_MarkupChips = TakeElement<UIElement>(*this, "AgentRowMarkups", m_Index);
     if (!m_Header || !m_Time || !m_Stop || !m_Retry || !m_UndoTurn || !m_Retried || !m_Text || !m_Reply || !m_Calls ||
-        !m_Status || !m_Actions || !m_MarkupChips)
+        !m_Status || !m_StatusText || !m_Actions || !m_MarkupChips)
     {
         Logger::Log::Error("AI Assistant: {} is missing a row element.", kLayoutAssetPath);
         return false;
@@ -114,8 +115,8 @@ void AgentConversationRow::Show(const AgentConversationRowModel& model, const st
         m_Time->SetText(time);
         SetClassIf(*this, "agent-row-user", model.FromUser);
     }
-    if (!shown || shown->MarkupChips != model.MarkupChips)
-        BuildMarkupChips(model.MarkupChips);
+    if (!shown || shown->MarkupChips != model.MarkupChips || shown->FileChips != model.FileChips)
+        BuildChips(model.MarkupChips, model.FileChips);
     if (!shown || shown->Header != model.Header)
         m_Header->SetText(model.Header);
     if (!shown || shown->Text != model.Text || shown->FromUser != model.FromUser)
@@ -157,25 +158,10 @@ void AgentConversationRow::Show(const AgentConversationRowModel& model, const st
 
 void AgentConversationRow::ShowStatus(const AgentConversationRowModel& model)
 {
-    constexpr std::string_view kSeparator = " · ";
-    m_Status->RemoveAllChildren();
     SetClassIf(*m_Status, "hidden", model.Status.empty());
-    const std::string_view status = model.Status;
-    for (size_t start = 0; start < status.size();)
-    {
-        const size_t end = std::min(status.find(kSeparator, start), status.size());
-        // The separator leads the part after it, as in a call row's summary, so a line never
-        // ends with one.
-        const bool last = end == status.size();
-        auto part = std::make_unique<Label>();
-        part->AddClass("agent-row-status-part");
-        SetClassIf(*part, "agent-row-status-failed", model.Failed);
-        SetClassIf(*part, "agent-row-status-stopped", model.Stopped);
-        part->SetText((start == 0 ? std::string() : std::string("· ")) +
-                      std::string(status.substr(start, end - start)));
-        m_Status->AddChild(std::move(part));
-        start = last ? end : end + kSeparator.size();
-    }
+    SetClassIf(*m_StatusText, "agent-row-status-failed", model.Failed);
+    SetClassIf(*m_StatusText, "agent-row-status-stopped", model.Stopped);
+    m_StatusText->SetValue(model.Status);
 }
 
 void AgentConversationRow::ShowCalls(const std::vector<AgentCallRowModel>& calls)
@@ -198,11 +184,12 @@ void AgentConversationRow::ShowCalls(const std::vector<AgentCallRowModel>& calls
     SetClassIf(*m_Calls, "hidden", calls.empty());
 }
 
-void AgentConversationRow::BuildMarkupChips(const std::vector<MarkupChip>& chips)
+// The mark-up chips frame their mark-ups; the file chips after them only name the files sent.
+void AgentConversationRow::BuildChips(const std::vector<MarkupChip>& markups, const std::vector<std::string>& files)
 {
     m_MarkupChips->RemoveAllChildren();
-    SetClassIf(*m_MarkupChips, "hidden", chips.empty());
-    for (const MarkupChip& chip : chips)
+    SetClassIf(*m_MarkupChips, "hidden", markups.empty() && files.empty());
+    for (const MarkupChip& chip : markups)
     {
         auto button = std::make_unique<Button>();
         button->AddClass("small");
@@ -216,6 +203,13 @@ void AgentConversationRow::BuildMarkupChips(const std::vector<MarkupChip>& chips
         button->SetTooltipPlacement(UIElement::TooltipPlacement::Right);
         button->SetOnClick([this, token = chip.Token](UIEvent&) { m_OnFrameMarkup(token); });
         m_MarkupChips->AddChild(std::move(button));
+    }
+    for (const std::string& name : files)
+    {
+        auto label = std::make_unique<Label>();
+        label->AddClass("agent-row-file-chip");
+        label->SetText(name);
+        m_MarkupChips->AddChild(std::move(label));
     }
 }
 
@@ -269,6 +263,8 @@ void AgentConversationRow::RefreshTextVisuals()
 {
     if (m_Text)
         m_Text->MarkDirty(VisualDirty);
+    if (m_StatusText)
+        m_StatusText->MarkDirty(VisualDirty);
 }
 
 bool AgentConversationRow::FitHeight()
@@ -287,6 +283,12 @@ bool AgentConversationRow::FitHeight()
         textHeight = static_cast<float>(m_Text->GetVisualLineCount()) * advance + textBox.Padding.Top +
                      textBox.Padding.Bottom + textBox.BorderWidth.Top + textBox.BorderWidth.Bottom;
         moved = PinHeightPx(*m_Text, textHeight);
+    }
+    if (m_StatusText && !m_Status->HasClass("hidden"))
+    {
+        const float advance = m_StatusText->GetResolvedLineAdvancePx();
+        if (advance > 0.0f)
+            moved = PinHeightPx(*m_StatusText, static_cast<float>(m_StatusText->GetVisualLineCount()) * advance) || moved;
     }
     for (AgentCallRow* call : m_CallRows)
     {

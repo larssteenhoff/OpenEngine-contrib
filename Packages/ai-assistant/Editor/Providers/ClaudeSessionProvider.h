@@ -42,13 +42,17 @@ public:
     /// working directory (CliSessionFiles::ReadClaudeSessions).
     CliSessionList ListSessions(const CancelToken& cancel) const override;
 
-    /// The arguments of one turn: the fixed flags, `--resume <SessionId>` when the
+    /// The arguments of one turn: the fixed flags, `--input-format stream-json` when the
+    /// request has images (TurnInput), `--resume <SessionId>` when the
     /// request continues a session, `--mcp-config <file>` and `--allowedTools` naming
     /// each `mcp__<server>__<tool>` when it attaches the editor's tools, `--model
     /// <Model>` and `--effort <Effort>` when it names them and `--append-system-prompt
     /// <SystemPrompt>` when it has one. A resumed session takes them too: each turn is a
     /// process of its own, so a change applies from the next turn.
     std::vector<std::string> TurnArguments(const AgentTurnRequest& request) const override;
+    /// The prompt's text; with images, one stream-json user message holding an image block each
+    /// and then the text (TurnArguments then adds --input-format stream-json).
+    std::string TurnInput(const AgentTurnRequest& request) const override;
 
 private:
     std::string_view DisplayName() const override { return "Claude Code"; }

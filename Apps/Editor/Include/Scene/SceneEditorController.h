@@ -108,6 +108,11 @@ class SceneEditorController
     bool SaveActiveSceneAs(const std::filesystem::path& scenePath, std::string* outError,
                            DegradedSavePolicy degradedPolicy = DegradedSavePolicy::Refuse);
 
+    // Registers the scene document's fixed-id commands (UiReplayCommandIds::SaveScene)
+    // with EditorMenuRegistry. The registry keeps `this` for the process lifetime:
+    // call once, on the editor's controller.
+    void RegisterCommands();
+
     // Periodic auto-save to `<name>.backup.scene` (see settings). Call from EditorApplication::Update.
     void TickAutoSave(float deltaSeconds, bool inhibitWhileNotEditing);
 

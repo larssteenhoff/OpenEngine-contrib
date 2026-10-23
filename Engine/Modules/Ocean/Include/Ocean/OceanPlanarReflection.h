@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Rendering/CameraTypes.h"
+#include "Engine/Rendering/MirrorCaptureView.h"
 #include "Rendering/Core/Handle.h"
 #include "Rendering/Core/RenderGraph/RGFrame.h"
 
@@ -79,30 +80,17 @@ public:
     // The secondary view the forward contributors emit into — the ocean's own
     // contributor checks this to skip the surface (water must not reflect itself).
     // 0 until the view is allocated (first DeclareForView).
-    ::GameEngine::Rendering::ViewId GetReflectionViewId() const { return m_ViewId; }
+    ::GameEngine::Rendering::ViewId GetReflectionViewId() const { return m_Capture.View; }
 
 private:
-    // Allocate the persistent reflection view + camera once, configured to
-    // receive extraction submissions but skip the active pipeline.
-    void EnsureView(Engine::Renderer::RenderServices& rs,
-                    const ::GameEngine::Rendering::ViewDesc& mainView);
-
     // (Re)create the scaled colour target + sampler when the size changes.
     bool EnsureColorTexture(::GameEngine::Rendering::IDevice& device, uint32_t width,
                             uint32_t height);
 
-    // Build the mirrored camera from the main camera by reflecting across the
-    // horizontal plane y = seaLevel (position + orientation), keeping the main
-    // projection. viewProj is recomputed so culling + the world pass agree.
-    static ::GameEngine::Rendering::CameraData MakeMirroredCamera(
-        const ::GameEngine::Rendering::CameraData& main, float seaLevel);
-
     ::GameEngine::Rendering::IDevice* m_Device = nullptr;
     Engine::Renderer::RenderServices* m_RenderServices = nullptr;
 
-    ::GameEngine::Rendering::CameraId m_CameraId = 0;
-    ::GameEngine::Rendering::ViewId m_ViewId = 0;
-    bool m_ViewAllocated = false;
+    Engine::Renderer::MirrorCaptureView m_Capture{};
 
     ::GameEngine::Rendering::TextureHandle m_ColorTexture; // scaled RGBA16F
     ::GameEngine::Rendering::SamplerHandle m_Sampler;

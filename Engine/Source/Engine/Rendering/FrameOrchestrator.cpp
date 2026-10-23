@@ -1,3 +1,4 @@
+#include "Engine/Rendering/PostProcessEffectRegistry.h"
 // FrameOrchestrator.cpp
 // The frame spine, extracted from RenderServices (A1.4 S1). Owns the per-window
 // RenderGraph stream slots, the app-frame epochs + declare sequence, the
@@ -77,6 +78,7 @@
 #include <cmath>
 #include <cassert>
 #include <cstring>
+#include <future>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -569,6 +571,7 @@ void PipelineCompileReport::RecordLoadFailure(std::filesystem::path sourcePath, 
 
 void FrameOrchestrator::EnsureActiveRenderPipelineBlueprint(PipelineRefreshMode mode)
 {
+    m_RenderPipelineLoadPending = false;
     // Startup returns its failure to the caller, which reports it once.
     const bool reportFailures = mode == PipelineRefreshMode::Frame;
     // A pinned programmatic blueprint owns the slot — the asset refresh
@@ -695,9 +698,17 @@ void FrameOrchestrator::EnsureActiveRenderPipelineBlueprint(PipelineRefreshMode 
                 else
                 {
                     SharedPtr<Asset> a = am.GetAsset(guid);
+                    bool requestedLoadPending = false;
                     if (!a)
                     {
-                        a = am.LoadAssetAsync(guid).get();
+                        auto loading = am.LoadAssetAsync(guid);
+                        // Startup must resolve before the Player's first frame. Frame refreshes
+                        // keep drawing while the asset loads and retry on a later frame.
+                        requestedLoadPending = mode == PipelineRefreshMode::Frame &&
+                            loading.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+                        m_RenderPipelineLoadPending |= requestedLoadPending;
+                        if (!requestedLoadPending)
+                            a = loading.get();
                     }
 
                     auto rp = std::dynamic_pointer_cast<GameEngine::RenderPipelineAsset>(a);
@@ -773,7 +784,7 @@ void FrameOrchestrator::EnsureActiveRenderPipelineBlueprint(PipelineRefreshMode 
                             }
                         }
                     }
-                    else if (!a)
+                    else if (!a && !requestedLoadPending)
                     {
                         // The cached `path → GUID` mapping can go stale on
                         // project switch: the path string is unchanged
@@ -884,7 +895,11 @@ void FrameOrchestrator::EnsureActiveRenderPipelineBlueprint(PipelineRefreshMode 
     // A request drawing without its waiting script passes is not a last good version: when it is
     // refused, the stand-in replaces it too.
     bool applyingFallback = false;
-    if (mode == PipelineRefreshMode::Frame && !wantSetBlueprint &&
+    // A path switch resets the hash before its asset arrives. The still-owned
+    // last-good blueprint can draw throughout that pending load.
+    const bool keepLastGoodWhileLoading = m_RenderPipelineLoadPending && m_ActiveBlueprint &&
+                                         !m_ActiveRenderPipelineIsFallback && !m_ActiveBlueprintIsPartial;
+    if (mode == PipelineRefreshMode::Frame && !wantSetBlueprint && !keepLastGoodWhileLoading &&
         (m_ActiveRenderPipelineHash == 0 || m_ActiveRenderPipelineIsFallback ||
          (m_ActiveBlueprintIsPartial && m_ActiveRenderPipelineLastCompileHadErrors)))
     {
@@ -924,7 +939,7 @@ void FrameOrchestrator::EnsureActiveRenderPipelineBlueprint(PipelineRefreshMode 
             // The request's own load or compile failure is the one error line.
             m_StandInFailureReason = std::move(standInFailure);
         }
-        else if (standInFailure != m_StandInFailureReason)
+        else if (standIn == StandInCompile::Failed && standInFailure != m_StandInFailureReason)
         {
             m_StandInFailureReason = std::move(standInFailure);
             Logger::Log::Error("RenderServices: the engine's render pipeline '{}' cannot stand in for '{}', so "
@@ -959,8 +974,8 @@ void FrameOrchestrator::EnsureActiveRenderPipelineBlueprint(PipelineRefreshMode 
         // The active blueprint just swapped: drain in-flight PSO prewarm before
         // the old nodes are destroyed by SetBlueprint/EnsureBuilt (workers hold
         // PipelineDesc copies whose debugName pointers reference the old nodes'
-        // string storage) and drop stale per-material variant entries. Both are
-        // material-cache concerns, so they live behind the facade now (A1.3).
+        // string storage). A material-cache concern, so it lives behind the
+        // facade (A1.3).
         m_Services->Materials().OnActiveRenderPipelineChanged();
     }
 
@@ -1029,7 +1044,15 @@ FrameOrchestrator::StandInCompile FrameOrchestrator::CompileEngineStandIn(Pipeli
         }
         SharedPtr<Asset> asset = am.GetAsset(guid);
         if (!asset)
-            asset = am.LoadAssetAsync(guid).get();
+        {
+            auto loading = am.LoadAssetAsync(guid);
+            if (loading.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+            {
+                m_RenderPipelineLoadPending = true;
+                return StandInCompile::Pending;
+            }
+            asset = loading.get();
+        }
         auto pipeline = std::dynamic_pointer_cast<GameEngine::RenderPipelineAsset>(asset);
         if (!pipeline || !pipeline->IsLoaded())
         {
@@ -1186,6 +1209,11 @@ void FrameOrchestrator::BuildFrameGraph(Rendering::RenderGraph::RGFrame& frame,
     m_RGDeclareSeq = ++m_RGDeclareSeqCounter;
     slot->DeclareSeq = m_RGDeclareSeq;
 
+    std::vector<Pipeline::ViewTargetsRG> targets;
+    for (const auto& hooks : Rendering::PostProcessEffectRegistry::AllViewPreparations())
+        if (hooks.PrepareFrameTargets)
+            hooks.PrepareFrameTargets(*m_Services, frame, params.ViewTargets, targets);
+
     // ── Stage G: app-frame-global GPU-driven work, declared ONCE per app
     // frame into the first frame stream that gets here (the "owner frame").
     // Skinning palettes, culling visibility, draw-stream slots are one set
@@ -1328,7 +1356,7 @@ void FrameOrchestrator::BuildFrameGraph(Rendering::RenderGraph::RGFrame& frame,
             m_ActiveRenderPipelineSourceHash = 0;
             m_BlueprintRefreshNeeded = true;
         }
-        if (m_BlueprintRefreshNeeded || m_ActiveRenderPipelineIsFallback)
+        if (m_BlueprintRefreshNeeded || m_ActiveRenderPipelineIsFallback || m_RenderPipelineLoadPending)
         {
             EnsureActiveRenderPipelineBlueprint(PipelineRefreshMode::Frame);
             m_BlueprintRefreshNeeded = false;
@@ -1344,7 +1372,7 @@ void FrameOrchestrator::BuildFrameGraph(Rendering::RenderGraph::RGFrame& frame,
                 slot->AppliedBlueprintGen = m_ActiveBlueprintGen;
             }
             const auto& views = m_Services->Views().GetViews();
-            slot->Instance->Declare(frame, params.ViewTargets,
+            slot->Instance->Declare(frame, targets.empty() ? params.ViewTargets : std::span<const Pipeline::ViewTargetsRG>(targets),
                                     std::span<const Rendering::ViewDesc>(views.data(), views.size()),
                                     params.DeltaTime);
         }

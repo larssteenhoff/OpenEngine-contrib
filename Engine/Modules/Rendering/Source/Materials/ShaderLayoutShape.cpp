@@ -5,21 +5,21 @@ namespace GameEngine::Rendering
 
 void ApplyMetaImageShapeToLayout(const ShaderMeta& meta, DescriptorSetLayoutDesc& layout, uint32_t set)
 {
-    const DescriptorSetMeta* setMeta = nullptr;
-    for (const auto& s : meta.Sets)
+    for (const auto& setMeta : meta.Sets)
     {
-        if (s.Set == set)
+        if (setMeta.Set == set)
         {
-            setMeta = &s;
-            break;
+            ApplySetMetaImageShapeToLayout(setMeta, layout);
+            return;
         }
     }
-    if (!setMeta)
-        return;
+}
 
+void ApplySetMetaImageShapeToLayout(const DescriptorSetMeta& setMeta, DescriptorSetLayoutDesc& layout)
+{
     for (auto& binding : layout.bindings)
     {
-        for (const auto& bm : setMeta->Bindings)
+        for (const auto& bm : setMeta.Bindings)
         {
             if (bm.Binding != binding.binding)
                 continue;
@@ -44,6 +44,7 @@ void ApplyMetaImageShapeToLayout(const ShaderMeta& meta, DescriptorSetLayoutDesc
             binding.imageArrayed = bm.Image->Arrayed;
             binding.imageIsDepth = bm.Image->Depth;
             binding.imageIsUnsignedInteger = bm.Image->UnsignedInteger;
+            binding.imageMultisample = bm.Image->Multisample;
             // Usage, not format: reflection sets Filtered when a stage samples
             // this binding through a filtering-capable op. A compute layout
             // that leaves it unset declares UnfilterableFloat, which rejects a

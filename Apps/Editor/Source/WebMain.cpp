@@ -12,6 +12,7 @@
 // runtime kept alive.
 
 #include "EditorApplication.h"
+#include "Platform/Environment.h"
 
 #include "Core/Application.h"
 #include "Core/Engine.h"
@@ -85,9 +86,8 @@ void PlantSeedProject()
         return;
     }
 
-    const char* replantEnv = std::getenv("GE_REPLANT");
     const bool forceReplant =
-        QueryParameter("replant") == "1" || (replantEnv != nullptr && std::string(replantEnv) == "1");
+        QueryParameter("replant") == "1" || GameEngine::Platform::EnvironmentSwitchEnabled("GE_REPLANT", false);
 
     std::error_code walk;
     for (const auto& seed : std::filesystem::directory_iterator(kSeedProjectSource, walk))

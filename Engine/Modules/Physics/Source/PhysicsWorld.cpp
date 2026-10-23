@@ -33,6 +33,7 @@ public:
 
     Transform GetBodyTransform(BodyHandle) const override { return {}; }
     void SetBodyTransform(BodyHandle, const Transform&, ActivationMode) override {}
+    void MoveKinematic(BodyHandle, const Transform&, float32) override {}
 
     Vector3 GetLinearVelocity(BodyHandle) const override { return {}; }
     void SetLinearVelocity(BodyHandle, const Vector3&) override {}
@@ -63,6 +64,8 @@ public:
     bool RayCastAll(const RayCastQuery&, std::vector<RayCastResult>&, uint32) const override { return false; }
     bool BoxOverlap(const BoxOverlapQuery&, std::vector<OverlapResult>&, uint32) const override { return false; }
 
+    void SetContactModifyCallback(ContactModifyCallback, void*) override {}
+    void SetBodyContactFlags(BodyHandle, uint32) override {}
     void SetContactCallback(IPhysicsBackend::ContactCallback) override {}
     void SetTriggerCallback(IPhysicsBackend::TriggerCallback) override {}
     void ProcessEvents() override {}
@@ -184,6 +187,13 @@ void PhysicsWorld::SetBodyTransform(BodyHandle body, const Transform& transform,
         m_Backend->SetBodyTransform(body, transform, activation);
 }
 
+void PhysicsWorld::MoveKinematic(BodyHandle body, const Transform& target, float32 deltaTime)
+{
+    // A non-positive interval yields no finite velocity that reaches the target.
+    if (m_Backend && deltaTime > 0.0f)
+        m_Backend->MoveKinematic(body, target, deltaTime);
+}
+
 Vector3 PhysicsWorld::GetLinearVelocity(BodyHandle body) const
 {
     return m_Backend ? m_Backend->GetLinearVelocity(body) : Vector3{};
@@ -209,6 +219,22 @@ void PhysicsWorld::SetAngularVelocity(BodyHandle body, const Vector3& velocity)
 Vector3 PhysicsWorld::GetCenterOfMassPosition(BodyHandle body) const
 {
     return m_Backend ? m_Backend->GetCenterOfMassPosition(body) : Vector3{};
+}
+
+Vector3 PhysicsWorld::GetPointVelocity(BodyHandle body, const Vector3& worldPoint) const
+{
+    if (!m_Backend)
+        return Vector3{};
+
+    // v(p) = v_com + omega x (p - com). Linear velocity is the velocity of the
+    // centre of mass, so the lever arm is measured from there and not from the
+    // body origin. Static bodies report zero for both terms.
+    const Vector3 linear = m_Backend->GetLinearVelocity(body);
+    const Vector3 angular = m_Backend->GetAngularVelocity(body);
+    const Vector3 com = m_Backend->GetCenterOfMassPosition(body);
+    const Vector3 lever(worldPoint.x - com.x, worldPoint.y - com.y, worldPoint.z - com.z);
+    const Vector3 tangential = Vector3::Cross(angular, lever);
+    return Vector3(linear.x + tangential.x, linear.y + tangential.y, linear.z + tangential.z);
 }
 
 void PhysicsWorld::AddForce(BodyHandle body, const Vector3& force)
@@ -304,6 +330,18 @@ bool PhysicsWorld::BoxOverlap(const BoxOverlapQuery& query, std::vector<OverlapR
     if (!m_Backend)
         return false;
     return m_Backend->BoxOverlap(query, outResults, maxResults);
+}
+
+void PhysicsWorld::SetContactModifyCallback(ContactModifyCallback callback, void* context)
+{
+    if (m_Backend)
+        m_Backend->SetContactModifyCallback(callback, context);
+}
+
+void PhysicsWorld::SetBodyContactFlags(BodyHandle body, uint32 contactFlags)
+{
+    if (m_Backend)
+        m_Backend->SetBodyContactFlags(body, contactFlags);
 }
 
 void PhysicsWorld::SetContactCallback(ContactCallback callback)

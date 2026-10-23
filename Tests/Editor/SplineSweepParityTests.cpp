@@ -26,6 +26,7 @@
 #include "SplineGeometry/SplineEndTaper.h"
 #include "SplineGeometry/SplineProfile.h"
 #include "SplineGeometry/SplineStripBuilder.h"
+#include "Types/Fnv1a.h"
 
 #include <gtest/gtest.h>
 
@@ -44,20 +45,16 @@ namespace
 constexpr float32 kChunkLengthMetres = 50.0f;
 constexpr uint32 kMaxChunks = 200;
 
+// Seed the pinned digests below were captured with. It is not the FNV-1a offset
+// basis (one digit short); keep it, or every pinned literal must be re-baselined.
+constexpr uint64 kPinnedDigestSeed = 1469598103934665603ull;
+
 // FNV-1a over raw bytes: a float that moves by one ULP changes the digest.
 struct ByteDigest
 {
-    uint64 Value = 1469598103934665603ull;
+    uint64 Value = kPinnedDigestSeed;
 
-    void Bytes(const void* data, size_t size)
-    {
-        const auto* p = static_cast<const unsigned char*>(data);
-        for (size_t i = 0; i < size; ++i)
-        {
-            Value ^= static_cast<uint64>(p[i]);
-            Value *= 1099511628211ull;
-        }
-    }
+    void Bytes(const void* data, size_t size) { Value = Hashing::Fnv1a64(data, size, Value); }
     void Float(float32 v) { Bytes(&v, sizeof(v)); }
     void U32(uint32 v) { Bytes(&v, sizeof(v)); }
     void Vec3(const V3& v)

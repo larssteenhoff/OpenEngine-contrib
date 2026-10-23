@@ -15,6 +15,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "Assets/ModelAsset.h"
@@ -26,6 +27,7 @@
 #include "HeldPipelineBuilds.h"
 #include "SceneDrawWarm.h"
 #include "Engine/Rendering/SceneProbeRecaptureSchedule.h"
+#include "Core/CpuProfiler.h"
 #include "Rendering/Core/Device.h"
 #include "Rendering/Core/PipelineCache.h"
 #include "Rendering/Core/PipelineTypes.h"
@@ -45,6 +47,7 @@ using namespace GameEngine::Rendering;
 #include "EngineLogCapture.h"
 #include "TestDeviceHelper.h"
 #include "StagedTestPaths.h"
+#include "TestTempDir.h"
 
 class MaterialBridgeIntegrationTest : public ::testing::Test
 {
@@ -100,6 +103,16 @@ using GameEngine::Testing::HeldPipelineBuilds;
 // These tests inject real shader paths via SetMaterialBuildContext so
 // CompileMaterialPipeline compiles actual GLSL through shaderc.
 
+namespace
+{
+// The shader cache of this test process, removed at exit: a concurrent ctest process running the
+// same tests compiles into its own.
+const std::filesystem::path& TestShaderCacheRoot()
+{
+    static const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("ge_test_shader_cache")};
+    return directory.Path();
+}
+} // namespace
 
 class MaterialPipelineCompilationTest : public ::testing::Test
 {
@@ -119,7 +132,7 @@ class MaterialPipelineCompilationTest : public ::testing::Test
         // Inject real shader paths so CompileMaterialPipeline uses actual GLSL.
         MaterialBuildContext ctx{};
         ctx.AdapterShaderDir = m_shaderDir;
-        ctx.CacheRoot = std::filesystem::temp_directory_path() / "ge_test_shader_cache";
+        ctx.CacheRoot = TestShaderCacheRoot();
         ctx.IncludeDirs = {m_shaderDir};
         m_rs->Materials().SetMaterialBuildContext(ctx);
     }
@@ -145,10 +158,7 @@ class MaterialPipelineCompilationTest : public ::testing::Test
 TEST_F(MaterialPipelineCompilationTest, ShaderGraphSurface_MaterializesUnderCacheRootAndCompiles)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_sg_materialize_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_sg_materialize");
     fs::create_directories(projectRoot);
 
     // Minimal @sg-* tag-block graph. The tag block is authoritative; the body is
@@ -296,10 +306,7 @@ const char* kConvertedGraphSource = R"(// Converted from a Unity .shadergraph by
 TEST_F(MaterialPipelineCompilationTest, ConvertedUnityGraphShape_MaterializesAndCompilesToSpirV)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_sg_converted_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_sg_converted");
     fs::create_directories(projectRoot);
     {
         std::ofstream out(projectRoot / "converted_graph.glsl", std::ios::binary);
@@ -582,14 +589,12 @@ namespace
 struct DeclaredSurfaceProject
 {
     DeclaredSurfaceProject(MaterialSystem& materials, const std::filesystem::path& shaderDir)
-        : Root(std::filesystem::temp_directory_path() /
-               ("ge_declared_publish_" +
-                std::to_string(::testing::UnitTest::GetInstance()->random_seed())))
+        : Root(TestUtils::MakeUniqueTempDirectory("ge_declared_publish"))
     {
         std::filesystem::create_directories(Root);
         MaterialBuildContext ctx{};
         ctx.AdapterShaderDir = shaderDir;
-        ctx.CacheRoot = std::filesystem::temp_directory_path() / "ge_test_shader_cache";
+        ctx.CacheRoot = TestShaderCacheRoot();
         ctx.IncludeDirs = {shaderDir};
         ctx.ProjectRoots = {Root};
         materials.SetMaterialBuildContext(ctx);
@@ -820,10 +825,7 @@ TEST_F(MaterialPipelineCompilationTest, RecompileAsync_SupersededInFlightResultR
 TEST_F(MaterialPipelineCompilationTest, RecompileRefreshesUserTextureSlotMap)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_recompile_slotmap_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_recompile_slotmap");
     fs::create_directories(projectRoot);
 
     // v1: flowMask is the only user name -> packs to ordinal 2.
@@ -856,7 +858,7 @@ TEST_F(MaterialPipelineCompilationTest, RecompileRefreshesUserTextureSlotMap)
     // Re-inject the build context with the temp dir as the LIVE project root.
     MaterialBuildContext ctx{};
     ctx.AdapterShaderDir = m_shaderDir;
-    ctx.CacheRoot = std::filesystem::temp_directory_path() / "ge_test_shader_cache";
+    ctx.CacheRoot = TestShaderCacheRoot();
     ctx.IncludeDirs = {m_shaderDir};
     ctx.ProjectRoots = {projectRoot};
     m_rs->Materials().SetMaterialBuildContext(ctx);
@@ -889,6 +891,45 @@ TEST_F(MaterialPipelineCompilationTest, RecompileRefreshesUserTextureSlotMap)
 
     std::error_code ec;
     fs::remove_all(projectRoot, ec);
+}
+
+// Surface texture-slot resolution is the metadata read a scene load pays per
+// material; the CPU profiler must show it as a whole plus each of its phases.
+TEST_F(MaterialPipelineCompilationTest, SurfaceSlotResolutionRecordsProfilerZones)
+{
+    using ::GameEngine::Profiling::CpuProfiler;
+    CpuProfiler& profiler = CpuProfiler::Get();
+    profiler.SetEnabled(true);
+    if (!profiler.IsEnabled())
+        GTEST_SKIP() << "CPU profiling is compiled out (ENABLE_CPU_PROFILING=OFF)";
+    // Two frame boundaries: the first swaps out whatever an earlier test left
+    // in the live frame, the second leaves an empty live frame for this one.
+    profiler.BeginFrame();
+    profiler.BeginFrame();
+
+    MaterialDocument doc{};
+    doc.materialName = "SlotResolutionZones";
+    doc.lightingModel = "StandardPBR";
+    doc.surfaceShader = "Surfaces/standard_pbr.glsl";
+    Material* mat = m_rs->Materials().RegisterMaterialFromDocument(GUID::Generate(), doc);
+
+    profiler.BeginFrame();
+    std::vector<std::pair<std::string_view, CpuProfiler::Sample>> samples;
+    profiler.CopyFrameSamples(samples);
+    profiler.SetEnabled(false);
+    profiler.ClearFrameHistory();
+
+    ASSERT_NE(mat, nullptr);
+    for (const std::string_view zone : {"MaterialSystem.ResolveSurfaceTextureSlots",
+                                        "MaterialSystem.ResolveSurfaceTextureSlots.ContextSetup",
+                                        "MaterialSystem.ResolveSurfaceTextureSlots.ResolvePath",
+                                        "MaterialSystem.ResolveSurfaceTextureSlots.ReadSource",
+                                        "MaterialSystem.ResolveSurfaceTextureSlots.ParseSlots"})
+    {
+        EXPECT_TRUE(std::any_of(samples.begin(), samples.end(),
+                                [zone](const auto& sample) { return sample.first == zone; }))
+            << zone;
+    }
 }
 
 // ---- Parallax: a bound height map on a surface that declares one ----
@@ -934,6 +975,21 @@ std::vector<uint8_t> BasePipelineFragment(IDevice& device, const Material& mat)
 
 constexpr MaterialKeyword kWorldColourPass =
     MaterialKeyword::ForwardPlus | MaterialKeyword::Shadows | MaterialKeyword::IBL | MaterialKeyword::Instanced;
+
+// A draw-time colour variant compile, keyed the way PipelineVariantCache keys one: the material's
+// variant key with the pass keywords and the mesh's vertex flags, and the material's sources.
+std::shared_ptr<SharedShaderVariant> CompileColourVariant(ShaderCompilationCache& cache, const Material& mat,
+                                                          const MaterialBuildContext& ctx)
+{
+    ShaderCacheKey key{};
+    key.VariantKey = mat.GetVariantKey();
+    key.VariantKey.materialKeywords |= kWorldColourPass;
+    key.VariantKey.vertexFlags = VertexAttributeFlags::StandardMeshWithTangent;
+    key.Source.SurfaceShaderPath = mat.GetCompileSpec().surfaceShaderPath;
+    key.Source.VertexModifierPath = mat.GetCompileSpec().vertexModifierPath;
+    key.Source.MaterialAssetPath = mat.GetMaterialAssetPath();
+    return cache.GetOrCompile(key, mat.GetCompileSpec(), ctx, mat.GetName(), ShaderSourceKind::SpirV);
+}
 
 constexpr std::string_view kTriplanarRefusal =
     "Surfaces/triplanar_pbr does not use a Height map; bind it on a Standard PBR material";
@@ -1001,10 +1057,9 @@ TEST_F(MaterialPipelineCompilationTest, CacheDrivenCompilesOfAParallaxMaterialMa
     EXPECT_TRUE(FragmentMarches(compiled->fragmentBytes)) << "GetOrCompile compiled the flat program";
 
     // The shape of the draw-time colour variant.
-    const auto variant = cache.GetOrCompileVariant(*mat, kWorldColourPass, ctx, ShaderSourceKind::SpirV,
-                                                   VertexAttributeFlags::StandardMeshWithTangent);
+    const auto variant = CompileColourVariant(cache, *mat, ctx);
     ASSERT_TRUE(variant) << "compile failed";
-    EXPECT_TRUE(FragmentMarches(variant->fragmentBytes)) << "GetOrCompileVariant compiled the flat program";
+    EXPECT_TRUE(FragmentMarches(variant->fragmentBytes)) << "the colour variant compiled the flat program";
 
     // A refused material (hex tiling on) keeps the flat program on the same paths.
     MaterialDocument hex = doc;
@@ -1012,8 +1067,7 @@ TEST_F(MaterialPipelineCompilationTest, CacheDrivenCompilesOfAParallaxMaterialMa
     hex.properties["hexTiling"] = 1.0f;
     Material* refused = m_rs->Materials().RegisterMaterialFromDocument(GUID::Generate(), hex);
     ASSERT_NE(refused, nullptr);
-    const auto refusedVariant = cache.GetOrCompileVariant(*refused, kWorldColourPass, ctx, ShaderSourceKind::SpirV,
-                                                          VertexAttributeFlags::StandardMeshWithTangent);
+    const auto refusedVariant = CompileColourVariant(cache, *refused, ctx);
     ASSERT_TRUE(refusedVariant) << "compile failed";
     EXPECT_FALSE(FragmentMarches(refusedVariant->fragmentBytes));
 
@@ -1098,10 +1152,7 @@ TEST_F(MaterialPipelineCompilationTest, AnUnregisteredDocumentShowsItsRefusal)
 TEST_F(MaterialPipelineCompilationTest, ShaderSourceEditPropagatesToRegisteredMaterials)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_edit_prop_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_edit_prop");
     fs::create_directories(projectRoot);
 
     // No mtime handling: the disk shaderpkg key hashes the CONTENT of the surface
@@ -1124,7 +1175,7 @@ TEST_F(MaterialPipelineCompilationTest, ShaderSourceEditPropagatesToRegisteredMa
 
     MaterialBuildContext ctx{};
     ctx.AdapterShaderDir = m_shaderDir;
-    ctx.CacheRoot = std::filesystem::temp_directory_path() / "ge_test_shader_cache";
+    ctx.CacheRoot = TestShaderCacheRoot();
     ctx.IncludeDirs = {m_shaderDir};
     ctx.ProjectRoots = {projectRoot};
     m_rs->Materials().SetMaterialBuildContext(ctx);
@@ -1190,9 +1241,7 @@ TEST_F(MaterialPipelineCompilationTest, ShaderSourceEditPropagatesToRegisteredMa
 TEST_F(MaterialPipelineCompilationTest, ReregistrationKeepsTheDeclaredTableUntilAReferenceOrSourceChanges)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_declared_rereg_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_declared_rereg");
     fs::create_directories(projectRoot);
     auto writeSurface = [&](const char* file, const char* declarations)
     {
@@ -1208,7 +1257,7 @@ TEST_F(MaterialPipelineCompilationTest, ReregistrationKeepsTheDeclaredTableUntil
 
     MaterialBuildContext ctx{};
     ctx.AdapterShaderDir = m_shaderDir;
-    ctx.CacheRoot = std::filesystem::temp_directory_path() / "ge_test_shader_cache";
+    ctx.CacheRoot = TestShaderCacheRoot();
     ctx.IncludeDirs = {m_shaderDir};
     ctx.ProjectRoots = {projectRoot};
     m_rs->Materials().SetMaterialBuildContext(ctx);
@@ -1409,10 +1458,7 @@ TEST_F(MaterialPipelineCompilationTest, BlendEditOnOpaqueDoesNotRebuildThePipeli
 TEST_F(MaterialPipelineCompilationTest, ShaderEditRecompilesAreBudgetedAcrossFrames)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_edit_budget_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_edit_budget");
     fs::create_directories(projectRoot);
 
     // No mtime handling: the disk shaderpkg key hashes the CONTENT of the surface
@@ -1534,10 +1580,7 @@ TEST_F(MaterialPipelineCompilationTest, ShaderEditRecompilesAreBudgetedAcrossFra
 TEST_F(MaterialPipelineCompilationTest, IncludeEditPropagatesToMaterialsWhoseSurfacesIncludeIt)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_include_edit_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_include_edit");
     fs::create_directories(projectRoot);
 
     auto writeFile = [&](const char* file, const std::string& text)
@@ -1649,10 +1692,7 @@ TEST_F(MaterialPipelineCompilationTest, IncludeEditPropagatesToMaterialsWhoseSur
 TEST_F(MaterialPipelineCompilationTest, RepeatEditMidCarry_StillRequeuesSweptMaterials)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_repeat_edit_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_repeat_edit");
     fs::create_directories(projectRoot);
 
     auto writeFile = [&](const std::string& file, const std::string& text)
@@ -1748,10 +1788,7 @@ TEST_F(MaterialPipelineCompilationTest, RepeatEditMidCarry_StillRequeuesSweptMat
 TEST_F(MaterialPipelineCompilationTest, ProjectSwitchDropsRetainedShaderCache)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_project_switch_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_project_switch");
     fs::create_directories(projectRoot);
 
     auto writeSurface = [&](const char* colorExpr)
@@ -1820,10 +1857,7 @@ TEST_F(MaterialPipelineCompilationTest, ProjectSwitchDropsRetainedShaderCache)
 TEST_F(MaterialPipelineCompilationTest, SameNamedSurfaceInTwoDirs_RequeueOnlyTheEditedRider)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_twodir_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_twodir");
     const fs::path dirA = projectRoot / "matA";
     const fs::path dirB = projectRoot / "matB";
     fs::create_directories(dirA);
@@ -1946,10 +1980,7 @@ TEST_F(MaterialPipelineCompilationTest, SameNamedSurfaceInTwoDirs_RequeueOnlyThe
 TEST_F(MaterialPipelineCompilationTest, NeverCompiledMaterial_RequeuedByDirectSurfaceReference)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_late_surface_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_late_surface");
     fs::create_directories(projectRoot);
 
     MaterialBuildContext ctx{};
@@ -2008,10 +2039,7 @@ TEST_F(MaterialPipelineCompilationTest, NeverCompiledMaterial_RequeuedByDirectSu
 TEST_F(MaterialPipelineCompilationTest, ProjectSwitchKeepsClosureRowsForSurvivingMaterials)
 {
     namespace fs = std::filesystem;
-    const fs::path projectRoot =
-        fs::temp_directory_path() /
-        ("ge_shader_switch_rows_" +
-         std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    const fs::path projectRoot = TestUtils::MakeUniqueTempDirectory("ge_shader_switch_rows");
     fs::create_directories(projectRoot);
 
     auto writeFile = [&](const char* file, const std::string& text)
@@ -2753,7 +2781,7 @@ TEST_F(MaterialPipelineCompilationTest, PublishGate_DepthVariantCompileFailure_C
 // keyed on the freed Material* (an unreachable leak; a wrong-pipeline
 // stale-serve if the address is reused). The apply must drop any record whose
 // GUID no longer resolves in the registry, exactly like the base-pipeline
-// publish drain: look up by GUID, never trust the captured pointer.
+// publish drain: check the registry binding, never trust the captured pointer.
 TEST_F(MaterialPipelineCompilationTest, PublishGate_LatePublishForUnregisteredMaterialDropped)
 {
     MaterialDocument doc{};
@@ -2767,6 +2795,8 @@ TEST_F(MaterialPipelineCompilationTest, PublishGate_LatePublishForUnregisteredMa
     ASSERT_TRUE(mat->GetGraphicsPipelineId().IsValid());
     const auto realPid = mat->GetGraphicsPipelineId();
     const uint32_t version = mat->GetVersion();
+    const uint64_t generation = m_rs->Materials().Registry().GetRegistrationGeneration(guid);
+    ASSERT_NE(generation, 0u);
 
     auto& variants = m_rs->Materials().Variants();
     const PipelineVariantCache::InstancedVariantKey key{
@@ -2781,7 +2811,7 @@ TEST_F(MaterialPipelineCompilationTest, PublishGate_LatePublishForUnregisteredMa
     m_rs->Materials().Registry().Unregister(guid);
     ASSERT_EQ(m_rs->Materials().Registry().Find(guid), nullptr);
 
-    variants.EnqueueColorVariantPublishForTesting(key, realPid, version, guid);
+    variants.EnqueueColorVariantPublishForTesting(key, realPid, version, guid, generation);
 
     std::mutex publishedMutex;
     std::vector<GUID> published;
@@ -2835,17 +2865,121 @@ TEST_F(MaterialPipelineCompilationTest, PublishGate_LandedPublishMovesPipelineRe
     // recapture schedule is covered too.
     constexpr uint64_t kWorld = 1;
     const uint64_t before = SceneProbeWorldEpochs::Read(*m_rs, kWorld).Pipelines;
-    variants.EnqueueColorVariantPublishForTesting(key, mat->GetGraphicsPipelineId(), mat->GetVersion(), guid);
+    const uint64_t generation = m_rs->Materials().Registry().GetRegistrationGeneration(guid);
+    variants.EnqueueColorVariantPublishForTesting(key, mat->GetGraphicsPipelineId(), mat->GetVersion(), guid,
+                                                  generation);
     variants.ApplyPendingVariantPublishes();
     ASSERT_TRUE(variants.HasColorVariantForTesting(key));
     const uint64_t afterLanded = SceneProbeWorldEpochs::Read(*m_rs, kWorld).Pipelines;
     EXPECT_GT(afterLanded, before) << "a landed publish makes a skipped draw drawable";
 
     const GUID goneGuid = GUID::Generate();
-    variants.EnqueueColorVariantPublishForTesting(key, mat->GetGraphicsPipelineId(), mat->GetVersion(), goneGuid);
+    variants.EnqueueColorVariantPublishForTesting(key, mat->GetGraphicsPipelineId(), mat->GetVersion(), goneGuid,
+                                                  generation);
     variants.ApplyPendingVariantPublishes();
     EXPECT_EQ(SceneProbeWorldEpochs::Read(*m_rs, kWorld).Pipelines, afterLanded)
         << "a publish for a material that is not registered is dropped and lands nothing";
+}
+
+// The same late publish when the GUID was re-registered while the compile ran:
+// the GUID resolves again, but to a different Material, bound under a newer
+// registration generation than the one the compile was submitted under. The
+// apply must drop it, or the row is keyed on the freed Material. A second live
+// material stands in for the freed one, so the key's address differs from the
+// registry's deterministically, whatever the allocator reuses.
+TEST_F(MaterialPipelineCompilationTest, PublishGate_LatePublishForReplacedMaterialDropped)
+{
+    MaterialDocument doc{};
+    doc.materialName = "LatePublishReplaced";
+    doc.lightingModel = "StandardPBR";
+    doc.surfaceShader = "Surfaces/standard_pbr.glsl";
+
+    const GUID guid = GUID::Generate();
+    auto& registry = m_rs->Materials().Registry();
+    ASSERT_NE(m_rs->Materials().RegisterMaterialFromDocument(guid, doc), nullptr);
+    const uint64_t submittedGeneration = registry.GetRegistrationGeneration(guid);
+    registry.Unregister(guid);
+    Material* current = m_rs->Materials().RegisterMaterialFromDocument(guid, doc);
+    ASSERT_NE(current, nullptr);
+    ASSERT_GT(registry.GetRegistrationGeneration(guid), submittedGeneration);
+    Material* replaced = m_rs->Materials().RegisterMaterialFromDocument(GUID::Generate(), doc);
+    ASSERT_NE(replaced, nullptr);
+    ASSERT_NE(replaced, current);
+    ASSERT_TRUE(replaced->GetGraphicsPipelineId().IsValid());
+
+    auto& variants = m_rs->Materials().Variants();
+    const PipelineVariantCache::InstancedVariantKey key{
+        replaced, VertexAttributeFlags::StandardMesh | VertexAttributeFlags::HasColor,
+        /*SampleCount=*/1u,
+        MaterialKeyword::ForwardPlus | MaterialKeyword::Instanced | MaterialKeyword::Shadows,
+        PrimitiveTopology::TriangleList};
+
+    ASSERT_FALSE(variants.HasColorVariantForTesting(key)) << "the row must start absent";
+
+    variants.EnqueueColorVariantPublishForTesting(
+        key, replaced->GetGraphicsPipelineId(), replaced->GetVersion(), guid, submittedGeneration);
+    variants.ApplyPendingVariantPublishes();
+
+    EXPECT_FALSE(variants.HasColorVariantForTesting(key))
+        << "a publish whose GUID now names a different Material must not insert a "
+           "row keyed on the Material the compile was built for";
+}
+
+// A late publish from a superseded registration when the new Material landed at
+// the freed one's address: the key's address equals the GUID's current Material,
+// so no pointer compare can tell the two registrations apart. The registration
+// generation can — the record's was issued to the unregistered binding. The key
+// is built on the current Material, which is the allocator reusing the address,
+// made deterministic.
+TEST_F(MaterialPipelineCompilationTest, PublishGate_LatePublishFromSupersededRegistrationDropped)
+{
+    MaterialDocument doc{};
+    doc.materialName = "LatePublishSuperseded";
+    doc.lightingModel = "StandardPBR";
+    doc.surfaceShader = "Surfaces/standard_pbr.glsl";
+
+    const GUID guid = GUID::Generate();
+    auto& registry = m_rs->Materials().Registry();
+
+    // The compile is submitted against the first registration: the drain
+    // snapshots its generation into the request, and the worker carries it into
+    // the publish record.
+    ASSERT_NE(m_rs->Materials().RegisterMaterialFromDocument(guid, doc), nullptr);
+    const uint64_t submittedGeneration = registry.GetRegistrationGeneration(guid);
+    ASSERT_NE(submittedGeneration, 0u);
+
+    // While it runs, the GUID is unregistered and bound to a new Material.
+    registry.Unregister(guid);
+    Material* current = m_rs->Materials().RegisterMaterialFromDocument(guid, doc);
+    ASSERT_NE(current, nullptr);
+    ASSERT_TRUE(current->GetGraphicsPipelineId().IsValid());
+    const uint64_t currentGeneration = registry.GetRegistrationGeneration(guid);
+    ASSERT_GT(currentGeneration, submittedGeneration);
+
+    auto& variants = m_rs->Materials().Variants();
+    const PipelineVariantCache::InstancedVariantKey key{
+        current, VertexAttributeFlags::StandardMesh | VertexAttributeFlags::HasColor,
+        /*SampleCount=*/1u,
+        MaterialKeyword::ForwardPlus | MaterialKeyword::Instanced | MaterialKeyword::Shadows,
+        PrimitiveTopology::TriangleList};
+    ASSERT_FALSE(variants.HasColorVariantForTesting(key)) << "the row must start absent";
+
+    variants.EnqueueColorVariantPublishForTesting(
+        key, current->GetGraphicsPipelineId(), current->GetVersion(), guid, submittedGeneration);
+    variants.ApplyPendingVariantPublishes();
+
+    EXPECT_FALSE(variants.HasColorVariantForTesting(key))
+        << "a publish from a superseded registration must be dropped even when the "
+           "key's address names the GUID's current Material";
+
+    // Control: the same record under the current registration inserts, so the
+    // drop above is the generation check and not a record the apply rejects anyway.
+    variants.EnqueueColorVariantPublishForTesting(
+        key, current->GetGraphicsPipelineId(), current->GetVersion(), guid, currentGeneration);
+    variants.ApplyPendingVariantPublishes();
+
+    EXPECT_TRUE(variants.HasColorVariantForTesting(key))
+        << "a publish for the current registration must insert its row";
 }
 
 // A variant republish (a material edit while the old unit is on screen) must

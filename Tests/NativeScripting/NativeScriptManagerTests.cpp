@@ -26,6 +26,7 @@
 #include "../TestTempDir.h"
 
 #include "ECS/Entity.h" // full ECS::World definition (ECS.h only forward-declares it)
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
@@ -123,9 +124,7 @@ TEST(NativeScriptManager, InitialPackagePassSignalTracksConfigSetAndFirstKick)
     EXPECT_TRUE(mgr.InitialPackageModulePassComplete());
 
     // A non-empty config set arms the signal until the first KickBuild pass.
-    const std::filesystem::path root =
-        std::filesystem::temp_directory_path() / "ge_nsm_initial_pass_test";
-    std::filesystem::remove_all(root);
+    const std::filesystem::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nsm_initial_pass_test");
     std::filesystem::create_directories(root / "src");
     {
         std::ofstream src(root / "src" / "module.cpp");
@@ -192,7 +191,6 @@ void WriteFileInTree(const fs::path& path, const char* bytes)
 ns::NativeBuildConfig MakePruneFixture(const fs::path& root)
 {
     std::error_code ec;
-    fs::remove_all(root, ec);
     ns::NativeBuildConfig config;
     config.SourceDir = root / "Assets";
     config.BuildDir = root / "build";
@@ -208,7 +206,7 @@ ns::NativeBuildConfig MakePruneFixture(const fs::path& root)
 
 TEST(NativeScriptManager, ProjectOpenPrunesShadowCopiesUnreferencedByBuildCache)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nsm_prune";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nsm_prune");
     ns::NativeBuildConfig config = MakePruneFixture(root);
     const fs::path referenced = config.ActiveDir / "UserScripts_bbbbbbbb.dll";
     {
@@ -235,7 +233,7 @@ TEST(NativeScriptManager, ProjectOpenPrunesShadowCopiesUnreferencedByBuildCache)
 
 TEST(NativeScriptManager, ProjectOpenWithoutBuildCachePrunesAllShadowCopies)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nsm_prune_nocache";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nsm_prune_nocache");
     ns::NativeBuildConfig config = MakePruneFixture(root); // no last_build.txt written
 
     ns::NativeScriptManager mgr;
@@ -258,9 +256,8 @@ TEST(NativeScriptManager, ProjectOpenWithoutBuildCachePrunesAllShadowCopies)
 
 TEST(NativeSourceTree, BuildOutputInsideTheSourceRootLeavesTheDigestAlone)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nst_embedded_build";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nst_embedded_build");
     std::error_code ec;
-    fs::remove_all(root, ec);
     WriteFileInTree(root / "Source" / "Widen.cpp", "void Widen() {}\n");
     WriteFileInTree(root / "Include" / "Widen.h", "#pragma once\n");
 
@@ -302,9 +299,8 @@ TEST(NativeSourceTree, APackagesTestsFolderLeavesItsModuleDigestAlone)
 
 TEST(NativeSourceTree, BuildOutputInsideTheSourceRootDoesNotOpenTheEmptyProjectGate)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nst_embedded_build_gate";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nst_embedded_build_gate");
     std::error_code ec;
-    fs::remove_all(root, ec);
     WriteFileInTree(root / ".Cache" / "NativeScripts" / "build" / "UserScripts.gen.cpp",
                     "// scanner-generated registrations\n");
     EXPECT_FALSE(ns::HasWatchedNativeSource(root)) << "a leftover build tree is not user code";
@@ -324,9 +320,8 @@ TEST(NativeSourceTree, BuildOutputInsideTheSourceRootDoesNotOpenTheEmptyProjectG
 // ---------------------------------------------------------------------------
 TEST(BuildCacheRecord, RoundTripsAllFourLines)
 {
-    const fs::path dir = fs::temp_directory_path() / "ge_bcr_roundtrip";
+    const fs::path dir = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_bcr_roundtrip");
     std::error_code ec;
-    fs::remove_all(dir, ec);
 
     ASSERT_TRUE(ns::WriteBuildCacheRecord(
         dir, ns::BuildCacheRecord{"full", "some/dir/UserScripts.dll", "abi", "enginebuild"}));
@@ -342,11 +337,10 @@ TEST(BuildCacheRecord, RoundTripsAllFourLines)
 
 TEST(BuildCacheRecord, ShorterLegacyCachesReadWithTheTrailingFieldsEmpty)
 {
-    const fs::path dir = fs::temp_directory_path() / "ge_bcr_legacy";
+    const fs::path dir = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_bcr_legacy");
     std::error_code ec;
 
     // 2-line: pre-dates the ABI digest.
-    fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
     {
         std::ofstream out(dir / ns::kBuildCacheFileName, std::ios::trunc);
@@ -375,9 +369,8 @@ TEST(BuildCacheRecord, ShorterLegacyCachesReadWithTheTrailingFieldsEmpty)
 
 TEST(BuildCacheRecord, AbsentFileOrEmptyDllPathReadsAsNoRecord)
 {
-    const fs::path dir = fs::temp_directory_path() / "ge_bcr_absent";
+    const fs::path dir = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_bcr_absent");
     std::error_code ec;
-    fs::remove_all(dir, ec);
     EXPECT_FALSE(ns::ReadBuildCacheRecord(dir).has_value());
 
     ASSERT_TRUE(ns::WriteBuildCacheRecord(dir, ns::BuildCacheRecord{"full", "", "abi"}));
@@ -388,9 +381,8 @@ TEST(BuildCacheRecord, AbsentFileOrEmptyDllPathReadsAsNoRecord)
 
 TEST(BuildCacheRecord, EngineAbiMarkerRoundTripsAndReadsEmptyWhenAbsent)
 {
-    const fs::path dir = fs::temp_directory_path() / "ge_bcr_marker";
+    const fs::path dir = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_bcr_marker");
     std::error_code ec;
-    fs::remove_all(dir, ec);
 
     EXPECT_TRUE(ns::ReadEngineAbiMarker(dir).empty());
     ASSERT_TRUE(ns::WriteEngineAbiMarker(dir, "0123456789abcdef"));
@@ -401,7 +393,7 @@ TEST(BuildCacheRecord, EngineAbiMarkerRoundTripsAndReadsEmptyWhenAbsent)
 
 TEST(BuildCacheRecord, EngineAbiDigestDiscriminatesConfigAndDefsAndEngineBinary)
 {
-    const fs::path dir = fs::temp_directory_path() / "ge_bcr_digest";
+    const fs::path dir = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_bcr_digest");
     std::error_code ec;
     fs::remove_all(dir, ec);
     nst::WriteStampedBinary(dir / "EngineA.bin", 0);
@@ -539,7 +531,7 @@ TEST(BuildCacheRecord, EngineAbiDigestIsEmptyWithoutAReadableLinkStamp)
 // DLLs — while Runtime configs (EditorImportLib empty) hash no editor input.
 TEST(BuildCacheRecord, EngineAbiDigestFoldsEditorSdkBinaryOnlyWhenSet)
 {
-    const fs::path dir = fs::temp_directory_path() / "ge_bcr_editor_digest";
+    const fs::path dir = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_bcr_editor_digest");
     std::error_code ec;
     fs::remove_all(dir, ec);
     nst::WriteStampedBinary(dir / "Engine.bin", 0);
@@ -580,9 +572,8 @@ TEST(BuildCacheRecord, EngineAbiDigestFoldsEditorSdkBinaryOnlyWhenSet)
 // native-script build is refused as "stale" against a perfectly fresh record.
 TEST(BuildCacheRecord, PackagedRecomputeMatchesEditorStampedRuntimeDigest)
 {
-    const fs::path sdkRoot = fs::temp_directory_path() / "ge_bcr_sdk_parity";
+    const fs::path sdkRoot = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_bcr_sdk_parity");
     std::error_code ec;
-    fs::remove_all(sdkRoot, ec);
     fs::create_directories(sdkRoot / "nativescripting", ec);
     fs::create_directories(sdkRoot / "include", ec);
     fs::create_directories(sdkRoot / "editor-include", ec);
@@ -641,9 +632,8 @@ TEST(BuildCacheRecord, PackagedRecomputeMatchesEditorStampedRuntimeDigest)
 // also why the packaged probe path (<root>/NativeScripts) is exercised.
 TEST(NativeScriptManager, PrebuiltLoadRefusesPackagedModuleOnEngineAbiMismatch)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nsm_abi_mismatch";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nsm_abi_mismatch");
     std::error_code ec;
-    fs::remove_all(root, ec);
     const fs::path pkgDir = root / "NativeScripts";
     fs::create_directories(pkgDir, ec);
     WriteFileBytes(pkgDir / "UserScripts.dll", "not-a-real-dll");
@@ -800,9 +790,8 @@ DevCacheProbe ProbeDevCacheLoad(const fs::path& root, const std::string& dllStem
 
 TEST(NativeScriptManager, DevCacheRecordFromAnotherEngineBuildIsSkippedBeforeTheImageIsMapped)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nsm_devcache_foreign";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nsm_devcache_foreign");
     std::error_code ec;
-    fs::remove_all(root, ec);
 
     const DevCacheProbe probe = ProbeDevCacheLoad(root, "ForeignEngine", "not-this-engines-build-id");
     EXPECT_FALSE(probe.Loaded);
@@ -813,9 +802,8 @@ TEST(NativeScriptManager, DevCacheRecordFromAnotherEngineBuildIsSkippedBeforeThe
 
 TEST(NativeScriptManager, DevCacheRecordWithoutAnEngineIdentityIsSkippedBeforeTheImageIsMapped)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nsm_devcache_unstamped";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nsm_devcache_unstamped");
     std::error_code ec;
-    fs::remove_all(root, ec);
 
     // A record written before the identity line existed. Unknown is NOT trusted:
     // the slot is machine-global, so "unknown" is far likelier to be another
@@ -829,9 +817,8 @@ TEST(NativeScriptManager, DevCacheRecordWithoutAnEngineIdentityIsSkippedBeforeTh
 
 TEST(NativeScriptManager, DevCacheRecordFromThisEngineBuildStillReachesTheLoad)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_nsm_devcache_matching";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nsm_devcache_matching");
     std::error_code ec;
-    fs::remove_all(root, ec);
 
     ASSERT_FALSE(ns::EngineBuildIdentity().empty())
         << "this platform must be able to identify its own engine image, or the gate is inert here";
@@ -1423,4 +1410,20 @@ TEST(CMakeInvoker, ScansAProjectWhosePathIsNotAscii)
     EXPECT_EQ("", error) << output;
     EXPECT_EQ(1, stats.Reflected) << output;
     EXPECT_TRUE(fs::exists(generated)) << output;
+}
+
+// Mobile content staging collects the project's native sources with the watcher's ignore rules:
+// build products under .Cache and package tests are left out.
+TEST(NativeSourceTree, MobileSourceCollectionExcludesBuildProductsAndPackageTests)
+{
+    GameEngine::TestUtils::ScopedTempDir scratch(GameEngine::TestUtils::MakeUniqueTempDirectory("ge_nst_mobile_inputs"));
+    const fs::path root = scratch.Path();
+    WriteFileInTree(root / "Source/Game.cpp", "void Game() {}\n");
+    WriteFileInTree(root / "Include/Game.h", "#pragma once\n");
+    WriteFileInTree(root / ".Cache/NativeScripts/build/Generated.cpp", "void Generated() {}\n");
+    WriteFileInTree(root / "Tests/GameTests.cpp", "void Test() {}\n");
+    const auto sources = ns::CollectWatchedNativeSources(root, root);
+    ASSERT_EQ(sources.size(), 2u);
+    EXPECT_EQ(sources[0], root / "Include/Game.h");
+    EXPECT_EQ(sources[1], root / "Source/Game.cpp");
 }

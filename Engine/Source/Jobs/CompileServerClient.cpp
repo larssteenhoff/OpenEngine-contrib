@@ -382,7 +382,12 @@ void* GetCompileServerHostJobHandleForTests()
 static std::optional<LaunchedHost> LaunchCompileServerProcess(const std::string& hostDll, const std::string& pipeNameUtf8)
 {
     const std::string parentPid = std::to_string(Platform::GetCurrentProcessId());
-#ifdef _WIN32
+#if defined(GE_PLATFORM_MOBILE)
+    (void)hostDll;
+    (void)pipeNameUtf8;
+    Logger::Log::Error("Managed compile servers cannot run inside a mobile application.");
+    return std::nullopt;
+#elif defined(_WIN32)
     // Shared engine-wide dotnet discovery (DOTNET_ROOT / PATH / standard install
     // locations); bare "dotnet" only as a last resort for CreateProcess's own lookup.
     const std::string& dotnetCmd = DotnetHostCommand();

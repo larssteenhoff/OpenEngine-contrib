@@ -31,9 +31,9 @@ inline constexpr std::string_view kScriptBindingsAssemblyFileName = "GameEngine.
 /// included. A list, not a pattern: a file the build no longer stages, left in an existing
 /// output folder, is never referenced or shipped. Compile-server requests carry it
 /// (ScriptSurfaceRequestField), so the server holds no copy.
-inline constexpr std::array<std::string_view, 5> kScriptSurfaceAssemblyFileNames = {
+inline constexpr std::array<std::string_view, 6> kScriptSurfaceAssemblyFileNames = {
     kScriptBindingsAssemblyFileName, "GameEngine.Scripting.ABI.dll", "GameEngine.ECS.ABI.dll",
-    "GameEngine.Platform.ABI.dll", "GameEngine.Editor.Scripting.ABI.dll"};
+    "GameEngine.TileMap.ABI.dll", "GameEngine.Platform.ABI.dll", "GameEngine.Editor.Scripting.ABI.dll"};
 
 /// True for an assembly of kScriptSurfaceAssemblyFileNames.
 inline bool IsScriptSurfaceAssembly(std::string_view fileName)
@@ -107,19 +107,15 @@ std::filesystem::path ResolveNativeLibraryDirectory();
 std::filesystem::path ResolveNativeLibraryPath();
 
 /**
- * @brief ResolveNativeLibraryPath() for explicit executable and working directories; same
- *        probing rules. An empty @p currentDir probes no working directory.
+ * @brief ResolveNativeLibraryPath() for an explicit executable directory; same probing rules.
+ *        The process working directory is never probed.
  */
-std::filesystem::path ResolveNativeLibraryPathFrom(
-    const std::filesystem::path& exeDir,
-    const std::filesystem::path& currentDir);
+std::filesystem::path ResolveNativeLibraryPathFrom(const std::filesystem::path& exeDir);
 
 /**
- * @brief ResolveNativeLibraryDirectory() for explicit executable and working directories
- *        (tests and specialized hosts); same probing rules.
+ * @brief ResolveNativeLibraryDirectory() for an explicit executable directory (tests and
+ *        specialized hosts); same probing rules.
  */
-std::filesystem::path ResolveNativeLibraryDirectoryFrom(
-    const std::filesystem::path& exeDir,
-    const std::filesystem::path& currentDir);
+std::filesystem::path ResolveNativeLibraryDirectoryFrom(const std::filesystem::path& exeDir);
 } // namespace ScriptingPaths
 } // namespace GameEngine

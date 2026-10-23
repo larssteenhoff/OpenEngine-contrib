@@ -408,7 +408,8 @@ void StartAnimatorFromSource(ECS::World& world, AssetManager& assetManager, Anim
 
 void BootstrapSceneAnimators(ECS::World& world, AssetManager& assetManager)
 {
-    world.Query<ECS::Write<Animator>>().Each([&](ECS::EntityHandle rootEntity, Animator& animator) {
+    world.Query<ECS::Write<Animator>>().Each([&](ECS::EntityHandle rootEntity, ECS::Writable<Animator> animatorRow) {
+        const Animator& animator = animatorRow.Get();
         if (!animator.active || !animator.autoPlayOnEnterPlayMode ||
             animator.pendingCommand != AnimatorPlaybackCommand::None)
             return;
@@ -418,7 +419,7 @@ void BootstrapSceneAnimators(ECS::World& world, AssetManager& assetManager)
             return;
         std::vector<ECS::EntityHandle> subtree;
         CollectEntitiesInSubtree(world, rootEntity, subtree);
-        StartAnimatorFromSource(world, assetManager, animator, subtree);
+        StartAnimatorFromSource(world, assetManager, animatorRow.Mutable(), subtree);
     });
 }
 
@@ -430,9 +431,10 @@ void ProcessClipAnimatorCommands(ECS::World& world)
 
 void ProcessClipAnimatorCommands(ECS::World& world, AssetManager& assetManager)
 {
-    world.Query<ECS::Write<Animator>>().Each([&](ECS::EntityHandle rootEntity, Animator& animator) {
-        if (!animator.active || animator.pendingCommand == AnimatorPlaybackCommand::None)
+    world.Query<ECS::Write<Animator>>().Each([&](ECS::EntityHandle rootEntity, ECS::Writable<Animator> animatorRow) {
+        if (!animatorRow->active || animatorRow->pendingCommand == AnimatorPlaybackCommand::None)
             return;
+        Animator& animator = animatorRow.Mutable();
 
         if (animator.source == AnimatorPlaybackSource::Timeline ||
             animator.source == AnimatorPlaybackSource::Graph)

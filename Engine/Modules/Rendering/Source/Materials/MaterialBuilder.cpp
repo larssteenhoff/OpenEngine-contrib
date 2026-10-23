@@ -1,6 +1,7 @@
 #include "Rendering/Materials/MaterialBuilder.h"
 #include <algorithm>
 #include <stdexcept>
+#include "Rendering/Materials/ShaderLayoutShape.h"
 #include "Rendering/Materials/ShaderMetaValidation.h"
 
 
@@ -46,23 +47,10 @@ DescriptorSetLayoutDesc MaterialBuilder::BuildSetLayout(const DescriptorSetMeta&
         db.count = b.Count;
         db.shaderStages = MapAbstractStagesToBackend(b.StagesMask);
         db.debugName = b.Name.c_str();
-        if (b.ReadOnly)
-            db.flags |= kDescriptorBindingReadOnlyStorage;
-        if (b.Image)
-        {
-            // 4 = cube in DescriptorBinding's convention; meta reports
-            // cube as Dim=2 + Cube for its existing consumers.
-            db.imageDim = b.Image->Cube ? 4u : b.Image->Dim;
-            db.imageArrayed = b.Image->Arrayed;
-            db.imageIsDepth = b.Image->Depth;
-            db.imageIsUnsignedInteger = b.Image->UnsignedInteger;
-            db.imageFilterableFloat = b.Image->Filtered;
-            db.imageUsageReflected = true;
-            db.imageMultisample = b.Image->Multisample;
-            db.storageTexelFormat = b.Image->Format;
-        }
         dsl.bindings.push_back(db);
     }
+    // The storage access, texel format and image shape, by the rule hand-built layouts follow.
+    ApplySetMetaImageShapeToLayout(setMeta, dsl);
     return dsl;
 }
 

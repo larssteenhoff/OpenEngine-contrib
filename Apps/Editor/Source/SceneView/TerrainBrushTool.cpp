@@ -6,6 +6,7 @@
 #include "Picking/TerrainPicking.h"
 #include "UndoRedo/UndoRedoService.h"
 #include "EditorChangeNotifications.h"
+#include "Platform/Environment.h"
 
 #include "CBTTerrain/CBTPlanetShading.h"
 #include "CBTTerrainECS/CBTRenderFeature.h"
@@ -26,7 +27,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -52,11 +52,7 @@ constexpr float kBrushStrengthStep = 0.25f;
 
 bool ZoneDebugEnabled()
 {
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_ZONE_DEBUG");
-        return v != nullptr && v[0] != '0';
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_ZONE_DEBUG", false);
     return enabled;
 }
 

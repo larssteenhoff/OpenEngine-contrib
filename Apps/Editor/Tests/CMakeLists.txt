@@ -121,6 +121,7 @@ target_link_libraries(EditorThumbnailTests
         GTest::gtest
         GTest::gtest_main
 )
+target_include_directories(EditorThumbnailTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 target_compile_features(EditorThumbnailTests PRIVATE cxx_std_20)
 
@@ -147,6 +148,7 @@ target_link_libraries(EditorUniversalSearchTests
         GTest::gtest
         GTest::gtest_main
 )
+target_include_directories(EditorUniversalSearchTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 target_compile_features(EditorUniversalSearchTests PRIVATE cxx_std_20)
 
@@ -166,6 +168,9 @@ add_executable(EditorThumbnailRoutingTests
     ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/CubeLutThumbnailHandler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/FolderBakeReport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/TextureThumbnailHandler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/SpriteFramesThumbnailHandler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/ThumbnailImageOps.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/ThumbnailImageCache.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/ModelThumbnailHandler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/ModelThumbnailBakeQueue.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../Source/Thumbnails/ModelThumbnailBakedImages.cpp
@@ -191,6 +196,7 @@ target_link_libraries(EditorThumbnailRoutingTests
         GTest::gtest
         GTest::gtest_main
 )
+target_include_directories(EditorThumbnailRoutingTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 
 target_compile_features(EditorThumbnailRoutingTests PRIVATE cxx_std_20)
 
@@ -265,6 +271,7 @@ add_executable(AgentProviderTests
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/CliSessionFilesTests.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/AssistantAttachmentTests.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/ReplyTextBlocksTests.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/PromptFilesTests.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AssistantAttachment.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AssistantMode.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AssistantTools.cpp
@@ -275,6 +282,8 @@ add_executable(AgentProviderTests
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/SseParser.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeApiStream.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeApiProvider.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeUserContent.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/PromptFiles.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/CliSessionProvider.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeSessionProvider.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/CodexSessionProvider.cpp
@@ -313,6 +322,11 @@ add_executable(AiAssistantPanelTests
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/AssistantGateTests.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/DictationTextTests.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/MarkupContextTests.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Tests/PromptFileTrayTests.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/PromptFileTray.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/PromptFileItem.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/PromptFileDropZone.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/PromptFileThumbnail.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AssistantGate.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AssistantActionLedger.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AssistantTurnUndo.cpp
@@ -331,6 +345,7 @@ add_executable(AiAssistantPanelTests
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AgentConversationController.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AgentSessionSearchProvider.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AgentModelPopover.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/PromptInputLayout.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/ModeControlFit.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AgentConversationRowModel.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/AgentConversationRow.cpp
@@ -352,6 +367,8 @@ add_executable(AiAssistantPanelTests
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/SseParser.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeApiStream.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeApiProvider.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeUserContent.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/PromptFiles.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/CliSessionProvider.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/ClaudeSessionProvider.cpp
     ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Editor/Providers/CodexSessionProvider.cpp
@@ -367,6 +384,12 @@ target_compile_features(AiAssistantPanelTests PRIVATE cxx_std_20)
 ge_set_output_tests(AiAssistantPanelTests)
 ge_stage_runtime_dependencies(AiAssistantPanelTests)
 add_dependencies(AiAssistantPanelTests FakeAgentCli)
+ge_stage_test_asset(AiAssistantPanelTests
+    "${CMAKE_SOURCE_DIR}/Apps/Editor/Assets/Fonts/Roboto-Regular.ttf"
+    "Assets/Fonts/Roboto-Regular.ttf")
+ge_stage_test_asset(AiAssistantPanelTests
+    "${CMAKE_SOURCE_DIR}/Apps/Editor/Assets/Fonts/RobotoMono-Regular.ttf"
+    "Assets/Fonts/RobotoMono-Regular.ttf")
 add_custom_command(TARGET AiAssistantPanelTests POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:AiAssistantPanelTests>/AiAssistantPanelFixtures
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -383,5 +406,56 @@ add_custom_command(TARGET AiAssistantPanelTests POST_BUILD
         $<TARGET_FILE_DIR:AiAssistantPanelTests>/AiAssistantPanelFixtures/ai-assistant/Editor/UI/controls/AgentConversationRow.uxml
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Assets/Editor/UI/controls/AgentModelPopover.uxml
-        $<TARGET_FILE_DIR:AiAssistantPanelTests>/AiAssistantPanelFixtures/ai-assistant/Editor/UI/controls/AgentModelPopover.uxml)
+        $<TARGET_FILE_DIR:AiAssistantPanelTests>/AiAssistantPanelFixtures/ai-assistant/Editor/UI/controls/AgentModelPopover.uxml
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/Packages/ai-assistant/Assets/Editor/UI/controls/PromptFileItem.uxml
+        $<TARGET_FILE_DIR:AiAssistantPanelTests>/AiAssistantPanelFixtures/ai-assistant/Editor/UI/controls/PromptFileItem.uxml)
 add_test(NAME AiAssistantPanelTests COMMAND AiAssistantPanelTests)
+
+# The localization package's editor module, compiled from the package tree: the panel's
+# registration, its icon class and the image the package ships for it (staged beside the
+# suite under the package's mount alias).
+add_executable(LocalizationEditorTests
+    ${CMAKE_SOURCE_DIR}/Packages/localization/Tests/LocalizationEditorModuleTests.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/localization/Editor/LocalizationEditorModuleInit.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/localization/Editor/LocalizationPanel.cpp
+    ${CMAKE_SOURCE_DIR}/Packages/localization/Editor/LocalizationKeyListProvider.cpp)
+target_include_directories(LocalizationEditorTests PRIVATE
+    ${CMAKE_SOURCE_DIR}/Packages/localization/Editor)
+target_link_libraries(LocalizationEditorTests PRIVATE
+    Engine EditorSDK nlohmann_json::nlohmann_json GTest::gtest_main)
+target_compile_features(LocalizationEditorTests PRIVATE cxx_std_20)
+# The package sheets name editor icons as url("editor:..."), checked against the editor's assets.
+target_compile_definitions(LocalizationEditorTests PRIVATE
+    GE_EDITOR_SOURCE_DIR="${CMAKE_SOURCE_DIR}/Apps/Editor")
+ge_set_output_tests(LocalizationEditorTests)
+ge_stage_runtime_dependencies(LocalizationEditorTests)
+add_custom_command(TARGET LocalizationEditorTests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/Packages/localization/Assets
+        $<TARGET_FILE_DIR:LocalizationEditorTests>/LocalizationEditorFixtures/localization)
+add_test(NAME LocalizationEditorTests COMMAND LocalizationEditorTests)
+
+add_executable(EditorSceneViewPixelPerfectTests
+    SceneViewPixelPerfectTests.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Source/SceneViewPixelPerfect.cpp
+)
+
+target_include_directories(EditorSceneViewPixelPerfectTests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../Include
+)
+
+target_link_libraries(EditorSceneViewPixelPerfectTests
+    PRIVATE
+        Engine
+        GTest::gtest
+        GTest::gtest_main
+)
+
+target_compile_features(EditorSceneViewPixelPerfectTests PRIVATE cxx_std_20)
+
+ge_set_output_tests(EditorSceneViewPixelPerfectTests)
+ge_stage_runtime_dependencies(EditorSceneViewPixelPerfectTests)
+
+add_test(NAME EditorSceneViewPixelPerfectTests COMMAND EditorSceneViewPixelPerfectTests)

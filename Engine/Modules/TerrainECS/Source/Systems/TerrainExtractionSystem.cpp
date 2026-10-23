@@ -32,6 +32,7 @@
 #include "Rendering/Core/Device.h"
 #include "Terrain/CDLODSelection.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/CameraTypes.h"
 #include "Core/CpuProfiler.h"
 
@@ -374,12 +375,12 @@ TerrainExtractionSystem::TerrainExtractionSystem(Engine::Renderer::RenderService
     // GE_TERRAIN_ATLAS_NO_REGION forces every content edit through the whole-slot path (the
     // pre-region-scoping behavior): the before/after measurement lever and the runtime kill switch
     // if the region fast-path ever misbehaves. Default: region patching ON.
-    m_AtlasRegionPatch = std::getenv("GE_TERRAIN_ATLAS_NO_REGION") == nullptr;
+    m_AtlasRegionPatch = !Platform::EnvironmentSwitchEnabled("GE_TERRAIN_ATLAS_NO_REGION", false);
     // GE_TERRAIN_UNIFIED_NO_REGION forces every unified-path (default tiled) content edit
     // through the whole-tile upload + whole-tile normal regen (the pre-fix ~50 ms/dab
     // sculpt hitch): the before/after measurement lever and the runtime kill switch if the
     // region fast-path ever misbehaves. Default: region patching ON.
-    m_UnifiedRegionPatch = std::getenv("GE_TERRAIN_UNIFIED_NO_REGION") == nullptr;
+    m_UnifiedRegionPatch = !Platform::EnvironmentSwitchEnabled("GE_TERRAIN_UNIFIED_NO_REGION", false);
 }
 
 TerrainExtractionSystem::~TerrainExtractionSystem() = default;
@@ -611,11 +612,18 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
     // here by absolute index, so the two are built and published as one unit.
     std::vector<Terrain::TerrainMaterialRecord> materialTable;
 
-    world.Query<ECS::Write<Components::Terrain>, ECS::Read<Components::WorldTransform>>()
+    // The per-frame scan reads Terrain. The rare handle writes below take a write
+    // grant for this entity through GetComponentForWrite, so Changed<Terrain> fires
+    // only when a handle changes.
+    world.Query<ECS::Read<Components::Terrain>, ECS::Read<Components::WorldTransform>>()
         .Each([&](ECS::EntityHandle entity,
-                  Components::Terrain& terrain,
+                  const Components::Terrain& terrain,
                   const Components::WorldTransform& worldXf)
         {
+            const auto terrainForWrite = [&]() -> Components::Terrain& {
+                return *world.GetComponentForWrite<Components::Terrain>(entity);
+            };
+
             // Grass placement is planar-only (TerrainGrassSupportsDomain): the compute roots blades
             // on a flat XZ grid, which floats off a cube-sphere planet's curved surface. Source no
             // grass for a spherical terrain until radial placement lands, nor for grass that is
@@ -652,8 +660,9 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                     TerrainHandle oldH{terrain.TerrainDataHandle, terrain.TerrainDataGeneration};
                     feature->ReleaseTerrainResources(oldH);
                     terrainService->DestroyTerrain(oldH);
-                    terrain.TerrainDataHandle = 0;
-                    terrain.TerrainDataGeneration = 0;
+                    Components::Terrain& writable = terrainForWrite();
+                    writable.TerrainDataHandle = 0;
+                    writable.TerrainDataGeneration = 0;
                 }
 
                 TiledTerrainHandle tiledHandle{terrain.TiledTerrainHandle, terrain.TiledTerrainGeneration};
@@ -712,8 +721,9 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                         ForgetTiledTerrain(tiledHandle.Index);
 
                         terrainService->DestroyTiledTerrain(tiledHandle);
-                        terrain.TiledTerrainHandle = 0;
-                        terrain.TiledTerrainGeneration = 0;
+                        Components::Terrain& writable = terrainForWrite();
+                        writable.TiledTerrainHandle = 0;
+                        writable.TiledTerrainGeneration = 0;
                         tiled = nullptr;
                         tiledHandle = {};
                     }
@@ -724,14 +734,15 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                 {
                     // Same stale-handle rule as the single-terrain path: the handle
                     // named nothing, so provision fresh instead of stranding the entity.
-                    ClearUnresolvedTerrainHandles(terrain);
+                    ClearUnresolvedTerrainHandles(terrainForWrite());
 
                     // The component's size, density and base (BuildTiledTerrainConfig, tested in
                     // TerrainRegionBakeTests).
                     const auto newHandle =
                         terrainService->CreateTiledTerrain(terrainService->BuildTiledTerrainConfig(terrain));
-                    terrain.TiledTerrainHandle = newHandle.Index;
-                    terrain.TiledTerrainGeneration = newHandle.Generation;
+                    Components::Terrain& writable = terrainForWrite();
+                    writable.TiledTerrainHandle = newHandle.Index;
+                    writable.TiledTerrainGeneration = newHandle.Generation;
 
                     tiled = terrainService->GetTiledTerrainData(newHandle);
                     if (!tiled)
@@ -864,7 +875,7 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                     // if this fires every frame on an idle tiled terrain, it is the hidden
                     // per-frame cost. Silent unless it actually runs (gated on integrated
                     // tiles or a dirty quadtree).
-                    static const bool kTileDebug = std::getenv("GE_TERRAIN_TILE_DEBUG") != nullptr;
+                    static const bool kTileDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_TILE_DEBUG", false);
                     if (kTileDebug)
                         Logger::Log::Info("Terrain.QuadtreeSync integrated={} quadtreeDirty={}",
                                           integratedTiles.size(), tiled->QuadtreeDirty ? 1 : 0);
@@ -1074,7 +1085,7 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
 
                     // GE_TERRAIN_TILE_DEBUG: one Terrain.TileUpload line per tile patched
                     // into the unified source this frame; silent on idle (no dirty tiles).
-                    static const bool kTileUploadDebug = std::getenv("GE_TERRAIN_TILE_DEBUG") != nullptr;
+                    static const bool kTileUploadDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_TILE_DEBUG", false);
 
                     // Iterate tiles in deterministic (coord-sorted) order for stable logs.
                     std::vector<TileCoord> sortedCoords;
@@ -1394,7 +1405,7 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                             feature->AccumulateAtlasHeightDirtyUV(globalGpuHandle, minU, minV, maxU, maxV);
                         };
 
-                        static const bool kAtlasSurfDebug = std::getenv("GE_TERRAIN_ATLAS_DEBUG") != nullptr;
+                        static const bool kAtlasSurfDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_ATLAS_DEBUG", false);
 
                         // An axis neighbour's heightfield, but ONLY when it is Full at tileRes so its
                         // boundary samples align exactly with this tile's. Adjacent slots then compute the
@@ -1817,7 +1828,7 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                                 if (!dispatches.empty())
                                 {
                                     static const bool kGpuBakeDebug =
-                                        std::getenv("GE_TERRAIN_GPU_BAKE_DEBUG") != nullptr;
+                                        Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GPU_BAKE_DEBUG", false);
                                     if (kGpuBakeDebug)
                                         Logger::Log::Info(
                                             "Terrain.GpuBake tiles={} mods={} rules={} slot0={}",
@@ -1888,7 +1899,7 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                                     tiled->GlobalHeightRangeDirty = true;
                                     terrainService->MarkGpuReadbackSplatPending();
                                     static const bool kGpuBakeDebug =
-                                        std::getenv("GE_TERRAIN_GPU_BAKE_DEBUG") != nullptr;
+                                        Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GPU_BAKE_DEBUG", false);
                                     if (kGpuBakeDebug)
                                         Logger::Log::Info("Terrain.GpuReadbackAdopt tile=({},{}) "
                                                           "rect=({},{},{},{}) minH={:.4f} maxH={:.4f}",
@@ -2101,7 +2112,7 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                 // places on these params, so the live question is whether these values are the ones
                 // the compute receives (a zero height index roots blades at the base plane -> buried;
                 // a zero splat index takes the procedural mask; disabled/zero grass scale -> no draw).
-                static const bool kGrassDebug = std::getenv("GE_TERRAIN_GRASS_DEBUG") != nullptr;
+                static const bool kGrassDebug = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GRASS_DEBUG", false);
                 // Throttle to on-change: the grass params are steady per frame, so a per-frame line is
                 // pure spam. Key on the fields that actually gate/route grass.
                 static uint32 s_LastKey = 0xFFFFFFFFu;
@@ -2201,8 +2212,9 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                 }
                 ForgetTiledTerrain(oldTiled.Index); // fresh trackers if this index is reused
                 terrainService->DestroyTiledTerrain(oldTiled);
-                terrain.TiledTerrainHandle = 0;
-                terrain.TiledTerrainGeneration = 0;
+                Components::Terrain& writable = terrainForWrite();
+                writable.TiledTerrainHandle = 0;
+                writable.TiledTerrainGeneration = 0;
             }
             TerrainHandle handle{terrain.TerrainDataHandle, terrain.TerrainDataGeneration};
             auto* data = terrainService->GetTerrainData(handle);
@@ -2220,8 +2232,9 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                 {
                     feature->ReleaseTerrainResources(handle);
                     terrainService->DestroyTerrain(handle);
-                    terrain.TerrainDataHandle = 0;
-                    terrain.TerrainDataGeneration = 0;
+                    Components::Terrain& writable = terrainForWrite();
+                    writable.TerrainDataHandle = 0;
+                    writable.TerrainDataGeneration = 0;
                     data = nullptr;
                     handle = {};
                 }
@@ -2259,11 +2272,12 @@ void TerrainExtractionSystem::Update(ECS::World& world, float32 deltaTime)
                 // The handle named nothing, so it is stale: drop it and provision
                 // fresh. Refusing to recreate would leave an undone terrain-entity
                 // delete permanently terrainless.
-                ClearUnresolvedTerrainHandles(terrain);
+                ClearUnresolvedTerrainHandles(terrainForWrite());
 
                 const auto newHandle = terrainService->CreateTerrain(desired);
-                terrain.TerrainDataHandle = newHandle.Index;
-                terrain.TerrainDataGeneration = newHandle.Generation;
+                Components::Terrain& writable = terrainForWrite();
+                writable.TerrainDataHandle = newHandle.Index;
+                writable.TerrainDataGeneration = newHandle.Generation;
 
                 data = terrainService->GetTerrainData(newHandle);
                 if (!data)

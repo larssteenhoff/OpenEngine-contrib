@@ -16,6 +16,8 @@
 #include "Assets/LensFlareDefinitionAsset.h"
 #include "EngineLogCapture.h"
 
+#include "TestTempDir.h"
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -34,8 +36,7 @@ class LensFlareImporterTest : public ::testing::Test
   protected:
     void SetUp() override
     {
-        m_Dir = fs::temp_directory_path() / "lensflare_importer_tests";
-        fs::remove_all(m_Dir);
+        m_Dir = TestUtils::MakeUniqueTempDirectory("lensflare_importer_tests");
         fs::create_directories(m_Dir);
     }
     void TearDown() override { fs::remove_all(m_Dir); }

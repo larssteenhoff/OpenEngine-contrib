@@ -332,6 +332,17 @@ inline bool SegmentsIntersect(const Vector2& a, const Vector2& b, const Vector2&
 	       (d4 == 0.0f && within(a, b, d));
 }
 
+// Where on segment ab the point nearest `point` lies: 0 at a, 1 at b, clamped between; 0 for a
+// segment of zero length.
+inline float ClosestSegmentParameter(const Vector2& a, const Vector2& b, const Vector2& point)
+{
+	const Vector2 along(b.x - a.x, b.y - a.y);
+	const float lengthSquared = Vector2::Dot(along, along);
+	if (lengthSquared <= 0.0f)
+	    return 0.0f;
+	return std::clamp(Vector2::Dot(Vector2(point.x - a.x, point.y - a.y), along) / lengthSquared, 0.0f, 1.0f);
+}
+
 // The convex hull of `points` (Andrew's monotone chain), counter-clockwise with +y up, without
 // collinear points; fewer than three distinct points come back as they are, deduplicated.
 inline std::vector<Vector2> ConvexHull(std::span<const Vector2> points)

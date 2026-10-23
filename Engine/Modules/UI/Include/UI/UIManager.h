@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Events/Event.h"
 #include <algorithm>
 #include <cstdint>
 #include <array>
@@ -31,6 +32,7 @@
 #include "UI/ModifierKeyState.h"
 #include "UI/Internal/ElementIdIndex.h"
 #include "UI/ResolvedStyle.h"
+#include "UI/SvgBackgroundRenderer.h"
 #include "UI/UICompatDrawRuns.h"
 #include "UI/SimpleSlotAllocator.h"
 #include "UI/SlotAllocator.h"
@@ -56,7 +58,7 @@ struct YGNode;
 using RetainedYGNodeRef = YGNode*;
 struct BuiltNode;
 struct UpdateContext;
-struct YogaBuildItem; // MT-4.0 cascade seam; defined in UIManager_Internal.h
+struct YogaBuildItem; // cascade compute/apply seam; defined in UIManager_Internal.h
 #endif
 
 namespace GameEngine
@@ -75,6 +77,10 @@ struct RGTexture;
 enum class RGLoadOp : uint8_t; // defined in RGFrame.h; fwd-declared to keep it out of this header
 }
 } // namespace Rendering
+namespace Localization
+{
+class LocalizationCatalog;
+}
 class AssetManager;
 struct ResolvedStyle;   // forward
 struct VisualStyle;     // forward
@@ -86,13 +92,14 @@ class DockspaceElement; // forward
 class UILayoutAsset;    // forward
 class UIStyleAsset;     // forward
 class TextureAsset;     // forward
+struct SvgCookedMesh;   // forward
 class UIHotReload;      // forward
 class TransitionEngine; // forward
 class ScrollView;       // forward
 class DismissablePopup;    // forward
 class IVirtualizedControl; // forward
 struct RetainedYogaNode; // forward; defined after class UIManager
-namespace UIParsing { struct ElementState; } // forward (MT-4.2 share-key helpers)
+namespace UIParsing { struct ElementState; } // forward (share-key helpers)
 
 namespace UI
 {
@@ -116,11 +123,11 @@ class UIManager
     UIManager(Rendering::IDevice* device, AssetManager* assetManager);
     ~UIManager();
 
-    // Deferred outcome of the declared-transition registry mirror (MT-4.1).
+    // Deferred outcome of the declared-transition registry mirror.
     // ResolveCascadeForElement computes this from the freshly cascaded
     // rs.Transitions + ownership and OUTPUTS it instead of mutating
     // m_TransitioningElements inline, so the cascade compute stage stays
-    // manager-container-free (MT-4.2 runs it on a worker). The caller applies
+    // manager-container-free. The caller applies
     // it on the UI thread via ApplyTransitionRegistration. Public because the
     // module-internal YogaBuildItem (UIManager_Internal.h) carries it across
     // the compute -> apply seam.
@@ -138,10 +145,10 @@ class UIManager
     // else that holds a manager it does not own keeps a UIManagerRef.
     bool IsBeingDestroyed() const { return !m_Lifetime; }
 
-    // Cascade-memoization Phase 6: true if any selector in the
-    // effective stylesheet set uses `+` or `~`. Class/id mutation sites
-    // consult this (via UIManagerUsesSiblingCombinators forwarder) to
-    // decide whether following-sibling rule caches need invalidation.
+    // True if any selector in the effective stylesheet set uses `+` or `~`.
+    // Class/id mutation sites and InsertChild/RemoveChild consult this (via
+    // the UIManagerUsesSiblingCombinators forwarder) to decide whether
+    // following-sibling rule caches need invalidation.
     bool UsesSiblingCombinators() const { return m_StyleAnalysis.UsesSiblingCombinators; }
     // The sibling-position pseudos (:first-child, :nth-last-of-type, ...)
     // any selector uses, as PseudoKindBit bits. Child-list mutations restyle
@@ -150,7 +157,7 @@ class UIManager
     // True if any selector uses `:empty`. Child-list mutations use this to
     // restyle the parent when it crosses the empty/non-empty boundary.
     bool UsesEmptyPseudo() const { return m_StyleAnalysis.UsesEmptyPseudo; }
-    // P4 (C-10): see m_RuleCacheEpoch. Consumed via the UIElement.h
+    // See m_RuleCacheEpoch. Consumed via the UIElement.h
     // forwarder by IsRuleCacheValid and stamped by BuildRuleCache.
     uint32_t GetRuleCacheEpoch() const { return m_RuleCacheEpoch; }
 
@@ -173,7 +180,7 @@ class UIManager
     void SyncModifierKeys(int mods);
 
     /// Reconcile held modifiers against a live query of the platform's modifier
-    /// state. Unlike SyncModifierKeys this releases a tracked key the platform
+    /// state. Like SyncModifierKeys this releases a tracked key the platform
     /// no longer reports held. See ModifierKeyState::ApplyLiveMask.
     void ReconcileModifierKeys(int liveMods);
 
@@ -188,9 +195,8 @@ class UIManager
     void SetJobSystem(JobSystem::WorkStealingThreadPool* jobSystem) { m_JobSystem = jobSystem; }
 
     // ---- Design-space probe: level-wave cascade (UIStyleTests/bench ONLY) ---
-    // NOT a product code path and never called by Update(). This is the third,
-    // previously-untested MT design for the UI style cascade (after MT-4 fork-
-    // join and MT-4.3 work-first claim, both killed on measurement). It re-drives the REAL
+    // NOT a product code path and never called by Update(). A probe of a
+    // multithreaded UI style cascade: it re-drives the REAL
     // per-element cascade (ResolveCascadeForElement) over the current tree in
     // one of two orders so a harness can A/B them:
     //   levelWave == false : DFS preorder, single shared donor cache — this is
@@ -201,7 +207,7 @@ class UIManager
     //                        driven with ONE ParallelFor over GROUPS (a group's
     //                        donor computes, its sharees copy), then a barrier
     //                        before the next level. Barriers = tree depth.
-    // Both orders honour P4 sibling sharing and produce byte-identical resolved
+    // Both orders honour sibling style sharing and produce byte-identical resolved
     // styles (the harness asserts this). coldCaches invalidates the per-element
     // rule cache first (full structural rematch); warm leaves it populated.
     struct CascadeProbeResult
@@ -261,9 +267,9 @@ class UIManager
         const std::unordered_set<const Stylesheet*>& sheets,
         uint64_t sheetHash);
 
-    // RenderGraph arm (slice 8b): declares the UI overlay pass into an immediate-mode
+    // RenderGraph arm: declares the UI overlay pass into an immediate-mode
     // frame, attaching `target` with ClearOps — the UI pass is the target's
-    // clearer (it absorbs the old Editor.ClearPresentationTarget). Declared
+    // clearer. Declared
     // fresh every frame: no retained pass state, no recreate hashing. The
     // pass is declared even with zero primitives or an unready UI (clear-only
     // frame — the target must never present unwritten memory); the exec body
@@ -276,8 +282,8 @@ class UIManager
     // `targetSpace` is the HOST's declaration of the attachment's colour
     // space — required, no default: it drives the SDF shader's output arm
     // (HDR paper-white lift) and the subpixel text activation gate, and a
-    // space stated by writing nothing is exactly how a wrong value hides
-    // (#767 P2a / #784). A display-bound attachment passes
+    // space stated by writing nothing is exactly how a wrong value hides.
+    // A display-bound attachment passes
     // UITargetSpace::ForDisplay(activeMode); an offscreen attachment passes
     // what its own consumers expect, never the display's mode.
     // The UI owns/clears the target (editor chrome, backbuffer direct-attach).
@@ -369,6 +375,10 @@ class UIManager
 
     Rendering::Text::FontAtlas* GetDefaultFontAtlas() const { return m_FontAtlas.get(); }
     Rendering::Text::FontAtlas* ResolveFontForStyle(const ResolvedStyle& style);
+    enum class TextWarmupStatus : uint8_t { Pending, Ready, Failed };
+    // Owner-thread operation after style resolution. Prepares hidden labels too,
+    // including fallback glyphs and GPU atlas resources, before revealing a screen.
+    TextWarmupStatus PrepareTextSubtree(UIElement* root);
     /// The lines `text` takes in `element`'s text face (the font, size, line height and line
     /// breaking of its last layout) wrapped at `widthLogical`: the count the element's own
     /// measure reports for that text. For a control that fits text to a line budget within one
@@ -383,25 +393,27 @@ class UIManager
     float GetTimeSeconds() const { return m_Time; }
 
     // Slug text rendering tuning.
-    // TextContrast is Skia's SK_GAMMA_CONTRAST: the strength of the
-    // colour-keyed coverage boost that compensates for source-over blending
-    // reproducing a physically correct — and therefore perceptually thin —
-    // average of ink and paper. The boost is keyed on the glyph's luminance
-    // (full for near-black text, tapering to nothing for near-white text),
-    // because that asymmetry, not glyph size, is what the error depends on.
-    // Chrome ships 1.0 on Windows; 0 disables the boost entirely.
+    // TextContrast scales the colour-keyed contrast term. At the encoded
+    // target (TextBlendGamma 1.0, the editor) it is the contrast measured out
+    // of Chrome on macOS: a bulge on partially covered pixels that is strong
+    // for light text, weak for mid greys and slightly thinning for near-black
+    // text. At the linear target (the default: HUD and Player) it is Skia's
+    // boost keyed on the guessed backdrop. 1.0 (default) is full strength; 0
+    // blends plain coverage.
     // See Shaders/UI/text_mask_gamma.glsl for the model.
     float GetTextContrast() const { return m_TextContrast; }
     void SetTextContrast(float contrast) { m_TextContrast = std::clamp(contrast, 0.0f, 1.0f); }
     // TextBlendGamma selects the TARGET space coverage should blend linearly
     // in, and is a policy switch rather than a taste knob — hence no Settings
-    // UI. 0 (default) = linear, i.e. area-exact ink; this is the target Skia's
-    // mask gamma is built for with SK_GAMMA_SRGB. 1.0 = display-encoded space,
-    // the "gamma-space blending" look. What the target MEANS depends on the
-    // attachment's actual blend space: against today's linear attachments the
-    // 0 default is the identity retarget and the correction reduces to
-    // TextContrast; against an encoded-byte attachment (#767 flip) the same 0
-    // selects the full Skia-direction correction. See
+    // UI. 0 (default) = linear, i.e. area-exact ink: on a linear attachment
+    // (a HUD over the scene, the Player) the identity retarget, so the
+    // contrast term is the whole correction. 1.0 = display-encoded space, the
+    // space Chrome blends text in and the one the contrast term is measured
+    // for; the editor selects it for its encoded attachment, where it is the
+    // identity retarget (Editor::ApplyEditorTextBlend). On a linear
+    // attachment 1.0 reproduces the encoded blend only approximately, because
+    // the retarget guesses the backdrop as the paint's inverse: #e6e6e6 text
+    // over #383838 lands 2-4% short of the encoded-blend ink. See
     // Shaders/UI/text_mask_gamma.glsl for the bidirectional model.
     float GetTextBlendGamma() const { return m_TextBlendGamma; }
     void SetTextBlendGamma(float gamma) { m_TextBlendGamma = std::clamp(gamma, 0.0f, 4.0f); }
@@ -428,7 +440,6 @@ class UIManager
     //   1.0 = neutral (identity)
     //   > 1.0 softens (edges pulled toward 0.5)
     //   < 1.0 sharpens (edges pushed toward 0/1)
-    float GetTextSmoothingGamma() const { return m_TextSmoothingGamma; }
     void SetTextSmoothingGamma(float gamma) { m_TextSmoothingGamma = std::max(0.1f, gamma); }
     // Subpixel RGB text AA (ClearType-style, opt-in, default off). Glyph
     // coverage is evaluated per display subpixel (RGB stripe, R leftmost) and
@@ -436,7 +447,6 @@ class UIManager
     // for text on standard-DPI LCDs, at the cost of colour fringes on glyph
     // edges (by design; screenshots carry them too). The setting is a request:
     // ResolveTextSubpixelActive decides per frame whether it actually engages.
-    bool GetTextSubpixelAA() const { return m_TextSubpixelAA; }
     void SetTextSubpixelAA(bool enabled) { m_TextSubpixelAA = enabled; }
     // Pure activation gate, pinned by TextCoverageCorrectionTests. The setting
     // is necessary but not sufficient: subpixel additionally requires SDR
@@ -482,9 +492,6 @@ class UIManager
     void SetScaleSettings(const UI::UIScaleSettings& settings) { m_ScaleSettings = settings; }
     // Retained-mode diagnostics/safety toggles.
     // Correctness mode setter/getter is declared in the debug controls section below.
-    // Kill switch for TryPointerOnlyFrame (also GE_UI_DISABLE_NOOP_FAST_PATH=1):
-    // when disabled, bare mouse moves take the heavy pass like any other input.
-    void SetFastPathNoOpDisabled(bool disabled) { m_DisableFastPathNoOp = disabled; }
 
     // Canonical range for the HDR UI black-floor lift (nits). The authoritative
     // clamp lives in ApplyRenderRuntimeConfig below; editor settings and widgets
@@ -621,9 +628,7 @@ private:
     // interner doesn't keep entries that reference now-stale sheet
     // pointer lists. Called by ReplaceGlobalStylesheetBlock,
     // AttachStyleFromAsset, AddStylesheet, and the async file-stylesheet
-    // attach paths — historically only ReplaceGlobalStylesheetBlock did
-    // this, leaving the others to rely on the per-frame full rebuild
-    // (now bypassed under primary flip).
+    // attach paths.
     void InvalidateAllInternedSheetSets();
 
 public:
@@ -688,9 +693,6 @@ public:
     // Data-driven helpers (file-based)
     bool LoadLayoutFromFile(const std::string& path);
     bool AttachStyleFromFile(const std::string& path);
-    // Asynchronous variants (parse off-thread; apply on UI thread when ready).
-    void LoadLayoutFromFileAsync(const std::string& path);
-    void AttachStyleFromFileAsync(const std::string& path);
     void SetRoot(std::unique_ptr<UIElement> root);
 
     // External texture registry for engine-provided textures (e.g., scene view)
@@ -714,7 +716,7 @@ public:
     void SetExternalTexture(const std::string& name, Rendering::TextureHandle handle,
                             uint32_t width, uint32_t height,
                             UI::UITextureSpace space);
-    // RenderGraph arm (slice 8b), two-phase by design. REGISTRATION is persistent —
+    // RenderGraph arm, two-phase by design. REGISTRATION is persistent —
     // it makes `name` resolvable for primitive generation (size/space for
     // background-size math) and routes the binding through the per-frame
     // publish map. PUBLICATION is per-frame: the host publishes the CURRENT
@@ -756,6 +758,8 @@ public:
     struct FontResolveResult
     {
         std::vector<std::uint8_t> Bytes; // font file bytes (TTF/OTF/etc.)
+        // Ordered packaged fallback files chosen by the host, not discovered by filename.
+        std::vector<std::filesystem::path> FallbackFonts;
         int FaceIndex = 0;              // reserved for collections (.ttc); currently unused by FontAtlas
         std::string DebugName;          // optional diagnostics (path, OS family, etc.)
         // Optional asset GUID of the resolved font file. When non-null, UIManager
@@ -775,6 +779,10 @@ public:
 
     // Install/replace the font resolver. Passing an empty function disables host font loading.
     void SetFontResolver(FontResolverFn&& resolver);
+    // The one catalog the manager's bound labels resolve against; null unbinds them to their
+    // fallbacks. The catalog's locale is also the shaping language of every text face.
+    void SetLocalizationCatalog(std::shared_ptr<Localization::LocalizationCatalog> catalog);
+    const std::shared_ptr<Localization::LocalizationCatalog>& GetLocalizationCatalog() const { return m_LocalizationCatalog; }
 
     // Install a synchronous default face used while host-resolved family fonts
     // are still loading. Hosts should provide their primary UI face here to keep
@@ -784,6 +792,23 @@ public:
     // Optional prefetch hook: request that a family be loaded for future frames.
     // This is safe to call before the first Update() to avoid initial layout shifts.
     void RequestFontFamily(const std::string& family);
+
+    enum class FontLoadStatus { Loading, Loaded, Failed };
+    struct FontFaceRequest
+    {
+        // Empty selects the explicitly installed default face, never an arbitrary fallback.
+        std::string Family;
+        std::string Text;
+        int Weight = 400;
+        FontStyle Style = FontStyle::Normal;
+        FontVariant Variant = FontVariant::Normal;
+    };
+    // Loads the face the UI draws this family, weight and style with, and prepares
+    // the glyphs for the supplied UTF-8 text so a loading screen can show it at once.
+    // Call it on the UI thread each frame after the UI update until it returns Loaded
+    // or Failed. Loading is not success; a Failed request may be retried later.
+    // Loaded means the glyph data is ready; textures may still upload on first draw.
+    FontLoadStatus LoadFont(const FontFaceRequest& request);
 
     // No-op under RenderGraph (the old RGTextureRef render-target override is gone);
     // retained because the editor host still calls it on HDR/surface changes.
@@ -918,7 +943,6 @@ public:
     void SetScrollFocusFallbackEnabled(bool enabled) { m_ScrollFocusFallbackEnabled = enabled; }
 
     // Debug controls / profiling accessors (useful for tests and perf investigation)
-    void SetTextDebugOverlayEnabled(bool enabled) { m_TextDebugOverlayEnabled = enabled; }
     bool IsTextDebugOverlayEnabled() const { return m_TextDebugOverlayEnabled; }
     void RequestTextDebugDump() { m_TextDebugDumpRequested = true; }
 
@@ -927,8 +951,6 @@ public:
     // Intended for debugging invalidation/caching issues in scroll/virtualized views and for CI tests.
     void SetCorrectnessModeEnabled(bool enabled) { m_CorrectnessModeEnabled = enabled; }
     bool IsCorrectnessModeEnabled() const { return m_CorrectnessModeEnabled; }
-    void SetCorrectnessModeAssertsEnabled(bool enabled) { m_CorrectnessModeAssertsEnabled = enabled; }
-    bool IsCorrectnessModeAssertsEnabled() const { return m_CorrectnessModeAssertsEnabled; }
 
     // Update profiling (CPU-side). Populated when update profiling is enabled.
     struct UpdateProfileFrame
@@ -938,11 +960,9 @@ public:
         double TotalMs = 0.0;
         double SchedulerMs = 0.0;
         double BuildYogaMs = 0.0;
-        // BuildYogaMs split for the MT-4 (parallel cascade) go/no-go gate:
-        // style-cascade compute vs Yoga style application, build-pass sites
-        // only (the converge re-cascade is timed by PostLayoutRetryMs).
-        // MT-4 becomes worth doing when CascadeComputeMs sustains >~4ms
-        // while CascadeShared/CascadeCalls stays under ~0.30.
+        // BuildYogaMs split: style-cascade compute vs Yoga style application,
+        // BuildYogaRecursive passes only (the ConvergePostLayout re-resolve
+        // counts toward PostLayoutMs).
         double CascadeComputeMs = 0.0;
         double YogaApplyMs = 0.0;
         double YogaMs = 0.0;
@@ -951,8 +971,7 @@ public:
         double EventDispatchMs = 0.0;
         double GeometryMs = 0.0;
         double CleanupMs = 0.0;
-        // TransitionEngine::Advance wall time (was untimed — folded into the
-        // TotalMs tail). Slice D's registry conversion is measured here.
+        // TransitionEngine::Advance wall time.
         double TransitionMs = 0.0;
         // 1 when the mode-0 idle gate serviced this frame (no input, nothing
         // pending — Update skipped straight to the tooltip/cursor tail).
@@ -961,14 +980,15 @@ public:
         // regressions be attributed from profile history without relying on
         // the budgeted GE_UI_IDLE_LOG diagnostic.
         uint32_t IdleDecline = 0;
-        // Block E (E0/E1) instrumentation. Populated by GenerateAllPrimitives
+        // Primitive-generation instrumentation. Populated by GenerateAllPrimitives
         // once per frame so per-scenario captures see the per-frame
         // primitive-gen cost (otherwise hidden inside the render path).
-        // genAllPrimitivesMs: wall-clock spent in GenerateAllPrimitives.
-        // genAllPrimitivesSkipped: 1 if E0 took the early-return path, else 0.
+        // GenAllPrimitivesMs: wall-clock spent in GenerateAllPrimitives.
+        // GenAllPrimitivesSkipped: 1 if the idle skip (no regen, empty drain
+        // queue) took the early-return path, else 0.
         double GenAllPrimitivesMs       = 0.0;
         uint32_t GenAllPrimitivesSkipped = 0;
-        // MT-3 parallel drain shape: how many work items the drain processed,
+        // Parallel drain shape: how many work items the drain processed,
         // how many emit tasks it forked (1 = sequential), and how many items
         // hit an off-thread tripwire and re-emitted on the UI thread.
         uint32_t DrainItems         = 0;
@@ -1006,7 +1026,7 @@ public:
         // spike frame tells you every trigger that contributed.
         uint32_t LateRelayoutReasons = 0;
         uint32_t LayoutOverridePatchCount = 0;
-        // Slice 2 subtree-skip fast path instrumentation. Useful for verifying
+        // Subtree-skip fast path instrumentation. Useful for verifying
         // the fast path actually fires and diagnosing why it doesn't.
         uint32_t SubtreeFastPathHits          = 0;  // subtrees served from cache
         uint32_t SubtreeSlowPathWalks         = 0;  // subtrees taking the full slow path
@@ -1030,7 +1050,7 @@ public:
         uint32_t SubtreeSlowPathReasonCounts[12] = {};
         // ResolveCascadeForElement call instrumentation. Target of memoization work.
         uint32_t CascadeCalls                 = 0;  // total cascade invocations per frame
-        uint32_t CascadeShared                = 0;  // cascades served by sibling style sharing (P4)
+        uint32_t CascadeShared                = 0;  // cascades served by sibling style sharing
         uint32_t CascadeCallsBuildYoga        = 0;  // calls from BuildYogaRecursive slow path
         uint32_t CascadeCallsConverge         = 0;  // calls from ConvergePostLayout re-resolve
 
@@ -1038,15 +1058,15 @@ public:
         // postLayoutMs. Used to tell whether a mutation-frame's post-layout
         // cost is in the OnPostLayout dispatch, the retry rebuild, or the
         // StyleDirty re-solve (applyDirtyStylesToYoga).
-        double OnPostLayoutDispatchMs = 0.0;  // iterating ctx.nodes and calling OnPostLayout()
-        double PostLayoutRetryMs      = 0.0;  // ctx.nodes.clear() + BuildYoga + Yoga solve on retry
+        double OnPostLayoutDispatchMs = 0.0;  // post-order tree walk calling OnPostLayout()
+        double PostLayoutRetryMs      = 0.0;  // BuildYoga + Yoga solve + commit on the converge retry
         uint32_t PostLayoutRetryCount = 0;    // how many times the retry rebuild fired per frame
 
-        // Broken-out timers for the blocks that were previously lumped into
-        // the implicit "untracked" gap (totalMs − sum of other phases).
+        // Timers for blocks outside the phases above, which would otherwise
+        // fall into the implicit "untracked" gap (totalMs − sum of other phases).
         // Populated when UI profiling is enabled.
         double PreSolveDrainMs        = 0.0;  // FlushScrollCallbacks + drainVirtualizationQueueBounded
-        double IndicesAndClipsMs      = 0.0;  // ApplyScrollTransforms + Clamp + RebuildNodeIndices/ClipCaches/ZIndex
+        double IndicesAndClipsMs      = 0.0;  // ApplyScrollTransforms + ClampAllScrollOffsets + debug-only RebuildClipCaches
         double SolveAndApplyMs        = 0.0;  // SolveAndApplyLayout (including Yoga + commit)
         double FocusOrderMs           = 0.0;  // BuildFocusOrder + post-rebuild focus refresh
 
@@ -1077,14 +1097,6 @@ public:
     {
         return m_UpdateProfilingHistory.empty() ? 0.0 : m_UpdateProfilingHistory.back().BuildYogaMs;
     }
-    double GetLastUpdateGeometryMs() const
-    {
-        return m_UpdateProfilingHistory.empty() ? 0.0 : m_UpdateProfilingHistory.back().GeometryMs;
-    }
-    double GetLastUpdateTotalMs() const
-    {
-        return m_UpdateProfilingHistory.empty() ? 0.0 : m_UpdateProfilingHistory.back().TotalMs;
-    }
     uint32_t GetLastSubtreeFastPathHits() const
     {
         return m_UpdateProfilingHistory.empty() ? 0u : m_UpdateProfilingHistory.back().SubtreeFastPathHits;
@@ -1111,31 +1123,14 @@ public:
         return m_UpdateProfilingHistory;
     }
 
-    // Peak frame in the history ring, selected by totalMs. Returns false if
-    // empty. Useful for catching mutation-frame spikes from a polling client
-    // that may miss the exact frame via back()-only access.
-    bool GetPeakUpdateProfileFrame(UpdateProfileFrame& out) const
-    {
-        if (m_UpdateProfilingHistory.empty())
-            return false;
-        const UpdateProfileFrame* best = &m_UpdateProfilingHistory.front();
-        for (const auto& f : m_UpdateProfilingHistory)
-        {
-            if (f.TotalMs > best->TotalMs)
-                best = &f;
-        }
-        out = *best;
-        return true;
-    }
-
 private:
-    // Block E1 helper. Adjust m_DrawOrderIdx on every element whose
+    // Adjust m_DrawOrderIdx on every element whose
     // draw-order slice starts at-or-after `threshold` by `delta`.
     // Walks the tree (children + Mount targets). Used by drain when a
     // count change shifts m_DrawOrder entries downstream of an element.
     void ShiftDrawOrderIndicesAfter(uint32_t threshold, int32_t delta);
 
-    // Block E (E0/E1) helper. Out-of-line so it can call UIElement methods
+    // Out-of-line so it can call UIElement methods
     // (UIElement is forward-declared in this header).
     //
     // Routes the mutation by flag scope:
@@ -1151,10 +1146,10 @@ private:
     // unclipped empty box still descends into children that paint.
     void NotifyDirty_UpdateRegenFlag(UIElement* el, unsigned flags);
 
-    // Block E1 instrumentation. Sets m_PrimitivesNeedRegen and OR-folds
+    // Sets m_PrimitivesNeedRegen and OR-folds
     // `causeBit` into the current frame's regen-cause bitmask so the
     // perf scenarios can attribute "why didn't this frame skip" to a
-    // specific trigger. See UpdateProfileFrame::genAllPrimitivesRegenCause.
+    // specific trigger. See UpdateProfileFrame::GenAllPrimitivesRegenCause.
     void MarkPrimitivesNeedRegen(uint32_t causeBit);
     // The content-only pipeline escalates rangeless elements straight to a
     // full regen (see the definition in UIManager.cpp), which needs the
@@ -1166,7 +1161,7 @@ public:
     // can fast-path when nothing changed (retained mode).
     void NotifyElementDirty(UIElement* el, unsigned flags)
     {
-        // C-6: the hint flags below are atomic, but the queue push and
+        // The hint flags below are atomic, but the queue push and
         // regen-cause bookkeeping this routes to are not. Off-thread
         // callers must go through the UiDispatcher.
         AssertUiThread();
@@ -1175,7 +1170,7 @@ public:
         // thread's style-field writes are visible to the resolve walk that
         // consumes the flag (matters on weakly-ordered targets).
         m_ResolvedStylesDirty.store(true, std::memory_order_release);
-        // Block E (E0/E1): route the mutation by flag scope. Layout-affecting
+        // Route the mutation by flag scope. Layout-affecting
         // flags trigger a full regen on next render; visual-only mutations
         // (already pushed onto m_PrimitiveDataDirty below) are handled
         // surgically by DrainPrimitiveDataDirty without touching unrelated
@@ -1287,10 +1282,11 @@ public:
     // path routes through it so the outgoing tree is always announced.
     void AdoptRoot(std::unique_ptr<UIElement> newRoot);
 
-    // Event-driven UI rewrite, Stage 1: return persistent render slots
-    // owned by `el` (primitive range, clip slot, draw-order slice) to
-    // this manager's allocators. Called from ~UIElement when the element
-    // owns slots. No-op for elements with no slots allocated. Idempotent.
+    // Return persistent render slots owned by `el` (primitive range, clip
+    // slot, draw-order slice) to this manager's allocators. Called when the
+    // element is destroyed or changes owner, and when a dockspace's render
+    // state is invalidated. No-op for elements with no slots allocated.
+    // Idempotent.
     void FreeRenderSlots(UIElement* el);
 
   private:
@@ -1317,11 +1313,10 @@ public:
     std::string EnsureElementId(UIElement* element);
 
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
-    // Drop retained-mode layout caches that depend on the prior NodeRec
-    // generation (interner, gates). Per-element RetainedYogaNode ownership
-    // lives on UIElement::m_YogaState now; the YGNodes themselves get
-    // destroyed when their owning UIElements destruct (e.g. when m_Root is
-    // reassigned).
+    // Drop the manager-side retained-layout caches (sheet-set interner, skip
+    // gates) so the next BuildYogaRecursive rebuilds them. The YGNodes are
+    // owned by UIElement::m_YogaState and destroyed with their elements
+    // (e.g. when m_Root is reassigned).
     void ResetRetainedYogaTree();
 #endif
     bool ConsumeRelayoutRequest()
@@ -1336,6 +1331,7 @@ public:
   private:
     Rendering::IDevice* m_Device = nullptr;
     AssetManager* m_AssetManager = nullptr;
+    SvgBackgroundRenderer m_BackgroundSvg;
     std::unique_ptr<UIHotReload> m_HotReload;
     std::unique_ptr<TransitionEngine> m_TransitionEngine;
 
@@ -1343,11 +1339,11 @@ public:
     // TransitionEngine::Advance iterates this instead of walking the tree;
     // erased on owner change / destruction.
     //
-    // MT-4.1: the cascade no longer mutates this set inline. Registration is
-    // manager-container state, which the compute stage must stay clear of so
-    // MT-4.2 can run the cascade on a worker. ResolveCascadeForElement now
-    // OUTPUTS a TransitionRegistration decision (computed from the freshly
-    // cascaded rs.Transitions + ownership, exactly as before); each caller
+    // The cascade does not mutate this set inline. Registration is
+    // manager-container state, which the compute stage must stay clear of.
+    // ResolveCascadeForElement OUTPUTS a
+    // TransitionRegistration decision (computed from the freshly cascaded
+    // rs.Transitions + ownership); each caller
     // applies it on the UI thread via ApplyTransitionRegistration — the build
     // path defers it onto the YogaBuildItem (applied in ApplyElementBuild in
     // DFS/item order), the converge/pseudo re-resolve callers apply it inline.
@@ -1376,8 +1372,14 @@ public:
     // most recently attached open popup.
     std::vector<ScrollView*> m_ScrollViewRegistry;
     std::vector<DismissablePopup*> m_DismissablePopupRegistry;
+    // Labels bound to a message key; refreshed when the catalog or its locale changes.
+    std::vector<Label*> m_LocalizedLabelRegistry;
+    // Called by Label on binding, owner change and destruction.
+    friend class Label;
+    void RegisterLocalizedLabel(Label* label);
+    void UnregisterLocalizedLabel(Label* label);
 
-    // C-8 per-frame provider change pump. Virtualized views register while
+    // Per-frame provider change pump. Virtualized views register while
     // attached; PumpVirtualizedControlChanges (called once per Update, before
     // the idle/pointer gates) reads each control's ProviderChangeVersion() and,
     // on movement since LastSeenVersion, enqueues its DataChanged coordinator
@@ -1389,11 +1391,10 @@ public:
     };
     std::vector<VirtualizedControlPumpEntry> m_VirtualizedControlRegistry;
 
-    // instanceId -> element map (slice E1). Insert on owner-gain
+    // instanceId -> element map. Insert on owner-gain
     // (NotifyElementOwnerChanged), erase on detach / destruction.
     // FindElementByInstanceId adds a root-reachability check so
-    // owned-but-detached elements (inactive dock tabs) stay unfindable,
-    // matching the old walk's semantics.
+    // owned-but-detached elements (inactive dock tabs) stay unfindable.
     std::unordered_map<uint64_t, UIElement*> m_ElementsByInstanceId;
     friend class UIElement;
     UI::ElementIdIndex m_ElementIdIndex;
@@ -1411,7 +1412,7 @@ public:
     std::vector<UIElement*> m_AttachSettleWalk;
 
 #ifdef _DEBUG
-    // C-6: MarkDirty and the primitive-data queue are UI-thread-only — the
+    // MarkDirty and the primitive-data queue are UI-thread-only — the
     // hint flags are atomic, but the queue push and regen-cause bookkeeping
     // are not. Captured at the first Update (construction may run on a
     // loader thread), asserted on every dirty notification. Same pattern
@@ -1465,9 +1466,13 @@ public:
     // when none is open. Drives the Escape fallback, so it runs only after
     // normal bubbling leaves the key unhandled.
     bool DismissTopmostPopup();
-    // C-8 pump registry (ListView/GridView/TreeView).
+    // Provider change pump registry (ListView/GridView/TreeView).
     void RegisterVirtualizedControl(IVirtualizedControl* control);
     void UnregisterVirtualizedControl(IVirtualizedControl* control);
+    // Deferred dockspace rebuilds, queued by DockspaceElement::RequestRebuildFromModel
+    // and run by Update after event dispatch.
+    void RequestDockspaceRebuild(DockspaceElement* dockspace);
+    void CancelDockspaceRebuild(DockspaceElement* dockspace);
 
   private:
     JobSystem::WorkStealingThreadPool* m_JobSystem = nullptr;
@@ -1629,10 +1634,17 @@ public:
     // events, and the source of UIEvent::Mods for every pointer event.
     UI::ModifierKeyState m_Modifiers;
 
-    // Text values by element id (for inputs), and tab focus order
-    std::unordered_map<std::string, std::string> m_TextValues;
+    // Tab focus order
     std::vector<std::string> m_FocusOrder;
 
+    // Sets the shaping language from the catalog's locale ("und" without a catalog), then
+    // re-resolves every bound label.
+    void RefreshLocalizedText();
+    // BCP-47 HarfBuzz language hint for every face; set only from the catalog's locale.
+    bool SetTextLanguage(const std::string& language);
+    std::shared_ptr<Localization::LocalizationCatalog> m_LocalizationCatalog;
+    EventSubscription m_LocalizationSubscription;
+    std::string m_TextLanguage = "und";
     // Persistent font atlas (loaded once and synced on demand).
     // NOTE: We use shared_ptr so family-specific lookups can alias the default atlas when they
     // resolve to the same font bytes. This prevents multiple FontAtlas instances with the same
@@ -1704,8 +1716,7 @@ public:
     {
         float TargetSize[2];
         float TimeSeconds;
-        // Strength of the colour-keyed coverage boost (Skia SK_GAMMA_CONTRAST).
-        // See SetTextContrast.
+        // Scale on the colour-keyed contrast term. See SetTextContrast.
         float TextContrast = 1.0f;
         // TARGET blend space for coverage: 0 = linear, 1.0 = display-encoded.
         // From SetTextBlendGamma via ResolveTextCoverageConstants; which arm
@@ -1754,7 +1765,7 @@ public:
     std::unique_ptr<UI::FrameBufferRing<UI::UIPrimitive>> m_SdfPrimRing;
     std::unique_ptr<UI::FrameBufferRing<UI::UIClipRect>> m_SdfClipRing;
     std::unique_ptr<UI::FrameBufferRing<UI::UITransformSlot>> m_SdfTransformRing;
-    // Stage 2 part 3: ring buffer for the DrawOrder SSBO. Size mirrors
+    // Ring buffer for the DrawOrder SSBO. Size mirrors
     // m_DrawOrder; each entry is a uint32_t slot index into m_PersistentPrimitives.
     std::unique_ptr<UI::FrameBufferRing<uint32_t>> m_SdfDrawOrderRing;
 
@@ -1765,7 +1776,7 @@ public:
     // by GenerateAllPrimitives for exactly the store(s) it mutated (full
     // regen bumps all three; a drain bumps only what it touched — a text
     // re-emit bumps primitives without forcing the draw-order and clip
-    // buffers to re-upload); the E0 skip path bumps nothing.
+    // buffers to re-upload); the idle skip path bumps nothing.
     // PrepareSdfFrameData keys each ring's UploadIfChanged on its own store
     // version, and the primitive ring additionally consumes dirty-range
     // marks (MarkRangeDirty at the drain write sites) so a drain frame
@@ -1825,7 +1836,7 @@ public:
     // per-element clip rects; tree traversal walks m_Root + Mount portals.
     void EmitDebugCapture();
 
-    // P4 sibling style sharing: per-build-pass donor snapshots (defined in
+    // Sibling style sharing: per-build-pass donor snapshots (defined in
     // UIManager_Internal.h; lives behind a pointer so this header only
     // needs the forward declaration). Active only for the duration of a
     // root BuildYogaRecursive pass — ConvergePostLayout re-resolves because
@@ -1841,13 +1852,13 @@ public:
     // GameUIHost.obj was not recompiled).
     std::unique_ptr<CascadeShareCache> m_CascadeShareCache;
 
-    // MT-4.1: the share cache + its active flag threaded explicitly through
+    // The share cache + its active flag threaded explicitly through
     // the cascade compute stage instead of read from manager members. The
-    // sequential path binds one context to m_CascadeShareCache for the root
-    // build pass; the converge/pseudo re-resolve callers pass nullptr (share
-    // inactive). MT-4.2 hands each subtree worker its own donor cache (Entries)
-    // but they all share the one Hover pointer — sharing is sibling-scoped, so a
-    // per-task cache loses nothing.
+    // root build pass binds one context to m_CascadeShareCache; the
+    // converge/pseudo re-resolve callers pass nullptr (share inactive).
+    // RunLevelWaveCascadeProbe gives each parallel lane its own donor cache
+    // (Entries) but they all share the one Hover pointer — sharing is
+    // sibling-scoped, so a per-lane cache loses nothing.
     struct CascadeShareContext
     {
         CascadeShareCache* Cache = nullptr;  // per-context donor snapshots (Entries)
@@ -1861,7 +1872,7 @@ public:
 
     // Style resolution helpers (shared by BuildYogaRecursive and ConvergePostLayout).
     // Returns true when the cascade was served from the sibling-share cache
-    // (P4) instead of a full ComputeStyleInto — callers use it for the
+    // instead of a full ComputeStyleInto — callers use it for the
     // CascadeShared profile counter. shareCtx is the sibling-share context
     // (nullptr / Active==false disables sharing). outTransition receives the
     // deferred declared-transition registry decision the caller must apply.
@@ -1888,18 +1899,18 @@ public:
     UIElement* ActiveTarget() const { return m_MouseCaptured ? m_CaptureElement : m_Hovered; }
 
     // Yoga tree building (extracted from Update). BuildYogaRecursive is the
-    // recursive orchestrator; MT-4.0 split its per-element body into three
+    // recursive orchestrator; its per-element body runs as three
     // explicit stages sharing a YogaBuildItem:
     //   1. CollectYogaInputs  — UI thread: ensure the Yoga node exists, resolve
     //      + intern the sheet set, compute sheet hashes. Returns false only on
     //      node-create OOM. May mutate ctx flat tables + the interner/rule-index
-    //      caches (all UI-thread state MT-4.2 pre-warms so workers stay read-only).
+    //      caches, which the compute stage then only reads.
     //   2. ComputeElementCascade — element-local cascade (ResolveCascadeForElement
     //      + FinalizeElementStyle). No YG* mutation and no manager-container
-    //      mutation (MT-4.1): the P4d share cache is now per-context state
+    //      mutation: the sibling-share cache is per-context state
     //      threaded via CascadeShareContext, and prof counters / the transition
-    //      registry decision are recorded onto the YogaBuildItem. Guarded by the
-    //      seam assert.
+    //      registry decision are recorded onto the YogaBuildItem. YG* mutation
+    //      trips the seam assert (CascadeComputeActive).
     //   3. ApplyElementBuild — UI thread: merges the compute stage's deferred
     //      effects (prof counters + declared-transition registry), replays the
     //      Yoga mutations (measure bind, ApplyStyle, mark-dirty, child insert,
@@ -1913,10 +1924,19 @@ public:
                            ::UpdateContext& ctx, ::YogaBuildItem& item);
     void ComputeElementCascade(UIElement* el, const ResolvedStyle* parentStyle,
                                ::UpdateContext& ctx, ::YogaBuildItem& item,
-                               CascadeShareContext* shareCtx, bool forceCascade = false);
+                               CascadeShareContext* shareCtx);
     ::BuiltNode ApplyElementBuild(UIElement* el, const ResolvedStyle* parentStyle,
                                   ::UpdateContext& ctx, const ::YogaBuildItem& item,
                                   CascadeShareContext* shareCtx);
+    // ApplyElementBuild phases, in call order. TrackDisplayModeFlip returns
+    // whether the element is coming back from display:none; ApplyYogaLayoutInputs
+    // returns whether its CSS 'order' changed since the last build.
+    void MergeCascadeComputeEffects(UIElement* el, ::UpdateContext& ctx, const ::YogaBuildItem& item);
+    bool TrackDisplayModeFlip(const ResolvedStyle& cs, RetainedYogaNode& retainedNode, ::UpdateContext& ctx);
+    bool ApplyYogaLayoutInputs(UIElement* el, const ResolvedStyle* parentStyle, ::UpdateContext& ctx,
+                               const ::YogaBuildItem& item);
+    void BuildYogaChildren(UIElement* el, const ::YogaBuildItem& item, bool becomingVisible,
+                           ::UpdateContext& ctx, CascadeShareContext* shareCtx);
     // Subtree-skip gate factored out of BuildYogaRecursive. Returns true when
     // el's subtree is verifiably clean (early-out with outBuilt); false to
     // proceed to compute+apply (side effects: prof reason counters +
@@ -1925,7 +1945,7 @@ public:
                                  ::UpdateContext& ctx, ::BuiltNode& outBuilt);
     // Element-state + sibling-share-key computation factored out of
     // ResolveCascadeForElement. Single source of truth for the share key so the
-    // donor's registered key matches every sharee's lookup key (P4d sibling
+    // donor's registered key matches every sharee's lookup key (sibling
     // sharing through the shared cascade cache).
     UIParsing::ElementState BuildCascadeElementState(UIElement* el) const;
     bool ComputeCascadeShareKey(UIElement* el,
@@ -1982,14 +2002,13 @@ public:
     void RebuildTypedNodeLists(::UpdateContext& ctx);
     bool FlushScrollCallbacks(::UpdateContext& ctx);
 
-    // The single Yoga->element rect commit (slice E2). Incremental mode
+    // The single Yoga->element rect commit. Incremental mode
     // routes changed rects to the primitive drain; blunt mode is for
     // post-rebuild/converge callers whose paths trigger a full regen.
     void CommitLayoutRects(UIElement* root, bool incremental);
 
-    // Stage 7 step 6 sub 1: rebuild the per-element effective clip rects
-    // consumed by the debug-capture overlay (UIManager_Debug.cpp's
-    // getClipFor). Walks the live tree (m_Root + children + Mount portal
+    // Rebuild the per-element effective clip rects consumed by the
+    // debug capture (DebugCaptureWriter::GetClipFor in UIManager_Debug.cpp). Walks the live tree (m_Root + children + Mount portal
     // targets), threading an `overflow:hidden` clip stack down the
     // descent. Output goes into m_DebugClipCache; absence from the map
     // means "no clip applies to this element".
@@ -2012,7 +2031,7 @@ public:
     UIElement* HitTestTree(float mx, float my, bool requirePointerEvents = true) const;
     // Translates committed layout rects for a subtree (following Mount
     // targets). markForDrain additionally queues every node the full
-    // primitive DFS would visit for E1 drain re-emission at the new rects
+    // primitive DFS would visit for drain re-emission at the new rects
     // (EmitWalkEntersSubtree).
     void TranslateLayoutSubtree(UIElement* root, float dx, float dy, bool markForDrain = false);
     // Mark-only variant of the walk above (Mount-aware, same gates) for
@@ -2101,7 +2120,7 @@ public:
     // no input and every decline condition (dirty tree, transitions, font
     // resolve, viewport, virtualization, generations) is interactivity-neutral.
     bool TryIdleFrame(unsigned dirtyNow, bool viewportOrScaleChanged, bool debugCaptureActive);
-    // C-8 per-frame provider change pump. Runs once per Update, before the idle/
+    // Per-frame provider change pump. Runs once per Update, before the idle/
     // pointer gates: probes each registered virtualized control's provider
     // version and, on movement, enqueues its DataChanged coordinator work so
     // HasPending() declines the idle gate that same frame. O(registered
@@ -2143,23 +2162,83 @@ public:
     friend struct UIManagerFocusAccess;
     void SolveAndApplyLayout(YGNode*& rootNode, ::UpdateContext& ctx, bool needSolve);
 
-    // SDF primitive generation (Phase 4)
+    // Update phases, in call order. UpdateFrameState carries the per-frame
+    // values they share; UpdateContext binds references to several of its
+    // fields. The Try*UpdateFrame gates return true when they serviced the
+    // whole frame.
+    struct UpdateFrameState;
+    struct TabFocusCandidate;
+    void StartUpdateProfiling(UpdateFrameState& frame);
+    void LoadDefaultFontAtlasOnce();
+    void DrainSchedulerAndDispatcher(UpdateFrameState& frame);
+    void RecoverHoverAndCapture();
+    void ResolveFrameInputs(UpdateFrameState& frame);
+    bool TryIdleUpdateFrame(UpdateFrameState& frame);
+    void LogIdleGateDecline(const UpdateFrameState& frame);
+    bool TryPointerOnlyUpdateFrame(UpdateFrameState& frame);
+    void LogHeavyInputFrame(const UpdateFrameState& frame);
+    void BeginHeavyPass(UpdateFrameState& frame);
+    void CollectFrameStylesheets(::UpdateContext& ctx);
+    void SeedRootSheetSet(::UpdateContext& ctx);
+    void BuildInitialYogaTree(::UpdateContext& ctx, UpdateFrameState& frame);
+    void CacheScrollViewInstanceIds(const ::UpdateContext& ctx);
+    bool DrainVirtualizationQueueBounded(int maxIterations);
+    void RunPreSolveDrain(::UpdateContext& ctx, UpdateFrameState& frame);
+    void SolveInitialLayout(::UpdateContext& ctx, UpdateFrameState& frame);
+    void RefreshFocusOrderAndClips(::UpdateContext& ctx, UpdateFrameState& frame);
+    void RebuildAfterEventMutations(::UpdateContext& ctx, UpdateFrameState& frame);
+    void RebuildTabFocusOrder(UIElement* rootEl);
+    void CollectTabFocusCandidates(UIElement* el, std::vector<TabFocusCandidate>& out, size_t& domOrder);
+    void RestoreHoverAndCaptureAfterRebuild(UIElement* rootEl, bool hadCaptureRebuild,
+                                            const std::string& captureIdRebuild);
+    void SettleAfterEvents(::UpdateContext& ctx, UpdateFrameState& frame);
+    void RunLateRelayout(::UpdateContext& ctx, UpdateFrameState& frame);
+    void LogUpdateSpike(const ::UpdateContext& ctx, const UpdateFrameState& frame);
+    void FinishUpdateProfiling(UpdateFrameState& frame);
+    void ReportUnconvergedDirtyFlags();
+    void ApplyLayoutTransitions(::UpdateContext& ctx, UpdateFrameState& frame);
+    void DispatchCompletedTransitions();
+    void MarkPrimitiveRegenCauses(const ::UpdateContext& ctx, const UpdateFrameState& frame);
+
+    // SDF primitive generation
     struct PrimitiveGenContext;
-    // MT-3: one entry per drained element — collected on the UI thread,
+    // One entry per drained element — collected on the UI thread,
     // emitted into per-task scratch (possibly on JobSystem workers), applied
     // strictly in queue order on the UI thread.
     struct DrainItem;
     void GenerateAllPrimitives();
-    // Block E1: drain the m_PrimitiveDataDirty queue by re-emitting only
+    // Drain the m_PrimitiveDataDirty queue by re-emitting only
     // the listed elements' primitives into their existing slot ranges.
     // Used when no layout/structural change occurred since last full DFS;
     // avoids the full tree walk for visual-only mutations (text, color).
     // Returns true if drain succeeded; false if it had to bail to full
     // regen (e.g., element's primitive count changed unexpectedly).
-    // MT-3: structured as collect (UI thread, order-dependent bookkeeping +
+    // Structured as collect (UI thread, order-dependent bookkeeping +
     // cache pre-warm) → emit (parallel across JobSystem workers when the
     // drain is large enough) → apply (UI thread, strict queue order).
     bool DrainPrimitiveDataDirty();
+    // DrainPrimitiveDataDirty phases. PrimitiveDrainState carries the drain's
+    // success flag, the per-store touch bits and the escalation count.
+    struct PrimitiveDrainState;
+    void CollectDrainItems(std::vector<DrainItem>& items, PrimitiveGenContext& ctx,
+                           PrimitiveDrainState& state);
+    void ReleaseDeferredRGBindingsOf(UIElement* el);
+    bool RewriteDrainClipSlot(UIElement* el);
+    DrainItem BuildDrainItem(UIElement* el, PrimitiveGenContext& ctx);
+    size_t ComputeDrainTaskCount(size_t itemCount) const;
+    uint32_t EmitDrainItems(std::vector<DrainItem>& items,
+                            std::vector<std::vector<UI::UIPrimitive>>& taskScratch, size_t numTasks);
+    void EmitDrainSlice(std::vector<DrainItem>& sliceItems, std::vector<UI::UIPrimitive>& scratch,
+                        uint32_t taskIdx, size_t sliceBegin, size_t sliceEnd, bool offThread);
+    void ApplyDrainItem(DrainItem& item, PrimitiveGenContext& ctx,
+                        const std::vector<std::vector<UI::UIPrimitive>>& taskScratch,
+                        PrimitiveDrainState& state);
+    bool ReplaceRelocatedDrawOrderSlice(UIElement* el, uint16_t oldCount, size_t emittedCount,
+                                        uint32_t writeStart, PrimitiveDrainState& state);
+    bool ResizeDrawOrderSlice(UIElement* el, uint16_t oldCount, size_t emittedCount,
+                              PrimitiveDrainState& state);
+    bool HasDrawOrderSlice(uint32_t start, size_t count) const;
+    void BailDrainToFullRegen(PrimitiveDrainState& state);
     void GeneratePrimitivesForElement(UIElement* el, PrimitiveGenContext& ctx, float parentAbsX, float parentAbsY);
     // Generate one deferred overlay subtree: overlays escape their ancestors'
     // clip and opacity, so the subtree runs against a fresh viewport clip at
@@ -2206,7 +2285,7 @@ public:
     // into the drain context's scratch tail and discards the result.
     bool OwnTextEmissionPaints(UIElement* el, PrimitiveGenContext& ctx);
 
-    // Stage 2: after an element's self-emission has pushed `count` primitives
+    // After an element's self-emission has pushed `count` primitives
     // into ctx.primitives starting at scratchStart, finalize them by allocating
     // (or reusing) a persistent slot range in m_PersistentPrimitives via
     // m_PrimitiveAllocator, copying the primitives into that range, pushing
@@ -2233,9 +2312,8 @@ public:
     // so the caller pushes Selection, emits the glyph run, then pushes Caret.
     struct TextInputOverlays
     {
-        UI::UIPrimitive Selection{};
         UI::UIPrimitive Caret{};
-        bool HasSelection = false;
+        std::vector<UI::UIPrimitive> Selections;
         bool HasCaret = false;
     };
     // Requires RefreshTextInputScroll to have run for this element this frame.
@@ -2248,9 +2326,13 @@ public:
     // `paddingW/H` is the positioning area in physical px: background-size
     // measures against it, and an SVG's raster size is chosen from it.
     ResolvedBgSlot ResolveBackgroundTextureSlot(UIElement* el, PrimitiveGenContext& ctx, const BackgroundImageStyle& bgImg, float paddingW, float paddingH);
+    SvgBackgroundRenderer& BackgroundSvg() { return m_BackgroundSvg; }
+    uint16_t ResolveBackgroundMeshClip(UIElement* el, PrimitiveGenContext& ctx,
+                                       float x, float y, float w, float h,
+                                       const float* radiiX, const float* radiiY,
+                                       uint16_t parentClip);
     Rendering::Text::FontAtlas* ResolveFontForVisualStyle(const VisualStyle& vs, PrimitiveGenContext& ctx);
     std::vector<UI::UIPrimitive> m_SdfPrimitiveBuffer;
-    std::vector<UI::UIClipRect> m_SdfClipBuffer;
 
     // Deferred RG texture bindings: populated during GenerateAllPrimitives,
     // consumed during RenderRG. Maps descriptor slot index to the external
@@ -2301,7 +2383,7 @@ public:
     // and propagates them to the relevant UIManager caches:
     //   - Texture: m_BackgroundImages.OnTextureReloaded(guid) tears down the
     //     cached GPU textures so the next paint creates fresh ones from disk;
-    //     also drops the old UITextureRegistry slots (E7).
+    //     also drops the old UITextureRegistry slots.
     //   - Font:    drops m_FontAtlases / m_FontAtlasAliases entries that resolved
     //     to that font GUID and triggers reflow.
     // Pending lists are populated from the dispatcher (any thread) and drained
@@ -2394,26 +2476,14 @@ public:
     // interactive event-dispatch pass that acts on it.
     bool m_KeyInputSinceLastUpdate = false;
 
-    // Deferred rebuild to avoid modifying tree mid-frame
-    DockspaceElement* m_PendingDockspaceRebuild = nullptr; // not owned
-    bool m_RebuildDockspace = false;
-
-    // Split dragging state
-    bool m_DraggingSplit = false;
-    std::string m_DragSplitPath;                 // '0'/'1' path from root to this split
-    std::string m_DragSplitId;                   // element id of the splitter (split:<path>)
-    DockspaceElement* m_DragDockspace = nullptr; // not owned
-    // Drag metrics captured on mouse-down to avoid initial jump/collapse
-    bool m_DragIsRow = true;
-    float m_DragStartMouseX = 0.0f;
-    float m_DragStartMouseY = 0.0f;
-    float m_DragStartAPx = 0.0f;
-    float m_DragStartBPx = 0.0f;
-    float m_DragAvailPx = 0.0f; // aStart + bStart (excludes splitter)
-    float m_DragMinAPx = 100.0f;
-    float m_DragMinBPx = 100.0f;
-    float m_DragHandlePx = 0.0f;
-    float m_DragLastRatio = 0.5f;
+    // Deferred rebuilds to avoid modifying the tree mid-frame. Not owned; a
+    // dockspace removes itself through CancelDockspaceRebuild before it dies.
+    std::vector<DockspaceElement*> m_PendingDockspaceRebuilds;
+    // Runs the queued dockspace rebuilds; true when any ran.
+    bool RebuildPendingDockspaces();
+    // Frees render slots and resets primitive-gen stamps across a subtree,
+    // including mount targets.
+    void InvalidateDockspaceRenderState(UIElement* el);
 
     // Simple mouse capture (logical capture within UI, not OS-level)
     bool m_MouseCaptured = false;
@@ -2434,9 +2504,7 @@ public:
         // this offset was applied. A newer stamp on the content means its
         // committed rect was rewritten to the Yoga base since then, so the
         // stored offset is no longer baked into the rect and must be
-        // re-applied in full (replaces the old global
-        // layoutRectsJustRecomputed flag, which double-translated once
-        // E3's pruning let unvisited scroll content keep translated rects).
+        // re-applied in full.
         uint32_t ContentCommitGen = 0;
     };
     std::unordered_map<uint64_t, AppliedScrollOffset> m_AppliedScrollByInstanceId;
@@ -2453,7 +2521,7 @@ public:
   public:
     // Per-element effective clip rect, populated by RebuildClipCaches
     // whenever debug capture is enabled. Element absent from the map
-    // means "no clip applies" (i.e. the prior NodeRec.hasClip == false).
+    // means "no clip applies".
     // Cleared at the start of each RebuildClipCaches call.
     //
     // Public so the recursive walk helper in UIManager_Layout.cpp can
@@ -2503,9 +2571,6 @@ public:
     bool m_TextDebugDisableClipStack = false;
     int m_TextDebugExpandScissorPx = 0;
 
-    // Layout diagnostics (controlled by hotkey)
-    int m_LayoutDiagFrames = 0; // when >0, print tree/grid widths for N frames
-
     // Stylesheet / dynamic pseudo-state analysis (computed during layout/style builds).
     struct DynamicStyleAnalysis
     {
@@ -2535,8 +2600,9 @@ public:
         // from those parsed rules. Per-name splitting would add a
         // StringId->PseudoInfo map plus a lookup on every state flip for no
         // editor benefit (the editor CSS uses zero custom-state selectors) and no
-        // share-key benefit (P4d already excludes custom-states from the share
-        // key). AddCustomState/RemoveCustomState consult this one info.
+        // share-key benefit (an element carrying custom states is already
+        // ineligible for sibling sharing). AddCustomState/RemoveCustomState
+        // consult this one info.
         PseudoInfo CustomState{};
         bool UsesSiblingCombinators = false; // '+' or '~' anywhere in selectors
         // PseudoKindBit bits of every pseudo whose match depends on sibling
@@ -2562,7 +2628,7 @@ public:
     //    change in-place (e.g., UIStyleAsset hot reload) so analysis and caches can refresh.
     uint64_t m_StylesheetSetGeneration = 1;
     uint64_t m_StylesheetContentGeneration = 1;
-    // P4 (C-10): epoch stamped into per-element rule caches at build time.
+    // Epoch stamped into per-element rule caches at build time.
     // Bumped alongside the generations above whenever sheet content or the
     // sheet set changes; caches from an older epoch are never trusted
     // (invalidation walks miss detached subtrees, whose caches would
@@ -2607,10 +2673,9 @@ public:
 
     // Text measurement context for Yoga measure callbacks. One instance per
     // RetainedYogaNode that has a measure function attached. Lives until the
-    // owning UIElement is destroyed. Previously pooled in a thread_local that
-    // got reset each frame — a fast-path that skipped YGNodeSetContext would
-    // then point at a reused pool slot. Owned per-retained-node here, so the
-    // Yoga context pointer stays stable across frames.
+    // owning UIElement is destroyed. Owned per retained node so the Yoga
+    // context pointer stays stable across frames, including on fast paths
+    // that skip YGNodeSetContext.
     struct TextMeasureCtx
     {
         Rendering::Text::FontAtlas* Atlas = nullptr;
@@ -2639,12 +2704,6 @@ public:
         // top-aligned, and the first line's baseline follows the box it sits in.
         // Held alongside CachedW/CachedH so a cache hit keeps all three in step.
         int MeasuredLineCount = 1;
-        // Last wrap-width constraint (physical px) Yoga measured with, and
-        // whether any measure has run yet. The parallel pre-measure pass
-        // predicts the next solve's constraint from this — a wrong prediction
-        // is only a cache miss (synchronous re-measure inside the solve).
-        float LastWrapWidthPhysical = 0.0f;
-        bool HasMeasured = false;
     };
 
     struct MeasureInputs
@@ -2666,9 +2725,18 @@ public:
         // LoadFontBytes), NOT the pointer: a pointer survives in-place
         // reloads and can be reused by the allocator across destroy/recreate.
         uint32_t AtlasId = 0;
+        uint64_t LayoutRevision = 0;
 
         bool operator==(const MeasureInputs&) const = default;
     };
+
+  private:
+    // ApplyYogaLayoutInputs phase (declared after MeasureInputs, which it
+    // returns): binds or clears the Yoga text-measure callback of a leaf text
+    // element and returns the measure inputs the layout signature compares.
+    MeasureInputs BindTextMeasure(UIElement* el, RetainedYGNodeRef n, RetainedYogaNode& retainedNode,
+                                  const ::UpdateContext& ctx);
+    Rendering::Text::FontAtlas* ResolveMeasureFontAtlas(const ResolvedStyle& cs);
 
   public:
     // Persistent interner for effective stylesheet sets. An element's
@@ -2689,11 +2757,9 @@ public:
       public:
         SheetSetInterner();
 
-        // Step 4: takes a span of handles instead of raw pointers.
-        // The interner holds StylesheetHandle copies internally so the
-        // referenced Stylesheets stay alive as long as the entry is in
-        // the interner — eliminates the per-frame Clear() workaround
-        // for dangling pointers.
+        // Takes a span of handles. The interner holds StylesheetHandle
+        // copies internally so the referenced Stylesheets stay alive as
+        // long as the entry is in the interner.
         // `mgr` is used to build StylesheetRuleIndex pointers for
         // entries that don't yet have them; the mgr reference is not
         // retained. Returns a stable ID.
@@ -2713,10 +2779,10 @@ public:
         // the clear and resolves to nothing until BuildYogaRecursive
         // re-primes it.
         uint32_t Generation() const { return m_Generation; }
-        // Drops every entry; only safe when no element references the
-        // interner IDs anymore (scene reload, ~UIManager). Step 4's
-        // whole point is that handle ownership keeps entries valid
-        // otherwise — call sites outside those paths should not need this.
+        // Drops every entry and advances Generation(). Called by
+        // ResetRetainedYogaTree and InvalidateAllInternedSheetSets; handle
+        // ownership keeps entries valid otherwise, so other call sites
+        // should not need this.
         void Clear();
 
       private:
@@ -2752,18 +2818,10 @@ public:
   private:
     SheetSetInterner m_SheetSetInterner;
 
-    // Event-driven UI rewrite, Stage 1 (additive, currently unused at
-    // runtime): persistent CPU mirrors of the GPU SSBOs, paired with
-    // their slot allocators. Stage 2 starts wiring PrimitiveGen output
-    // into m_PersistentPrimitives via m_PrimitiveAllocator; Stage 3
-    // mirrors clips; Stage 4 introduces m_DrawOrder + its allocator
-    // and switches the render pipeline to read through these fields.
-    //
-    // Today these stay default-constructed and are not referenced by
-    // any code path. Their presence is purely so UIElement's render
-    // handle fields (m_PrimitiveRangeStart / m_ClipSlotIdx / etc.) have
-    // an addressable destination, and so ~UIElement can route through
-    // UIManagerFreeRenderSlots when those handles do start getting set.
+    // Persistent CPU mirrors of the GPU SSBOs. Primitives and clips live
+    // in allocator-managed slots addressed by UIElement's render handles
+    // (m_PrimitiveRangeStart / m_ClipSlotIdx); m_DrawOrder lists primitive
+    // slot indices in DFS pre-order.
     std::vector<UI::UIPrimitive> m_PersistentPrimitives;
     UI::SlotAllocator            m_PrimitiveAllocator;
     std::vector<UI::UIClipRect>  m_PersistentClipRects;
@@ -2777,9 +2835,8 @@ public:
     // ignored and logged, so the log says it once per manager.
     bool m_LoggedTransformChainDepth = false;
     std::vector<uint32_t>        m_DrawOrder;
-    UI::SlotAllocator            m_DrawOrderAllocator;
 
-    // Stage 2: PrimitiveGen frame counter, paired with UIElement::
+    // PrimitiveGen frame counter, paired with UIElement::
     // m_LastPrimitiveGenFrame for re-entrancy detection. Bumped at the
     // top of every GenerateAllPrimitives. Skips 0 on wrap so default-
     // initialized element counters cannot collide with the current value.
@@ -2791,34 +2848,35 @@ public:
     // by that walk; the drain rejects surgery on any element that wasn't.
     uint32_t m_LastFullDfsGenFrame = 0;
 
-    // Block E (E0) — idle-frame skip for GenerateAllPrimitives.
-    // Set true by NotifyElementDirty (via MarkDirty on any element of this
-    // manager) and by Update for the few mutation paths that don't route
-    // through MarkDirty (Yoga solve, dock rebuild, viewport / scroll,
-    // sheet hot-reload, transitions). Cleared at the end of a successful
-    // GenerateAllPrimitives. When false (and m_DrawOrder non-empty),
-    // the render path skips PrimitiveGen and re-uploads the existing snapshot.
+    // Idle-frame skip for GenerateAllPrimitives.
+    // Set true by NotifyElementDirty for layout-affecting marks (MarkDirty on
+    // any element of this manager) and by Update for the few mutation paths
+    // that don't route through MarkDirty (Yoga solve, dock rebuild, viewport /
+    // scroll, sheet hot-reload, transitions). Cleared at the end of a
+    // successful GenerateAllPrimitives. When false (and m_DrawOrder non-empty),
+    // the render path skips the full DFS: it drains m_PrimitiveDataDirty, or
+    // with nothing queued reuses the existing snapshot.
     //
-    // Default true so the first frame always generates. Atomic because
-    // MarkDirty can fire from worker threads (e.g. async font / asset
-    // callbacks) before being marshalled onto the UI thread.
+    // Default true so the first frame always generates. The MarkDirty route
+    // (NotifyElementDirty) asserts the UI thread; off-thread callers go
+    // through the UiDispatcher.
     std::atomic<bool> m_PrimitivesNeedRegen{true};
 
-    // Stage 2: dedicated slot for the tooltip overlay arrow primitive.
+    // Dedicated slot for the tooltip overlay arrow primitive.
     // The arrow is emitted by m_TooltipOverlay (not a UIElement), so it
     // cannot route through the per-element slot path. Allocated lazily
     // on first emission, retained for the lifetime of this UIManager.
     // SlotAllocator::kInvalidSlot when not yet allocated.
     uint32_t m_TooltipArrowSlot = 0xFFFFFFFFu;
 
-    // Stage 3: dedicated clip slot for the anonymous viewport clip used by
+    // Dedicated clip slot for the anonymous viewport clip used by
     // deferred-overlay rendering (tooltips, dropdowns, modals). Lifecycle
     // mirrors m_TooltipArrowSlot — allocated lazily, retained for the
     // lifetime of this UIManager. Per-element clips are owned by the
     // element via UIElement::m_ClipSlotIdx.
     uint32_t m_ViewportClipSlot = 0xFFFFFFFFu;
 
-    // Stage 5 Block D: :focus-within chain. Set of (focused element +
+    // :focus-within chain. Set of (focused element +
     // every ancestor up to the root). Recomputed by RebuildFocusWithinChain()
     // when focus changes; consulted by ResolveCascadeForElement to populate
     // ElementState::FocusWithin.
@@ -2844,7 +2902,7 @@ public:
     // from the :focus-within chain.
     void RemoveFromDirtyQueues(UIElement* el);
 
-    // Stage 5 Block D: recompute m_FocusWithinChain from the current m_FocusId
+    // Recompute m_FocusWithinChain from the current m_FocusId
     // (focused element + every ancestor). Marks the symmetric difference of
     // the OLD and NEW chain elements through MarkPseudoStateScope so
     // :focus/:focus-visible/:focus-within rules re-cascade (and relayout when
@@ -2877,9 +2935,8 @@ public:
         const DynamicStyleAnalysis::PseudoInfo& a,
         const DynamicStyleAnalysis::PseudoInfo& b);
 
-    // Self-pseudo marker entry points for the two element-driven state flips
-    // that MarkPseudoStateScope did not previously cover: a Toggle/Checkbox
-    // value change (:checked) and a custom-state add/remove. Both route the
+    // Self-pseudo marker entry points for two element-driven state flips:
+    // a Toggle/Checkbox value change (:checked) and a custom-state add/remove. Both route the
     // element's own scope through the same analysis-driven decision the focus
     // family uses, so the flip raises LayoutDirty only when the corresponding
     // rules affect layout and fans out per their descendant/sibling
@@ -2901,14 +2958,6 @@ public:
     // Update.
     bool m_ForceFullRebuildNextFrame = false;
 
-    // Tactical gate (path B): bumped on AddStylesheet / RemoveStylesheet /
-    // m_GlobalStylesheets change / asset-reload. Compared against
-    // m_StylesheetGenAtLastClear to decide whether the per-frame
-    // interner-clear + PSSID-zero + pre-cascade re-intern triple needs
-    // to run this frame.
-    uint64_t m_StylesheetGen = 1;
-    uint64_t m_StylesheetGenAtLastClear = 0;
-
   public:
     // Trigger a full rebuild on the next Update. Called from SetRoot etc.
     // once the primary flip lands; currently a no-op hint (full rebuild
@@ -2916,26 +2965,26 @@ public:
     void RequestFullRebuild() { m_ForceFullRebuildNextFrame = true; }
   private:
 
-    // Master toggle for the subtree-skip fast path (Slice 2). Reads env
+    // Master toggle for the subtree-skip fast path. Reads env
     // GE_UI_SUBTREE_SKIP once in the ctor ("0"/"false"/"off" disable).
-    // Default ON once step 2 has been validated; can be flipped off at
-    // runtime via SetSubtreeSkipEnabled for A/B comparisons.
+    // Default ON; SetSubtreeSkipEnabled flips it at runtime for A/B
+    // comparisons.
   public:
     void SetSubtreeSkipEnabled(bool v) { m_SubtreeSkipEnabled = v; }
     bool IsSubtreeSkipEnabled() const { return m_SubtreeSkipEnabled; }
   private:
     bool m_SubtreeSkipEnabled = true;
   public:
-    // IndicesAndClips-rebuild skip. When structure is stable and layout wasn't
-    // solved, the derived maps and clip caches from the previous frame are
-    // still valid — rebuilding them is pure waste. Env: GE_UI_INDICES_CLIPS_SKIP=0
-    // disables (forces the rebuild every frame, matches pre-fix behaviour).
+    // Focus-order rebuild skip. When structure is stable and layout wasn't
+    // solved, the previous frame's m_FocusOrder is still valid and
+    // RefreshFocusOrderAndClips reuses it. Env: GE_UI_INDICES_CLIPS_SKIP=0
+    // disables (rebuilds the focus order every frame).
     void SetIndicesAndClipsSkipEnabled(bool v) { m_IndicesAndClipsSkipEnabled = v; }
     bool IsIndicesAndClipsSkipEnabled() const { return m_IndicesAndClipsSkipEnabled; }
   private:
-    // Master skip knob (env: GE_UI_INDICES_CLIPS_SKIP=0 disables). Reused
-    // post-Stage-7-step-7 as a global gate for the FocusOrder rebuild skip
-    // — the original index-map/clip skip it was named for is gone.
+    // Master skip knob (env: GE_UI_INDICES_CLIPS_SKIP=0 disables). Its only
+    // consumer is the FocusOrder rebuild skip in RefreshFocusOrderAndClips;
+    // no index-map or clip rebuild reads it.
     bool m_IndicesAndClipsSkipEnabled = true;
     // Same one-shot prime flag for m_FocusOrder — required because the
     // vector is empty on the first frame even though structure-change
@@ -2945,6 +2994,9 @@ public:
 
     // Normalize a CSS font family name for internal lookup/dedup (case-insensitive, trimmed).
     static std::string NormalizeFontFamilyKey(const std::string& family);
+    // Lookup key for one requested face; weight is clamped to the CSS range 1-1000.
+    static std::string MakeFontRequestKey(const std::string& family, int weight, FontStyle style,
+                                          FontVariant variant);
 
     // Returns an already-loaded atlas for (family,weight,style,variant), or (if missing) kicks off a host
     // resolution request (deduped) and returns nullptr until ready.
@@ -2961,19 +3013,11 @@ public:
     // never runs. Schedules a restyle at backoff expiry so the retry can
     // actually fire (the scheduler drains before the idle gate).
     void ScheduleFontRetryRestyle(std::chrono::milliseconds backoff);
-
-    // Internal helper: run scheduler/dispatcher, rebuild Yoga layout, handle
-    // input + events, and generate per-frame geometry into the CPU caches.
-    // Returns true when geometry is valid for rendering this frame.
-    bool BuildLayoutAndGeometry(bool interactive);
 };
 
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
 // Per-element retained Yoga state. Owned by UIElement::m_YogaState (one
-// allocation per element). Previously held in
-// std::unordered_map<UIElement*, std::unique_ptr<RetainedYogaNode>> on
-// UIManager — Stage 7 step 8 moved ownership to the element to eliminate
-// the per-frame map lookup on the cascade hot path.
+// allocation per element), so the cascade hot path needs no map lookup.
 //
 // Defined at namespace scope (rather than nested inside UIManager) so
 // UIElement.h can forward-declare it without depending on UIManager.h.
@@ -2983,7 +3027,6 @@ struct RetainedYogaNode
     uint64_t InstanceId = 0;
     LayoutInputs PrevLayout{};
     UIManager::MeasureInputs PrevMeasure{};
-    float PrevFlexGrowOverride = 0.0f;
     // Whether the container established block flow at the last push. The
     // effective flex-shrink depends on it (ApplyBlockFlowShrinkDefault), so a
     // parent that flips display leaves this element's own PrevLayout unchanged
@@ -2994,11 +3037,12 @@ struct RetainedYogaNode
     // UIManager::m_LayoutCommitGeneration at the last CommitLayoutRects
     // visit — "when was this element's rect last rewritten from Yoga".
     // ApplyScrollTransforms compares it to decide whether its applied
-    // offset is still baked into the committed rect (E3 pruning means a
-    // solve no longer implies every rect was recommitted).
+    // offset is still baked into the committed rect (CommitLayoutRects
+    // prunes unchanged subtrees, so a solve does not imply every rect was
+    // recommitted).
     uint32_t LastCommitGen = 0;
 
-    // Subtree-skip gate state (Stage 7 step 7 option 2). Set true at the
+    // Subtree-skip gate state. Set true at the
     // end of a successful slow-path BuildYogaRecursive run; the early-exit
     // gate at the top of the function refuses to skip until this becomes
     // true. Cleared by ResetRetainedYogaTree (implicit — node is destroyed),
@@ -3014,7 +3058,7 @@ struct RetainedYogaNode
     // hot-reload (NotifyStylesheetContentChanged advances the counter).
     uint64_t                                   CachedStylesheetContentGen  = 0;
 
-    // Per-node text measurement context (Slice 2 step 3). Allocated lazily
+    // Per-node text measurement context. Allocated lazily
     // when this element first needs a Yoga measure function; persists
     // across frames, so fast-path appends don't need to re-bind the
     // Yoga context pointer.
@@ -3036,11 +3080,12 @@ struct RetainedYogaNode
 
     // Last observed DisplayMode == None state. display:none transitions
     // (via a StyleDirty-driven cascade that flips DisplayMode) change
-    // ctx.nodes size — descendants are included or excluded via the
-    // display:none early-return branch — without firing ChildrenDirty
-    // on any element. Tracking the flag here lets BuildYogaRecursive
-    // bump the structure counter on the transition frame, which is
-    // how the IndicesAndClips-skip gate learns the node list changed.
+    // which descendants BuildYogaRecursive visits — they are included or
+    // excluded via the display:none early-return branch — without firing
+    // ChildrenDirty on any element. Tracking the flag here lets
+    // BuildYogaRecursive bump the structure counter on the transition
+    // frame, which is how the focus-order skip gate learns the visited
+    // set changed.
     bool PrevDisplayModeNone = false;
 
     // Persistent sheet-set ID (SheetSetInterner). Populated by

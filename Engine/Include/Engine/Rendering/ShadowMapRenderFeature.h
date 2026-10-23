@@ -242,8 +242,9 @@ enum class ShadowDebugMode : int
 // Shadow filter quality. Numerical values match the integer dispatched on
 // in shadow_sampling.glsl::GE_SampleCascade via ge_shadowDebug.w. PCSS and
 // MSM4 silently fall back to PCF when their prerequisites (bindless / a
-// ready moments texture) aren't met. Default is PCSS to match the engine's
-// effective default before the explicit-enum migration.
+// ready moments texture) aren't met. Default is PCSS, and DPCF on devices on
+// the compatibility profile (the browser, and any device without bindless;
+// ShadowMapRenderFeature's constructor).
 enum class ShadowFilterQuality : int
 {
     Grid5x5 = 0,
@@ -354,8 +355,15 @@ struct alignas(16) ShadowDataGPU
     float terrainShadowGrid2[4];
     float terrainShadowGrid3[4];
     uint32_t terrainShadowSource[4];
+    // Optional source-camera depth plane in receiver-relative world space.
+    // Zero xyz selects the ordinary receiver camera depth.
+    float ShadowReferenceDepth[4];
 };
-static_assert(sizeof(ShadowDataGPU) == 544, "ShadowDataGPU must be 544 bytes");
+static_assert(sizeof(ShadowDataGPU) == 560, "ShadowDataGPU must be 560 bytes");
+
+/// Rebase shared directional cascades, terrain coordinates and source-view depth.
+void RebaseDirectionalShadowData(ShadowDataGPU& data, const Rendering::CameraData& source,
+                                const Rendering::CameraData& receiver);
 
 class ShadowMapRenderFeature : public IRenderFeature
 {
@@ -1177,11 +1185,9 @@ class ShadowMapRenderFeature : public IRenderFeature
     std::unordered_map<Rendering::ViewId, uint64_t> m_PointShadowDeclareState;
     ShadowDebugMode m_DebugMode = ShadowDebugMode::Off;
     bool m_ShowThumbnails = false;
-    // Default PCSS to match the engine's effective default before the
-    // PCSS-checkbox-to-enum migration. (The old code's m_PcssEnabled=true
-    // override silently promoted m_PcfQuality=0 to PCSS at runtime when
-    // bindless was on; the dropdown just makes that explicit.) MSM4 stays
-    // opt-in until projects validate it.
+    // PCSS, or DPCF on devices on the compatibility profile (the browser, and
+    // any device without bindless; the constructor). MSM4
+    // stays opt-in until projects validate it.
     ShadowFilterQuality m_FilterQuality = ShadowFilterQuality::PCSS;
     float m_PoissonSoftness = 1.5f; // Softness multiplier — scales Poisson PCF radius AND PCSS penumbra.
                                     // For a directional light this is tan(angular-extent/2):

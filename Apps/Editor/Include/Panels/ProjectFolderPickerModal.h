@@ -176,7 +176,7 @@ private:
     Button* m_ImportGitTabButton = nullptr;
     Button* m_ImportProjectButton = nullptr;
     TextField* m_ImportGitUrlField = nullptr;
-    Label* m_ImportGitHint = nullptr;
+    Label* m_ImportGitRequirementLabel = nullptr;
     Button* m_ImportArchiveDrop = nullptr;
     Label* m_ImportErrorLabel = nullptr;
     UIElement* m_ImportDestinationRow = nullptr;

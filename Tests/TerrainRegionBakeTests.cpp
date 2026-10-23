@@ -29,6 +29,7 @@
 #include "TerrainECS/TerrainService.h"
 #include "TerrainECS/TerrainSplatComposite.h" // CompositeSplatTexel (zero-base rationale)
 #include "TerrainECS/TileStreamingManager.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <array>
@@ -1978,8 +1979,7 @@ TEST(TerrainRegionBake, DISABLED_SculptStrokeTiming)
         settleWorst = std::max(settleWorst, ms);
     }
 
-    const char* spreadEnv = std::getenv("GE_TERRAIN_SPREAD_SETTLE");
-    const bool spread = spreadEnv == nullptr || spreadEnv[0] != '0';
+    const bool spread = GameEngine::Platform::EnvironmentSwitchEnabled("GE_TERRAIN_SPREAD_SETTLE", true);
     std::printf("\n[SculptStrokeTiming] mode=%s  tiles=%ux%u  res=1025\n",
                 spread ? "SPREAD(fix)" : "one-shot(pre-fix)", axis, axis);
     std::printf("  per-dab (modifier CPU only, excludes GPU upload): avg %.3f ms  worst %.3f ms  "
@@ -4400,8 +4400,7 @@ TEST(TerrainRegionBake, SpreadSettleBoundsPerFrameRenormalizeTexels)
     // GE_TERRAIN_SPREAD_SETTLE=0 kill switch restores the one-shot whole-tile flush (which
     // does not go through the row counter), so under it we only assert the settle completes
     // — its byte-identity is covered by TiledDeferredRangeShiftSplatSettlesToFullBake.
-    const char* spreadEnv = std::getenv("GE_TERRAIN_SPREAD_SETTLE");
-    const bool spread = spreadEnv == nullptr || spreadEnv[0] != '0';
+    const bool spread = GameEngine::Platform::EnvironmentSwitchEnabled("GE_TERRAIN_SPREAD_SETTLE", true);
 
     uint64 prev = TerrainModifierSystem::GetSplatRenormalizeTexelCountForTests();
     const uint64 base = prev;

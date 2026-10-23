@@ -1,6 +1,7 @@
 #include "Scene/SceneValue.h"
 
 #include "Types/FormatNumber.h"
+#include "Types/StringUtils.h"
 
 #include <charconv>
 #include <cctype>
@@ -13,17 +14,6 @@ namespace GameEngine::Scene
 {
 namespace
 {
-// Scene whitespace around a value token. LF belongs here as much as CR does: a value read from a
-// CRLF file, or the last one before the terminator, arrives with its line ending attached.
-static std::string_view Trim(std::string_view s)
-{
-    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r' || s.front() == '\n'))
-        s.remove_prefix(1);
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' || s.back() == '\n'))
-        s.remove_suffix(1);
-    return s;
-}
-
 static bool SplitCsvTuple(std::string_view inner, std::vector<std::string_view>& outParts)
 {
     outParts.clear();
@@ -33,10 +23,10 @@ static bool SplitCsvTuple(std::string_view inner, std::vector<std::string_view>&
         const size_t comma = s.find(',');
         if (comma == std::string_view::npos)
         {
-            outParts.push_back(Trim(s));
+            outParts.push_back(TrimSceneWhitespace(s));
             break;
         }
-        outParts.push_back(Trim(s.substr(0, comma)));
+        outParts.push_back(TrimSceneWhitespace(s.substr(0, comma)));
         s = s.substr(comma + 1);
     }
     return !outParts.empty();
@@ -51,7 +41,7 @@ static bool IsIdentChar(char c)
 static bool SplitTopLevelList(std::string_view inner, std::vector<std::string_view>& outParts)
 {
     outParts.clear();
-    inner = Trim(inner);
+    inner = TrimSceneWhitespace(inner);
     if (inner.empty())
         return true;
 
@@ -77,14 +67,24 @@ static bool SplitTopLevelList(std::string_view inner, std::vector<std::string_vi
 
         if (c == ',' && depthParen == 0 && depthBracket == 0)
         {
-            outParts.push_back(Trim(inner.substr(start, i - start)));
+            outParts.push_back(TrimSceneWhitespace(inner.substr(start, i - start)));
             start = i + 1;
         }
     }
-    outParts.push_back(Trim(inner.substr(start)));
+    outParts.push_back(TrimSceneWhitespace(inner.substr(start)));
     return true;
 }
 } // namespace
+
+std::string_view TrimSceneWhitespace(std::string_view text)
+{
+    constexpr std::string_view kSceneWhitespace = " \t\r\n";
+    const size_t first = text.find_first_not_of(kSceneWhitespace);
+    if (first == std::string_view::npos)
+        return {};
+    const size_t last = text.find_last_not_of(kSceneWhitespace);
+    return text.substr(first, last - first + 1);
+}
 
 bool IsGuidText(std::string_view s)
 {
@@ -110,7 +110,7 @@ bool IsGuidText(std::string_view s)
 template <class T>
 IntegerTokenResult ParseIntegerToken(std::string_view text, T& value)
 {
-    text = Trim(text);
+    text = TrimSceneWhitespace(text);
     // from_chars leaves '+' out of its grammar; scene decimal integers have always accepted one.
     if (!text.empty() && text.front() == '+')
     {
@@ -143,7 +143,7 @@ template IntegerTokenResult ParseIntegerToken<std::uint64_t>(std::string_view, s
 
 bool ParseQuotedString(std::string_view s, std::string& out)
 {
-    s = Trim(s);
+    s = TrimSceneWhitespace(s);
     if (s.size() < 2 || s.front() != '"' || s.back() != '"')
         return false;
     out.assign(s.substr(1, s.size() - 2));
@@ -152,7 +152,7 @@ bool ParseQuotedString(std::string_view s, std::string& out)
 
 bool ParseFloat(std::string_view s, float& out)
 {
-    s = Trim(s);
+    s = TrimSceneWhitespace(s);
     if (s.empty())
         return false;
     std::string tmp(s);
@@ -163,7 +163,7 @@ bool ParseFloat(std::string_view s, float& out)
 
 bool ParseFloat3(std::string_view s, Float3& out)
 {
-    s = Trim(s);
+    s = TrimSceneWhitespace(s);
     if (s.size() < 5 || s.front() != '(' || s.back() != ')')
         return false;
     const std::string_view inner = s.substr(1, s.size() - 2);
@@ -176,7 +176,7 @@ bool ParseFloat3(std::string_view s, Float3& out)
 
 bool ParseFloat4(std::string_view s, Float4& out)
 {
-    s = Trim(s);
+    s = TrimSceneWhitespace(s);
     if (s.size() < 7 || s.front() != '(' || s.back() != ')')
         return false;
     const std::string_view inner = s.substr(1, s.size() - 2);
@@ -189,7 +189,7 @@ bool ParseFloat4(std::string_view s, Float4& out)
 
 bool ParseIdentifier(std::string_view s, std::string& out)
 {
-    s = Trim(s);
+    s = TrimSceneWhitespace(s);
     if (s.empty())
         return false;
     for (char c : s)
@@ -212,7 +212,7 @@ static bool ParseInt64(std::string_view s, long long& out)
 
 static bool ParseDouble(std::string_view s, double& out)
 {
-    s = Trim(s);
+    s = TrimSceneWhitespace(s);
     if (s.empty())
         return false;
     std::string tmp(s);
@@ -226,7 +226,7 @@ static bool ParseDouble(std::string_view s, double& out)
 
 bool ParseValue(std::string_view s, SceneValue& out, std::string* outError)
 {
-    s = Trim(s);
+    s = TrimSceneWhitespace(s);
     if (s.empty())
     {
         if (outError)
@@ -335,7 +335,7 @@ bool ParseValue(std::string_view s, SceneValue& out, std::string* outError)
         out.Items.reserve(parts.size());
         for (auto part : parts)
         {
-            if (Trim(part).empty())
+            if (TrimSceneWhitespace(part).empty())
                 continue;
             SceneValue elem{};
             std::string err;
@@ -356,7 +356,7 @@ bool ParseValue(std::string_view s, SceneValue& out, std::string* outError)
     // Tell them apart by looking for `=` before any unquoted top-level `,`.
     if (s.size() >= 2 && s.front() == '[' && s.back() == ']')
     {
-        const std::string_view inner = Trim(s.substr(1, s.size() - 2));
+        const std::string_view inner = TrimSceneWhitespace(s.substr(1, s.size() - 2));
 
         bool inString = false;
         bool sawAssign = false;
@@ -472,7 +472,7 @@ bool ParseValue(std::string_view s, SceneValue& out, std::string* outError)
         out.Items.reserve(parts.size());
         for (auto part : parts)
         {
-            if (Trim(part).empty())
+            if (TrimSceneWhitespace(part).empty())
                 continue;
             SceneValue elem{};
             std::string err;

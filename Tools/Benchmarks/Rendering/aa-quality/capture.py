@@ -68,8 +68,8 @@ class Editor:
 MODES = {"off": ("off", 1, 1), "taa": ("taa", 1, 1),
          "taau": ("taa", .67, 1), "msaa2": ("msaa", 1, 2),
          "msaa4": ("msaa", 1, 4), "msaa8": ("msaa", 1, 8),
-         "ssaa125": ("ssaa", 1.25, 1), "ssaa150": ("ssaa", 1.5, 1),
-         "ssaa200": ("ssaa", 2, 1)}
+         "ssaa125": ("off", 1.25, 1), "ssaa150": ("off", 1.5, 1),
+         "ssaa200": ("off", 2, 1)}
 
 
 def capture(args):
@@ -111,8 +111,7 @@ def capture(args):
         resources = manifest["resources"]["resources"]
         scene_color = next(r for r in resources if r["name"].endswith(".SceneColor") and r["used"])
         view_color = next(r for r in resources if r["name"].endswith("SceneView.Color"))
-        actual = "off" if mode == "ssaa" else mode
-        assert manifest["aa"]["aaMode"] == actual, manifest["aa"]
+        assert manifest["aa"]["aaMode"] == mode, manifest["aa"]
         if mode == "msaa":
             assert view_color["used"] and view_color["sampleCount"] == manifest["aa"]["samples"] > 1
         else:

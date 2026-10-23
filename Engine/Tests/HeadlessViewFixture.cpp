@@ -18,6 +18,8 @@
 #include "UI/UIPlatform.h"
 #include "UI/UIStyle.h"
 
+#include "TestTempDir.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -203,6 +205,18 @@ bool CanMeasure(const ViewOutputBytes& handoff, const ViewStageTap& source)
         return false;
     float probe = 0.0f;
     return ReadDestinationEncoded(handoff, 0, 0, probe);
+}
+
+// The residual maps of this test process. They are failure artifacts opened after the run, so
+// the directory is never removed; it is unique to the process, so a concurrent ctest process
+// running the same tests cannot overwrite them.
+const std::filesystem::path& ResidualMapDirectory()
+{
+    static const std::filesystem::path directory =
+        TestUtils::MakeUniqueTempDirectory("headless-view-residual");
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    return directory;
 }
 
 } // namespace
@@ -1283,7 +1297,7 @@ std::filesystem::path HeadlessViewFixture::WriteResidualMap(const std::string& t
     const float codeScale = DestinationCodeScale(m_Handoff.Format);
     const float unit = codeScale > 0.0f ? codeScale : 255.0f;
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / ("headless-view-residual-" + tag + ".ppm");
+        ResidualMapDirectory() / ("headless-view-residual-" + tag + ".ppm");
     std::ofstream f(path, std::ios::binary);
     if (!f)
         return {};

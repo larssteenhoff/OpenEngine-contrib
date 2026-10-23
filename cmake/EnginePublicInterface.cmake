@@ -59,6 +59,8 @@ function(_ge_engine_public_interface_lists)
         "FileWatcher|<src>/Engine/Include|#3695"
         "AssetRuntime|<src>/Engine/Include|#3695"
         "AssetRuntime|<src>/Engine/Modules/Animation/Include|#3695"
+        # SpriteFramesAssetParser is a public AssetRuntime parser header.
+        "AssetRuntime|<src>/Engine/Modules/Sprite2D/Include|#1073"
         "Scripting|<src>/Engine/Include|#3695"
         "Platform|<src>/Engine/Include|#3695"
         "RenderServices|<src>/Engine/Include|#3695"
@@ -67,6 +69,9 @@ function(_ge_engine_public_interface_lists)
         "Graph|<src>/Engine/Modules/Rendering/Include|#3695"
         "Particles|<src>/Engine/Modules/Rendering/Include|Components/Rendering/ParticleRenderer.h (Rendering/RenderLayerMask.h)"
         "PathfindingECS|$<TARGET_PROPERTY:FileWatcher,INTERFACE_INCLUDE_DIRECTORIES>|#3695"
+        # Platform/Environment.h is header-only: the one rule every GE_ on/off switch reads.
+        "ECS|<src>/Engine/Modules/Platform/Include|ECS/ChangeFilter.h (Platform/Environment.h)"
+        "GameEngineRendering|<src>/Engine/Modules/Platform/Include|Rendering switches (Platform/Environment.h)"
     )
     set(_GE_PUBLIC_DEFINITIONS "${_GE_PUBLIC_DEFINITIONS}" PARENT_SCOPE)
     set(_GE_PUBLIC_INCLUDE_EXCEPTIONS "${_GE_PUBLIC_INCLUDE_EXCEPTIONS}" PARENT_SCOPE)

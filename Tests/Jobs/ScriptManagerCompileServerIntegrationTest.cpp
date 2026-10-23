@@ -4,6 +4,7 @@
 #include "Jobs/WorkspaceId.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Core/Application.h" // PathUtils
+#include "TestTempDir.h"
 #include <filesystem>
 #include <fstream>
 
@@ -15,8 +16,8 @@ TEST(ScriptManagerCompileServerIntegration, CompileProjectUsesServerWhenAvailabl
 #endif
 #ifdef _WIN32
     // Arrange temporary workspace with a simple C# file and fake project file
-    std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_SM_CS_Integration";
-    std::error_code ec; std::filesystem::create_directories(ws, ec);
+    const TestUtils::ScopedTempDir workspace(TestUtils::MakeUniqueTempDirectory("GE_SM_CS_Integration"));
+    std::filesystem::path ws = workspace.Path();
 
     auto sourcePath = ws / "Foo.cs";
     {
@@ -81,9 +82,8 @@ TEST(ScriptManagerCompileServerIntegration, CompileProjectCanReferenceEcsAbiWhen
     }
 
     // Arrange temporary workspace with a simple C# file that references the ECS ABI surface.
-    std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_SM_CS_EcsAbi";
-    std::error_code ec;
-    std::filesystem::create_directories(ws, ec);
+    const TestUtils::ScopedTempDir workspace(TestUtils::MakeUniqueTempDirectory("GE_SM_CS_EcsAbi"));
+    std::filesystem::path ws = workspace.Path();
 
     auto sourcePath = ws / "Foo.cs";
     {

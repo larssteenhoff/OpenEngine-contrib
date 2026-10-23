@@ -336,16 +336,6 @@ private:
      */
     bool DecodeSourceBytes(const Vector<uint8>& data);
 
-    /**
-     * @brief Load DDS texture
-     */
-    bool LoadDDS();
-
-    /**
-     * @brief Load DDS texture from memory data
-     */
-    bool LoadDDSFromData(const Vector<uint8>& data);
-
 #if defined(GE_HAVE_KTX)
     /**
      * @brief Load KTX/KTX2 texture from file

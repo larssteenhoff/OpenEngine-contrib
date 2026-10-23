@@ -11,6 +11,7 @@
 #include "UI/UITextureRegistry.h"
 
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Platform/SystemFonts.h"
 
 #include "UI/Controls/DockspaceElement.h"
@@ -27,7 +28,6 @@
 #include "UIAttributeAccess.h"
 
 #include "Types/ColorUtils.h"
-#include "UI/Controls/Mount.h"
 
 #include "Input/InputSystem.h"
 #include "Input/KeyCodes.h"
@@ -44,7 +44,6 @@
 #include "Core/CpuProfiler.h"
 #include "Rendering/Text/FontAtlas.h"
 #include "Rendering/Text/TextLayout.h"
-#include <GLFW/glfw3.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -108,8 +107,7 @@ static constexpr bool kRootPaddingDebugConsole = false; // print computed root p
 static bool s_DebugDumped = false;
 
 // Tree-walk helper: count visible elements in the (children + Mount portal)
-// hierarchy. Used for spike-log + profile-frame element counts after Stage 7
-// step 7 deleted the m_Nodes flat vector.
+// hierarchy. Used for spike-log + profile-frame element counts.
 static uint32_t CountTreeElements(UIElement* root)
 {
     uint32_t n = 0;
@@ -118,11 +116,7 @@ static uint32_t CountTreeElements(UIElement* root)
         if (el->GetResolvedStyle().Layout.DisplayMode == DisplayMode::None)
             return;
         ++n;
-        for (const auto& ch : el->GetChildren())
-            walk(ch.get());
-        if (el->Kind() == UIElementKind::Mount)
-            if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                walk(tgt);
+        el->ForEachLogicalChild(walk);
     };
     walk(root);
     return n;
@@ -145,23 +139,143 @@ class ScopedUpdateEventDispatchGuard final
 
 } // namespace
 
+#if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
+namespace
+{
+using ProfClock = std::chrono::high_resolution_clock;
+
+// Bounded draining: a virtualization pass may enqueue follow-up work (e.g.
+// data+scroll changes).
+constexpr int kMaxVirtualizationDrainIterations = 4;
+
+void ReadFontIfMissing(std::vector<uint8_t>& fontBytes, const char* path)
+{
+    if (fontBytes.empty())
+        fontBytes = Utils::ReadFile(path);
+}
+
+// Layout-affecting dirty flags found under el, walking only subtrees that
+// carry SubtreeDirty. Style is tracked only when asked for.
+struct DirtyProbeResult
+{
+    bool Children = false;
+    bool Layout = false;
+    bool Style = false;
+};
+
+void ProbeLayoutDirtyFlags(UIElement* el, bool trackStyle, DirtyProbeResult& out)
+{
+    if (!el) return;
+    if (out.Children && out.Layout && (!trackStyle || out.Style)) return;
+    if (el->IsDirty(UIElement::ChildrenDirty))
+        out.Children = true;
+    if (el->IsDirty(UIElement::LayoutDirty))
+        out.Layout = true;
+    if (trackStyle && el->IsDirty(UIElement::StyleDirty))
+        out.Style = true;
+    if (!el->IsDirty(UIElement::SubtreeDirty))
+        return;
+    el->ForEachLogicalChild([&](UIElement* child) { ProbeLayoutDirtyFlags(child, trackStyle, out); });
+}
+
+// First element of el's logical subtree (children + Mount portals, depth
+// first) whose id matches.
+void FindLogicalDescendantById(UIElement* el, const std::string& id, UIElement*& found)
+{
+    if (!el || found) return;
+    if (el->GetId() == id)
+    {
+        found = el;
+        return;
+    }
+    el->ForEachLogicalChild([&](UIElement* child) { FindLogicalDescendantById(child, id, found); });
+}
+} // namespace
+
+// Per-frame values the UIManager::Update phases share. UpdateContext binds
+// references to the counters and flags the Yoga build and solve write, so a
+// frame's UpdateFrameState outlives its UpdateContext.
+struct UIManager::UpdateFrameState
+{
+    // Update owns input dispatch and layout; a non-interactive frame still lays
+    // out and hit-tests but suppresses interactive side effects.
+    bool RunInteractive = false;
+    bool ProfEnabled = false;
+    UpdateProfileFrame Prof{};
+    bool SpikeLogEnabled = false;
+    double SpikeLogThresholdMs = 0.0;
+    ProfClock::time_point TotalStart{};
+
+    UIElement* RootEl = nullptr;
+    unsigned DirtyPrev = 0;
+    unsigned DirtyNow = 0;
+    bool AnyInput = false;
+    bool GlobalStylesheetSetChanged = false;
+    bool DebugCaptureActive = false;
+    uint32_t ViewportW = 0;
+    uint32_t ViewportH = 0;
+    bool ViewportChanged = false;
+    float ContentScale = 1.0f;
+    bool ContentScaleChanged = false;
+
+    bool RelayoutRequestedPre = false;
+    bool ComputeLayoutSignaturesAll = false;
+    bool ComputeLayoutSignaturesThisFrame = false;
+    bool ForceGlobalStyle = false;
+    uint64_t AnalysisSheetHash = 0;
+    bool AnyLayoutSignatureChanged = false;
+    bool AnyChildrenDirty = false;
+    bool DidSolveLayout = false;
+    uint32_t CssRecomputeWhileSignaturePassDisabled = 0;
+    // Dirty flag counters observed during Yoga build (for optional spike diagnostics).
+    uint32_t DirtyStyleSeen = 0;
+    uint32_t DirtyLayoutSeen = 0;
+    uint32_t DirtyVisualSeen = 0;
+    uint32_t DirtyChildrenSeen = 0;
+
+    YGNodeRef RootNode = nullptr;
+    uint64_t StructCountBeforeBuild = 0;
+    bool PreSolveChildrenDirty = false;
+    bool PreSolveLayoutDirty = false;
+    bool PreSolveRelayoutRequested = false;
+    bool NeedInitialLayoutSolve = false;
+
+    // Diagnostics for redundant-BuildYoga investigation. Populated throughout
+    // this frame and dumped by the spike logger at the end when total frame
+    // time exceeds GE_UI_SPIKE_LOG_MS. Gives us per-invocation ms and the
+    // specific trigger that caused each extra rebuild beyond the initial one.
+    bool RebuildAfterPreSolveFired = false;
+    bool RebuildAfterPreSolveByFlush = false;
+    bool RebuildAfterPreSolveByVirt = false;
+    double RebuildInitialMs = 0.0;
+    double RebuildAfterPreSolveMs = 0.0;
+    double PreSolveFlushCallbacksMs = 0.0;
+    double PreSolveVirtualizationMs = 0.0;
+    bool RebuildLateRelayoutFired = false;
+    // Bitmask: 1=childrenDirty 2=layoutDirty 4=styleDirty 8=relayoutReq 16=virt
+    unsigned RebuildLateRelayoutReasons = 0;
+    double RebuildLateRelayoutMs = 0.0;
+};
+
+struct UIManager::TabFocusCandidate
+{
+    std::string Id;
+    int TabIndex;
+    size_t DomOrder;
+};
+#endif
 
 void UIManager::Update(float deltaTime)
 {
     Update(deltaTime, /*interactive=*/true);
 }
 
-#if defined(_MSC_VER)
-// /analyze sometimes overestimates stack usage for this function due to large inlined
-// templates and lambdas. Suppress C6262 on this function specifically.
-#pragma warning(suppress : 6262)
-#endif
 void UIManager::Update(float deltaTime, bool interactive)
 {
     GE_CPU_PROFILE_SCOPE("UIManager.Update");
 
 #ifdef _DEBUG
-    // C-6: capture the UI thread at the first Update (construction may run
+    // Capture the UI thread at the first Update (construction may run
     // on a loader thread); AssertUiThread checks against it thereafter.
     if (!m_UiThreadCaptured)
     {
@@ -173,38 +287,272 @@ void UIManager::Update(float deltaTime, bool interactive)
     // Advance global UI time for animations, timers, etc.
     m_Time += deltaTime;
 
-    // Stage 5 Block D: refresh the :focus-within chain. Marks any element
+    // Refresh the :focus-within chain. Marks any element
     // entering or leaving the chain dirty so its style re-cascades with
     // the new FocusWithin flag. Cheap when m_FocusId is stable — the
     // indexed FindById plus the parent ascent is O(depth) and only the
     // symmetric difference triggers MarkDirty calls.
     RebuildFocusWithinChain();
 
-    // Diagnostics for redundant-BuildYoga investigation. Populated throughout
-    // this frame and dumped by the spike logger at the end when total frame
-    // time exceeds GE_UI_SPIKE_LOG_MS. Gives us per-invocation ms and the
-    // specific trigger that caused each extra rebuild beyond the initial one.
-    bool rebuildAfterPreSolveFired = false;
-    bool rebuildAfterPreSolveByFlush = false;
-    bool rebuildAfterPreSolveByVirt = false;
-    double rebuildInitialMs = 0.0;
-    double rebuildAfterPreSolveMs = 0.0;
-    double preSolveFlushCallbacksMs = 0.0;
-    double preSolveVirtualizationMs = 0.0;
-
-    bool rebuildLateRelayoutFired = false;
-    // Bitmask: 1=childrenDirty 2=layoutDirty 4=styleDirty 8=relayoutReq 16=virt
-    unsigned rebuildLateRelayoutReasons = 0;
-    double rebuildLateRelayoutMs = 0.0;
-
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
     // Without a device or loaded layout there is nothing to update.
     if (!m_Device || !m_Root)
         return;
 
-    const bool profEnabled = IsUpdateProfilingEnabled();
-    UpdateProfileFrame prof{};
-    using ProfClock = std::chrono::high_resolution_clock;
+    UpdateFrameState frame;
+    StartUpdateProfiling(frame);
+
+    // Geometry is retained across frames and rebuilt only when something
+    // changes (layout, paint, animations). Do not clear cached frame data here.
+
+    // Update owns input dispatch and layout. When interactive == false we
+    // still recompute layout and hover state but suppress interactive side
+    // effects (focus changes, dockspace rebuilds, control-driven relayout,
+    // etc.). This is used by the editor for passive/preview renders.
+    frame.RunInteractive = interactive;
+
+    // Bind TLS UiContext so any UI calls from timers/dispatchers during
+    // Update are routed to this manager.
+    UI::UiContextScope uiScope(m_Dispatcher.get(), m_Scheduler.get());
+    // Apply any queued asset-driven hot reloads before building Yoga/layout.
+    if (m_HotReload)
+    {
+        m_HotReload->Pump();
+    }
+    // Drain Texture/Font asset reload events queued from the asset
+    // pipeline's event dispatcher. Runs after UIHotReload::Pump so style/layout
+    // reloads observe the freshly-evicted texture/font caches in the same frame.
+    DrainPendingAssetReloads();
+    LoadDefaultFontAtlasOnce();
+
+    // Ensure a layout has been provided by the app/example
+    frame.RootEl = m_Root.get();
+
+    // Retained-mode dirty hints:
+    // - UIElement::MarkDirty/MarkDirtySubtree notifies the owning UIManager via m_DirtyHintFlags.
+    // - We exchange(0) once at the start of Update so we can detect "dirty since last frame"
+    //   without scanning the whole tree, and then later re-clear before the heavy pass so any
+    //   dirty marks during the heavy pass are preserved for the next frame.
+    frame.DirtyPrev = m_DirtyHintFlags.exchange(0u, std::memory_order_relaxed);
+
+    // NOTE: We intentionally keep Update() semantics general: no editor-specific
+    // fast paths. Performance work should be achieved via retained caching,
+    // incremental rebuilds, and better dirty tracking.
+
+    DrainSchedulerAndDispatcher(frame);
+
+    // Attach/detach events for every tree change since the last settle. Placed HERE for
+    // three reasons: after m_HotReload->Pump() above, so a reconcile has finished and is
+    // judged as the single tree edit it is rather than mid-flight; after the
+    // scheduler/dispatcher drain, so a deferred RemoveChild has already run and the tree
+    // the settle reads is the one this frame will lay out; and before both of Update's
+    // early-return gates below (the idle gate and the pointer-only gate), which would
+    // otherwise strand the queue for as long as the UI sits still — precisely the frames
+    // after a HUD is built.
+    SettleAttachTransitions();
+
+    // Non-RAII scope for the "PreBuild" phase — the prep work between the attach settle and the
+    // first BuildYoga invocation (hover recovery, viewport/content-scale checks,
+    // stylesheet flat-table construction). Released explicitly before the first BuildYoga scope
+    // so BuildYoga becomes a sibling in the call tree, not a child. unique_ptr is used because
+    // the code in between declares many locals that are used later in the function, ruling out a
+    // plain `{}` block wrapper.
+    auto preBuildScope =
+        std::make_unique<::GameEngine::Profiling::ScopedCpuProfile>("UIManager.Update.PreBuild");
+
+    RecoverHoverAndCapture();
+
+    // Fire the low-frequency periodic-refresh callbacks (VCS/ECS-stat panels)
+    // before the idle gate. A callback that mutates the tree raises dirty hints
+    // that fold into dirtyNow just below, so the change renders this frame; an
+    // unchanged tick mutates nothing and the frame still idles. This is what
+    // lets an input-idle / IPC-only editor keep externally-polled panels fresh
+    // (OnPostLayout never fires on idle frames).
+    PumpPeriodicRefresh();
+
+    ResolveFrameInputs(frame);
+
+    // Pump virtualized-control provider versions BEFORE the gates. A
+    // MarkChanged that landed since the last frame enqueues DataChanged work
+    // here, so HasPending() declines the idle gate below and the heavy pass
+    // services the rebind the same frame — an idle-gated panel does not wait
+    // for a scroll/viewport event to repaint. No-op (one u64 compare per
+    // registered control) when nothing changed, so it never breaks the idle gate.
+    PumpVirtualizedControlChanges();
+
+    if (TryIdleUpdateFrame(frame))
+        return;
+    LogIdleGateDecline(frame);
+
+    if (TryPointerOnlyUpdateFrame(frame))
+        return;
+    LogHeavyInputFrame(frame);
+
+    BeginHeavyPass(frame);
+
+    // Build Yoga tree and collect nodes for layout and event dispatch.
+    // NOTE: all containers in this hot path are static thread_local to retain
+    // capacity across frames and avoid per-frame heap allocations entirely.
+    // No PMR arena: MSVC's monotonic_buffer_resource routes through the upstream
+    // (operator new) regardless of available buffer space, so it saves nothing.
+    // Flat-table layout for effective stylesheet sets (sheets + aligned rule indices).
+    // All sheet and index pointers live in two contiguous flat buffers; each unique
+    // set is a {offset, count} range into them.  Elements share sets by index,
+    // avoiding per-element vector allocations entirely.
+    //
+    // PERF: static thread_local vectors retain capacity across frames, eliminating
+    // all heap allocations after the first heavy-path frame.
+    static thread_local std::vector<const Stylesheet*> flatSheets;
+    // Parallel-indexed handles. Mirrors flatSheets so the interner can be
+    // fed handle spans (it stores keep-alives).
+    static thread_local std::vector<StylesheetHandle> flatHandles;
+    static thread_local std::vector<const StylesheetRuleIndex*> flatIndices;
+    static thread_local std::vector<SheetSetRef> sheetSetRefs;
+    flatSheets.clear();
+    flatHandles.clear();
+    flatIndices.clear();
+    sheetSetRefs.clear();
+
+    // Consume the force-rebuild fallback flag at the TOP of Update.
+    // Setters in prior frames (ResetRetainedYogaTree, RequestFullRebuild)
+    // need the flag to survive across the frame boundary.
+    m_ForceFullRebuildNextFrame = false;
+
+    // Track the set of stylesheets currently attached/active so we can
+    // (a) cache dynamic pseudo-state analysis and
+    // (b) avoid work when hover/focus changes cannot affect style.
+    //
+    // PERF: reuse the hash table across frames to avoid per-frame allocations.
+    static thread_local std::unordered_set<const Stylesheet*> analysisSheets;
+
+    // Effective stylesheet list propagated top-down. Start from global sheets.
+    // Stored as StylesheetHandles (shared_ptrs) so the Stylesheet objects remain alive
+    // for the entire Update() frame even if m_GlobalStylesheets is modified mid-frame
+    // (e.g. by a hot-reload ReplaceGlobalStylesheetBlock call during event dispatch).
+    static thread_local std::vector<StylesheetHandle> rootSheets;
+
+    // Thread-local containers needed by UpdateContext and layout helper methods.
+    // Declared here (before ctx) so they're in scope; static thread_local retains capacity.
+    static thread_local std::vector<ScrollView*> scrollViews;
+    static thread_local std::vector<LayoutOverridePatchRec> layoutOverrideNodes;
+
+    // Hover chain scratch vectors: thread_local retains capacity across frames.
+    static thread_local std::vector<UIElement*> s_HoverLeft;
+    static thread_local std::vector<UIElement*> s_HoverEntered;
+    s_HoverLeft.clear();
+    s_HoverEntered.clear();
+
+    frame.ForceGlobalStyle =
+        (m_AppliedStylesheetSetGeneration != m_StylesheetSetGeneration) ||
+        (m_AppliedStylesheetContentGeneration != m_StylesheetContentGeneration);
+    const int32_t rootSheetSetIdx = 0; // first entry
+
+    // Construct UpdateContext for methods extracted from Update().
+    // Must be after stylesheet setup (rootSheetSetIdx, forceGlobalStyle, etc. are set).
+    UpdateContext ctx{
+        flatSheets, flatHandles, flatIndices, sheetSetRefs, rootSheets, rootSheetSetIdx,
+        analysisSheets, frame.AnalysisSheetHash,
+        scrollViews, layoutOverrideNodes,
+        frame.DirtyStyleSeen, frame.DirtyLayoutSeen, frame.DirtyVisualSeen, frame.DirtyChildrenSeen,
+        frame.AnyChildrenDirty,
+        frame.ComputeLayoutSignaturesThisFrame, frame.ComputeLayoutSignaturesAll, frame.RelayoutRequestedPre,
+        frame.AnyLayoutSignatureChanged, frame.CssRecomputeWhileSignaturePassDisabled,
+        frame.DidSolveLayout, frame.ForceGlobalStyle,
+        // Yoga receives logical (CSS) pixels; layout rects are scaled back to physical after solve.
+        (uint32_t)std::lround((float)frame.ViewportW / frame.ContentScale),
+        (uint32_t)std::lround((float)frame.ViewportH / frame.ContentScale),
+        frame.ContentScale,
+        {}, false, nullptr, s_HoverLeft, s_HoverEntered, 0, false, false, frame.RunInteractive,
+        frame.ProfEnabled, &frame.Prof
+    };
+    CollectFrameStylesheets(ctx);
+    SeedRootSheetSet(ctx);
+
+    // End the PreBuild scope so BuildYoga appears as a sibling in the call tree.
+    preBuildScope.reset();
+
+    // Snapshot the structure-change counter BEFORE BuildYoga so we can tell
+    // at end-of-Update whether anything structural happened. If the counter
+    // didn't advance (and layout wasn't solved), the node list is shape-
+    // identical to the previous frame — the derived maps and clip caches
+    // from last frame are still valid and the rebuild can be skipped entirely.
+    frame.StructCountBeforeBuild = ctx.subtreeStructureChanges;
+
+    BuildInitialYogaTree(ctx, frame);
+
+    // PERF: avoid repeated RTTI scans over all nodes. Build typed lists once per Yoga build.
+    // (scrollViews and layoutOverrideNodes declared earlier for UpdateContext.)
+
+    RebuildTypedNodeLists(ctx);
+    CacheScrollViewInstanceIds(ctx);
+
+    RunPreSolveDrain(ctx, frame);
+    SolveInitialLayout(ctx, frame);
+    RefreshFocusOrderAndClips(ctx, frame);
+
+    ProcessHoverChain(ctx);
+
+    ctx.treeGenBeforeEvents = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+    ctx.treeMutatedDuringEvents = false;
+    ctx.treeRebuiltThisFrame = false;
+
+    DispatchEvents(ctx);
+
+    // Focus/active pseudo-state dirty marking is handled inside DispatchEvents.
+    RebuildAfterEventMutations(ctx, frame);
+    SettleAfterEvents(ctx, frame);
+    RunLateRelayout(ctx, frame);
+
+    // Retire the transition signal only on a pass that actually serviced it.
+    // Dispatch itself already happened at the callback and can never be eaten
+    // here, but the follow-up work this flag asks for — hover re-evaluation and
+    // the :active re-cascade — is interactive-only, so clearing it on a passive
+    // pass would drop a pressed style on the floor.
+    if (interactive)
+        m_ButtonEdgeSinceLastUpdate = false;
+
+    if (frame.DebugCaptureActive)
+        EmitDebugCapture();
+
+    LogUpdateSpike(ctx, frame);
+    FinishUpdateProfiling(frame);
+    ReportUnconvergedDirtyFlags();
+
+    // Update cursor based on hovered element's computed style.
+    // We check cursor style each frame and invoke the callback when it changes.
+    // Populate ResolvedStyle on each element from the style cascade.
+    // This runs after all layout and geometry so the resolved style is
+    // guaranteed to be set on every element.
+    // A heavy pass rebuilt styles above (cascade/overrides), so the resolve
+    // walk must run regardless of when the last dirty mark landed. Setting
+    // the flag keeps heavy-frame behavior identical to the ungated path;
+    // ResolveStyles consumes it, so the render-side call becomes a no-op
+    // unless something (e.g. TransitionEngine below) dirties styles again.
+    m_ResolvedStylesDirty.store(true, std::memory_order_relaxed);
+    ResolveStyles();
+
+    if (!m_TransitionEngine)
+        m_TransitionEngine = std::make_unique<TransitionEngine>();
+    {
+        ScopedSectionTimer _tTransitions(frame.ProfEnabled, &frame.Prof.TransitionMs);
+        m_TransitionEngine->Advance(m_Root.get(), m_TransitioningElements, m_Time);
+    }
+
+    ApplyLayoutTransitions(ctx, frame);
+    DispatchCompletedTransitions();
+
+    UpdateTooltipAndCursor(frame.RunInteractive);
+    MarkPrimitiveRegenCauses(ctx, frame);
+
+#else
+    (void)interactive;
+#endif
+}
+
+#if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
+void UIManager::StartUpdateProfiling(UpdateFrameState& frame)
+{
+    frame.ProfEnabled = IsUpdateProfilingEnabled();
     // Optional spike logger: set GE_UI_SPIKE_LOG_MS to a threshold in ms (e.g. 25)
     // to log a compact summary when UIManager::Update exceeds that time.
     static const double s_UiSpikeLogThresholdMs = []() -> double
@@ -218,192 +566,110 @@ void UIManager::Update(float deltaTime, bool interactive)
             return 0.0;
         return (v > 0.0) ? v : 0.0;
     }();
-    const bool spikeLogEnabled = (s_UiSpikeLogThresholdMs > 0.0);
+    frame.SpikeLogThresholdMs = s_UiSpikeLogThresholdMs;
+    frame.SpikeLogEnabled = (s_UiSpikeLogThresholdMs > 0.0);
 
-    ProfClock::time_point totalStart{};
-    if (profEnabled || spikeLogEnabled)
+    if (frame.ProfEnabled || frame.SpikeLogEnabled)
     {
-        if (profEnabled)
+        if (frame.ProfEnabled)
         {
-            prof.FrameIndex = ++m_UpdateProfilingFrameCounter;
+            frame.Prof.FrameIndex = ++m_UpdateProfilingFrameCounter;
         }
-        totalStart = ProfClock::now();
+        frame.TotalStart = ProfClock::now();
     }
+}
 
-    // (Step 3's drain-and-count moved down — now happens just before the
-    //  full rebuild as part of the Step 4 surgical preview, so both paths
-    //  consume the same drained op list.)
-
-    // Geometry is now retained across frames. We only rebuild when something
-    // changes (layout, paint, animations). Do not clear cached frame data here.
-
-    // Update owns input dispatch and layout. When interactive == false we
-    // still recompute layout and hover state but suppress interactive side
-    // effects (focus changes, dockspace rebuilds, control-driven relayout,
-    // etc.). This is used by the editor for passive/preview renders.
-    const bool runInteractive = interactive;
-
-    // Bind TLS UiContext so any UI calls from timers/dispatchers during
-    // Update are routed to this manager.
-    UI::UiContextScope uiScope(m_Dispatcher.get(), m_Scheduler.get());
-    // Apply any queued asset-driven hot reloads before building Yoga/layout.
-    if (m_HotReload)
-    {
-        m_HotReload->Pump();
-    }
-    // C1/C2/E7: drain Texture/Font asset reload events queued from the asset
-    // pipeline's event dispatcher. Runs after UIHotReload::Pump so style/layout
-    // reloads observe the freshly-evicted texture/font caches in the same frame.
-    DrainPendingAssetReloads();
-    // Prepare a default font atlas for text measurement (same atlas that Render uses for drawing).
-    //
-    // A UIManager with no host font resolver — tests, tools, and the editor's own resolver-less
-    // windows such as ColorPickerWindow — loads a default font atlas synchronously from the staged
-    // engine fonts. One attempt per UIManager: a font that is not staged is not going to appear
-    // on a later frame, and Update must not probe the filesystem every frame.
+// Prepare a default font atlas for text measurement (same atlas that Render uses for drawing).
+//
+// A UIManager with no host font resolver — tests, tools, and the editor's own resolver-less
+// windows such as ColorPickerWindow — loads a default font atlas synchronously from the staged
+// engine fonts. One attempt per UIManager: a font that is not staged is not going to appear
+// on a later frame, and Update must not probe the filesystem every frame.
+void UIManager::LoadDefaultFontAtlasOnce()
+{
     if (!m_FontAtlas && !m_FontResolver && !m_DefaultFontAtlasAttempted)
     {
         m_DefaultFontAtlasAttempted = true;
         std::vector<uint8_t> fontBytes;
-        auto tryLoad = [&](const char* p)
-        {
-            if (fontBytes.empty())
-                fontBytes = Utils::ReadFile(p);
-        };
 
         {
             const std::string stagedFont =
                 (PathUtils::GetInstallAssetsRoot() / "Fonts" / "Roboto-Regular.ttf").string();
-            tryLoad(stagedFont.c_str());
+            ReadFontIfMissing(fontBytes, stagedFont.c_str());
         }
 #if !defined(__APPLE__)
         if (fontBytes.empty())
         {
             Platform::SystemFontFile sf;
             if (Platform::TryResolveSystemFontFile("sans-serif", 400, Platform::SystemFontStyle::Normal, sf))
-                tryLoad(sf.path.string().c_str());
+                ReadFontIfMissing(fontBytes, sf.path.string().c_str());
         }
 #endif
         if (!fontBytes.empty())
         {
             auto fa = std::make_unique<FontAtlas>();
-            ConfigureUiFontAtlas(*fa);
+            fa->SetTextLanguage(m_TextLanguage);
             if (fa->LoadFontBytes(fontBytes.data(), fontBytes.size(), kUiFontAtlasPx))
             {
                 m_FontAtlas = std::move(fa);
             }
         }
     }
+}
 
-    // Font-family loader shared by layout measurement and element renderers.
-    // This is intentionally available during Yoga measurement so measured text
-    // height matches the font that will be used for rendering (prevents label
-    // overlap/cropping when themes specify font-family).
-    auto getOrLoadFamily = [this](const std::string& family,
-                                  int weight,
-                                  FontStyle style,
-                                  FontVariant variant) -> FontAtlas*
+// Run any due scheduled tasks (timers/next-tick) and flush deferred UI actions.
+//
+// Correctness note:
+// - Both the scheduler and dispatcher are explicitly non-reentrant: work scheduled/posted while
+//   processing a batch is deferred to the *next* ProcessDue()/Drain() call.
+// - In practice, many UI workflows rely on a small amount of same-frame convergence (e.g.,
+//   a PostAction enqueues another PostAction, or a scheduled callback posts UI work).
+// - If we only ProcessDue()/Drain() once per Update(), some mutations can be delayed until the
+//   next *user input*, leading to the exact "layout is wrong until refresh" issues weâ€™re trying
+//   to eliminate in normal mode.
+//
+// Therefore: do a small, bounded convergence loop each frame.
+void UIManager::DrainSchedulerAndDispatcher(UpdateFrameState& frame)
+{
+    GE_CPU_PROFILE_SCOPE("UIManager.Update.SchedulerAndDispatcher");
+    ScopedSectionTimer _tSched(frame.ProfEnabled, &frame.Prof.SchedulerMs);
+
+    constexpr int kMaxDrainIterations = 4;
+    for (int iter = 0; iter < kMaxDrainIterations; ++iter)
     {
-        return GetOrRequestFontFamilyInternal(family, weight, style, variant);
-    };
-
-    // NOTE: text measure contexts are stored in the thread-local pool above.
-
-    // Ensure a layout has been provided by the app/example
-    UIElement* rootEl = m_Root.get();
-
-    // Retained-mode dirty hints:
-    // - UIElement::MarkDirty/MarkDirtySubtree notifies the owning UIManager via m_DirtyHintFlags.
-    // - We exchange(0) once at the start of Update so we can detect "dirty since last frame"
-    //   without scanning the whole tree, and then later re-clear before the heavy pass so any
-    //   dirty marks during the heavy pass are preserved for the next frame.
-    const unsigned dirtyPrev = m_DirtyHintFlags.exchange(0u, std::memory_order_relaxed);
-
-    // NOTE: We intentionally keep Update() semantics general: no editor-specific
-    // fast paths. Performance work should be achieved via retained caching,
-    // incremental rebuilds, and better dirty tracking.
-
-    // Run any due scheduled tasks (timers/next-tick) and flush deferred UI actions.
-    //
-    // Correctness note:
-    // - Both the scheduler and dispatcher are explicitly non-reentrant: work scheduled/posted while
-    //   processing a batch is deferred to the *next* ProcessDue()/Drain() call.
-    // - In practice, many UI workflows rely on a small amount of same-frame convergence (e.g.,
-    //   a PostAction enqueues another PostAction, or a scheduled callback posts UI work).
-    // - If we only ProcessDue()/Drain() once per Update(), some mutations can be delayed until the
-    //   next *user input*, leading to the exact "layout is wrong until refresh" issues weâ€™re trying
-    //   to eliminate in normal mode.
-    //
-    // Therefore: do a small, bounded convergence loop each frame.
-    {
-        GE_CPU_PROFILE_SCOPE("UIManager.Update.SchedulerAndDispatcher");
-        ScopedSectionTimer _tSched(profEnabled, &prof.SchedulerMs);
-
-        constexpr int kMaxDrainIterations = 4;
-        for (int iter = 0; iter < kMaxDrainIterations; ++iter)
+        std::size_t ranScheduler = 0;
+        if (frame.RunInteractive && m_Scheduler)
         {
-            std::size_t ranScheduler = 0;
-            if (runInteractive && m_Scheduler)
-            {
-                ranScheduler = m_Scheduler->ProcessDue();
-            }
+            ranScheduler = m_Scheduler->ProcessDue();
+        }
 
-            std::size_t pendingBefore = 0;
-            if (m_Dispatcher)
+        std::size_t pendingBefore = 0;
+        if (m_Dispatcher)
+        {
+            pendingBefore = m_Dispatcher->PendingCount();
+            if (pendingBefore)
             {
-                pendingBefore = m_Dispatcher->PendingCount();
-                if (pendingBefore)
-                {
-                    m_Dispatcher->Drain();
-                }
-            }
-
-            const std::size_t pendingAfter = m_Dispatcher ? m_Dispatcher->PendingCount() : 0;
-            if (ranScheduler == 0 && pendingBefore == 0 && pendingAfter == 0)
-            {
-                break;
+                m_Dispatcher->Drain();
             }
         }
+
+        const std::size_t pendingAfter = m_Dispatcher ? m_Dispatcher->PendingCount() : 0;
+        if (ranScheduler == 0 && pendingBefore == 0 && pendingAfter == 0)
+        {
+            break;
+        }
     }
+}
 
-    // Attach/detach events for every tree change since the last settle. Placed HERE for
-    // three reasons: after m_HotReload->Pump() above, so a reconcile has finished and is
-    // judged as the single tree edit it is rather than mid-flight; after the
-    // scheduler/dispatcher drain, so a deferred RemoveChild has already run and the tree
-    // the settle reads is the one this frame will lay out; and before both of Update's
-    // early-return gates below (the idle gate and the pointer-only gate), which would
-    // otherwise strand the queue for as long as the UI sits still — precisely the frames
-    // after a HUD is built.
-    SettleAttachTransitions();
-
-    bool dockspaceRebuiltBeforeLayout = false;
-
-    // Apply any pending dockspace rebuild before building Yoga so layout
-    // reflects changes requested by UI controls in the previous frame.
-    if (runInteractive && m_RebuildDockspace && m_PendingDockspaceRebuild)
+// Harden hover/capture pointers: UI controls (inspector, virtualization, docking) may rebuild
+// large subtrees between frames. Never dereference stale UIElement* during CSS/style passes.
+// Recover by instanceId (or id string for capture) if possible, otherwise clear safely.
+void UIManager::RecoverHoverAndCapture()
+{
+    GE_CPU_PROFILE_SCOPE("UIManager.Update.HoverRecovery");
+    UIElement* root = GetRootElement();
+    if (!root)
     {
-        GE_CPU_PROFILE_SCOPE("UIManager.Update.DockspaceRebuild");
-        auto resetPrimitiveGenFrames = [&](auto& self, UIElement* el) -> void {
-            if (!el)
-                return;
-            el->m_LastPrimitiveGenFrame = 0;
-            for (const auto& child : el->GetChildren())
-                self(self, child.get());
-            if (UIElement* target = el->GetMountTarget())
-                self(self, target);
-        };
-
-        resetPrimitiveGenFrames(resetPrimitiveGenFrames, m_PendingDockspaceRebuild);
-        // Rebuilding the dockspace destroys and recreates large portions of the UI tree.
-        // Drop retained Yoga nodes up-front so we don't hold stale UIElement* keys.
-        ResetRetainedYogaTree();
-        m_PendingDockspaceRebuild->RebuildFromModel();
-        InvalidateSheetSetSubtree(m_PendingDockspaceRebuild);
-        resetPrimitiveGenFrames(resetPrimitiveGenFrames, m_PendingDockspaceRebuild);
-        dockspaceRebuiltBeforeLayout = true;
-        m_PendingDockspaceRebuild = nullptr;
-        m_RebuildDockspace = false;
-        // Safety: input state may reference elements in the rebuilt subtree
         m_Hovered = nullptr;
         m_HoveredInstanceId = 0;
         m_MouseCaptured = false;
@@ -411,148 +677,122 @@ void UIManager::Update(float deltaTime, bool interactive)
         m_CaptureInstanceId = 0;
         m_CaptureId.clear();
     }
-
-    // Non-RAII scope for the "PreBuild" phase — the prep work between DockspaceRebuild and the
-    // first BuildYoga invocation (hover recovery, viewport/content-scale checks,
-    // stylesheet flat-table construction). Released explicitly before the first BuildYoga scope
-    // so BuildYoga becomes a sibling in the call tree, not a child. unique_ptr is used because
-    // the code in between declares many locals that are used later in the function, ruling out a
-    // plain `{}` block wrapper.
-    auto preBuildScope =
-        std::make_unique<::GameEngine::Profiling::ScopedCpuProfile>("UIManager.Update.PreBuild");
-
-    // Harden hover/capture pointers: UI controls (inspector, virtualization, docking) may rebuild
-    // large subtrees between frames. Never dereference stale UIElement* during CSS/style passes.
-    // Recover by instanceId (or id string for capture) if possible, otherwise clear safely.
+    else if (const uint64_t recoveryTreeGen = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+             recoveryTreeGen != m_HoverRecoveryTreeGen)
     {
-        GE_CPU_PROFILE_SCOPE("UIManager.Update.HoverRecovery");
-        UIElement* root = GetRootElement();
-        if (!root)
+        // Instance-id resolution is an O(tree) walk. Cached pointers can
+        // only go stale through a structural change (child add/remove,
+        // Mount target swap), and every structural change bumps
+        // m_TreeStructureGeneration — so the walk is skipped while the
+        // generation holds still.
+        m_HoverRecoveryTreeGen = recoveryTreeGen;
+        if (m_HoveredInstanceId != 0)
         {
-            m_Hovered = nullptr;
-            m_HoveredInstanceId = 0;
-            m_MouseCaptured = false;
-            m_CaptureElement = nullptr;
-            m_CaptureInstanceId = 0;
-            m_CaptureId.clear();
-        }
-        else if (const uint64_t recoveryTreeGen = m_TreeStructureGeneration.load(std::memory_order_relaxed);
-                 recoveryTreeGen != m_HoverRecoveryTreeGen)
-        {
-            // Instance-id resolution is an O(tree) walk. Cached pointers can
-            // only go stale through a structural change (child add/remove,
-            // Mount target swap), and every structural change bumps
-            // m_TreeStructureGeneration — so the walk is skipped while the
-            // generation holds still.
-            m_HoverRecoveryTreeGen = recoveryTreeGen;
-            if (m_HoveredInstanceId != 0)
+            UIElement* h = FindElementByInstanceId(m_HoveredInstanceId);
+            if (h)
             {
-                UIElement* h = FindElementByInstanceId(m_HoveredInstanceId);
-                if (h)
-                {
-                    m_Hovered = h;
-                }
-                else
-                {
-                    m_Hovered = nullptr;
-                    m_HoveredInstanceId = 0;
-                }
+                m_Hovered = h;
             }
             else
             {
                 m_Hovered = nullptr;
+                m_HoveredInstanceId = 0;
             }
+        }
+        else
+        {
+            m_Hovered = nullptr;
+        }
 
-            if (m_MouseCaptured)
+        if (m_MouseCaptured)
+        {
+            UIElement* cap = nullptr;
+            if (m_CaptureInstanceId != 0)
             {
-                UIElement* cap = nullptr;
-                if (m_CaptureInstanceId != 0)
-                {
-                    cap = FindElementByInstanceId(m_CaptureInstanceId);
-                }
-                if (!cap && !m_CaptureId.empty())
-                {
-                    cap = root->FindById(HashStringId(m_CaptureId));
-                }
-                if (cap)
-                {
-                    m_CaptureElement = cap;
-                    m_CaptureInstanceId = cap->GetInstanceId();
-                }
-                else
-                {
-                    m_MouseCaptured = false;
-                    m_CaptureElement = nullptr;
-                    m_CaptureInstanceId = 0;
-                    m_CaptureId.clear();
-                }
+                cap = FindElementByInstanceId(m_CaptureInstanceId);
+            }
+            if (!cap && !m_CaptureId.empty())
+            {
+                cap = root->FindById(HashStringId(m_CaptureId));
+            }
+            if (cap)
+            {
+                m_CaptureElement = cap;
+                m_CaptureInstanceId = cap->GetInstanceId();
+            }
+            else
+            {
+                m_MouseCaptured = false;
+                m_CaptureElement = nullptr;
+                m_CaptureInstanceId = 0;
+                m_CaptureId.clear();
             }
         }
     }
+}
 
-    // Fire the low-frequency periodic-refresh callbacks (VCS/ECS-stat panels)
-    // before the idle gate. A callback that mutates the tree raises dirty hints
-    // that fold into dirtyNow just below, so the change renders this frame; an
-    // unchanged tick mutates nothing and the frame still idles. This is what
-    // lets an input-idle / IPC-only editor keep externally-polled panels fresh
-    // (OnPostLayout, the previous driver, never fires on idle frames).
-    PumpPeriodicRefresh();
-
+void UIManager::ResolveFrameInputs(UpdateFrameState& frame)
+{
     // Carry dirtyPrev (the frame-start exchange(0) at the top of Update) into dirtyNow. Without
     // it, a LayoutDirty/ChildrenDirty hint raised on the previous frame (e.g. a control resizing
-    // itself in an event handler) is lost here -- the layout-signature gate below keys off
+    // itself in an event handler) is lost here -- the layout-signature gate in BeginHeavyPass keys off
     // dirtyNow, so the deferred relayout never solves and the change does not take effect until
     // some other input forces a solve.
-    unsigned dirtyNow = dirtyPrev | m_DirtyHintFlags.load(std::memory_order_relaxed);
-    bool forceLayoutSignaturesThisFrame = false;
+    frame.DirtyNow = frame.DirtyPrev | m_DirtyHintFlags.load(std::memory_order_relaxed);
 
-    const bool globalStylesheetSetChanged = (m_AppliedStylesheetSetGeneration != m_StylesheetSetGeneration);
-    const bool debugCaptureActive = m_DebugCaptureEnabled && m_DebugCaptureOut.is_open();
-    const bool anyInput = m_MouseMoved || m_ScrollWheelMoved || m_ScrollOffsetsChanged ||
+    frame.GlobalStylesheetSetChanged = (m_AppliedStylesheetSetGeneration != m_StylesheetSetGeneration);
+    frame.DebugCaptureActive = m_DebugCaptureEnabled && m_DebugCaptureOut.is_open();
+    frame.AnyInput = m_MouseMoved || m_ScrollWheelMoved || m_ScrollOffsetsChanged ||
                           m_ButtonEdgeSinceLastUpdate || m_KeyInputSinceLastUpdate;
-    uint32_t viewportW = 0u;
-    uint32_t viewportH = 0u;
+    frame.ViewportW = 0u;
+    frame.ViewportH = 0u;
     {
         constexpr uint32_t kDefaultViewportW = 1280u;
         constexpr uint32_t kDefaultViewportH = 720u;
-        viewportW = kDefaultViewportW;
-        viewportH = kDefaultViewportH;
+        frame.ViewportW = kDefaultViewportW;
+        frame.ViewportH = kDefaultViewportH;
         if (m_LayoutSizeOverrideW > 0 && m_LayoutSizeOverrideH > 0)
         {
             // A host compositing the UI into a sub-window target (GameUIHost over a
             // panel-sized FinalColor) sizes layout to that extent, not the swapchain.
             // Honored here so it works in every build, not just the fast path.
-            viewportW = m_LayoutSizeOverrideW;
-            viewportH = m_LayoutSizeOverrideH;
+            frame.ViewportW = m_LayoutSizeOverrideW;
+            frame.ViewportH = m_LayoutSizeOverrideH;
         }
         else
         {
-            m_Device->GetSwapchainSize(viewportW, viewportH);
-            if (viewportW == 0 || viewportH == 0)
+            m_Device->GetSwapchainSize(frame.ViewportW, frame.ViewportH);
+            if (frame.ViewportW == 0 || frame.ViewportH == 0)
             {
                 if (m_LastLayoutWidth > 0 && m_LastLayoutHeight > 0)
                 {
-                    viewportW = m_LastLayoutWidth;
-                    viewportH = m_LastLayoutHeight;
+                    frame.ViewportW = m_LastLayoutWidth;
+                    frame.ViewportH = m_LastLayoutHeight;
                 }
                 else
                 {
-                    viewportW = kDefaultViewportW;
-                    viewportH = kDefaultViewportH;
+                    frame.ViewportW = kDefaultViewportW;
+                    frame.ViewportH = kDefaultViewportH;
                 }
             }
         }
     }
-    const bool viewportChanged = (viewportW != m_LastLayoutWidth || viewportH != m_LastLayoutHeight);
+    frame.ViewportChanged = (frame.ViewportW != m_LastLayoutWidth || frame.ViewportH != m_LastLayoutHeight);
 
     // Resolve target scaling (physical px per CSS logical px) once per frame.
     // m_LastLayoutWidth/Height stay in physical pixels for rendering; Yoga receives
     // logical dimensions (physical / scale) so that CSS px maps to the correct
     // physical size on HiDPI displays.
-    const float contentScale = m_ScaleSettings.Resolve(
-        viewportW, viewportH, m_Platform ? m_Platform->GetContentScale() : 1.0f);
-    const bool contentScaleChanged = std::abs(contentScale - m_ContentScale) > 1.0e-3f;
-    m_ContentScale = contentScale;
+    frame.ContentScale = m_ScaleSettings.Resolve(
+        frame.ViewportW, frame.ViewportH, m_Platform ? m_Platform->GetContentScale() : 1.0f);
+    // When the user changes Additional UI scale, the logical viewport handed
+    // to Yoga changes (physical / scale). ContentScaleChanged forces the full
+    // relayout this frame (via ComputeLayoutSignaturesAll in BeginHeavyPass and
+    // the pointer-only gate's env check) so the next paint uses correctly-sized
+    // elements — otherwise we paint the previous layout at the new scale,
+    // which shows as a brief visual zoom until the next dirty event re-solves.
+    frame.ContentScaleChanged = std::abs(frame.ContentScale - m_ContentScale) > 1.0e-3f;
+    m_ContentScale = frame.ContentScale;
 
     // Put Yoga's rounding grid on this frame's scale before anything builds a
     // node or solves. Layout carries values that are not whole logical pixels —
@@ -560,61 +800,50 @@ void UIManager::Update(float deltaTime, bool interactive)
     // default grid rounds them away (YogaAdapter::SetContentScale). Set here
     // rather than beside the solve: node creation reads the config too, and
     // several solve sites share this one frame.
-    UILayout::YogaAdapter::SetContentScale(contentScale);
+    UILayout::YogaAdapter::SetContentScale(frame.ContentScale);
+}
 
-    // When the user changes Additional UI scale, the logical viewport handed
-    // to Yoga changes (physical / scale). contentScaleChanged forces the full
-    // relayout this frame (via computeLayoutSignaturesAll below and the
-    // pointer-only gate's env check) so the next paint uses correctly-sized
-    // elements — otherwise we paint the previous layout at the new scale,
-    // which shows as a brief visual zoom until the next dirty event re-solves.
-
-    // C-8: pump virtualized-control provider versions BEFORE the gates. A
-    // MarkChanged that landed since the last frame enqueues DataChanged work
-    // here, so HasPending() declines the idle gate below and the heavy pass
-    // services the rebind the same frame — an idle-gated panel no longer waits
-    // for a scroll/viewport event to repaint. No-op (one u64 compare per
-    // registered control) when nothing changed, so it never breaks the idle gate.
-    PumpVirtualizedControlChanges();
-
-    // Mode-0 idle gate: a frame with no input and nothing pending anywhere in
-    // the pipeline has no Update-side work at all — skip straight to the
-    // tooltip/cursor tail. Tooltip delay timers still advance there (a
-    // tooltip firing mutates the tree, which declines the gate next frame).
-    // The render side pairs with this: ResolveStyles and the SSBO uploads are
-    // gated on their own dirty state, so an idle UI does no per-frame tree
-    // walks and uploads zero bytes.
-    //
-    // Host-agnostic: passive (non-interactive) frames take this same early-out.
-    // A passive host (Player/Game-View HUD, editor background tool window) feeds
-    // no input and marks style/layout dirty exactly like the interactive path,
-    // so a clean passive frame has nothing to build/cascade/solve either. Every
-    // decline condition below is interactivity-neutral, so a passive frame with
-    // real work pending (dirty tree, active transitions, pending font resolve,
-    // viewport change, queued virtualization) still declines and runs the heavy
-    // pass — the C-8 pump above having already surfaced provider changes.
+// Mode-0 idle gate: a frame with no input and nothing pending anywhere in
+// the pipeline has no Update-side work at all — skip straight to the
+// tooltip/cursor tail. Tooltip delay timers still advance there (a
+// tooltip firing mutates the tree, which declines the gate next frame).
+// The render side pairs with this: ResolveStyles and the SSBO uploads are
+// gated on their own dirty state, so an idle UI does no per-frame tree
+// walks and uploads zero bytes.
+//
+// Host-agnostic: passive (non-interactive) frames take this same early-out.
+// A passive host (Player/Game-View HUD, editor background tool window) feeds
+// no input and marks style/layout dirty exactly like the interactive path,
+// so a clean passive frame has nothing to build/cascade/solve either. Every
+// decline condition below is interactivity-neutral, so a passive frame with
+// real work pending (dirty tree, active transitions, pending font resolve,
+// viewport change, queued virtualization) still declines and runs the heavy
+// pass — PumpVirtualizedControlChanges, which Update runs before this gate,
+// having already surfaced provider changes.
+bool UIManager::TryIdleUpdateFrame(UpdateFrameState& frame)
+{
     const bool idleFrameTaken =
-        TryIdleFrame(dirtyNow, viewportChanged || contentScaleChanged, debugCaptureActive);
-    prof.IdleDecline = (uint32_t)m_IdleGateDecline;
+        TryIdleFrame(frame.DirtyNow, frame.ViewportChanged || frame.ContentScaleChanged, frame.DebugCaptureActive);
+    frame.Prof.IdleDecline = (uint32_t)m_IdleGateDecline;
     if (idleFrameTaken)
     {
-        prof.IdleFrame = 1u;
-        UpdateTooltipAndCursor(runInteractive);
-        PublishUpdateProfile(prof, profEnabled, totalStart);
-        return;
+        frame.Prof.IdleFrame = 1u;
+        UpdateTooltipAndCursor(frame.RunInteractive);
+        PublishUpdateProfile(frame.Prof, frame.ProfEnabled, frame.TotalStart);
+        return true;
     }
+    return false;
+}
 
-    // Diagnostics for zero-input frames that reach the heavy pass — the
-    // idle-gate analogue of GE_UI_HEAVY_INPUT_LOG below. Entries here while
-    // the app sits untouched name the state that keeps frames heavy (e.g. a
-    // control re-marking itself every frame). Enable with GE_UI_IDLE_LOG=1.
-    static const bool s_IdleLog = []() -> bool
-    {
-        const char* e = std::getenv("GE_UI_IDLE_LOG");
-        return (e && e[0] == '1');
-    }();
+// Diagnostics for zero-input frames that reach the heavy pass — the
+// idle-gate analogue of GE_UI_HEAVY_INPUT_LOG below. Entries here while
+// the app sits untouched name the state that keeps frames heavy (e.g. a
+// control re-marking itself every frame). Enable with GE_UI_IDLE_LOG=1.
+void UIManager::LogIdleGateDecline(const UpdateFrameState& frame)
+{
+    static const bool s_IdleLog = Platform::EnvironmentSwitchEnabled("GE_UI_IDLE_LOG", false);
     static int s_IdleLogBudget = 64;
-    if (s_IdleLog && !anyInput && s_IdleLogBudget > 0)
+    if (s_IdleLog && !frame.AnyInput && s_IdleLogBudget > 0)
     {
         --s_IdleLogBudget;
         static constexpr const char* kIdleDeclineNames[] = {
@@ -627,27 +856,30 @@ void UIManager::Update(float deltaTime, bool interactive)
         Logger::Log::Warning(
             "[UI IdleGate] declined: gate={} dirtyNow={} treeGen={}/{} virtPending={} transitions={}",
             kIdleDeclineNames[(size_t)m_IdleGateDecline],
-            dirtyNow,
+            frame.DirtyNow,
             m_TreeStructureGeneration.load(std::memory_order_relaxed),
             m_LastBuiltStructureGeneration,
             m_VirtualizationCoordinator.HasPending() ? 1 : 0,
             (m_TransitionEngine && m_TransitionEngine->HasActiveTransitions()) ? 1 : 0);
     }
+}
 
-    // Pointer-only frame gate: a bare mouse move over an otherwise-clean tree
-    // is fully serviced here — hit test, pseudo-state re-bake (render-side
-    // drain repaints), enter/leave + mouse-move dispatch — skipping
-    // BuildYoga/cascade/solve entirely. Everything else falls through to the
-    // heavy pass.
+// Pointer-only frame gate: a bare mouse move over an otherwise-clean tree
+// is fully serviced here — hit test, pseudo-state re-bake (render-side
+// drain repaints), enter/leave + mouse-move dispatch — skipping
+// BuildYoga/cascade/solve entirely. Everything else falls through to the
+// heavy pass.
+bool UIManager::TryPointerOnlyUpdateFrame(UpdateFrameState& frame)
+{
     const PointerFrameResult pointerFrame = TryPointerOnlyFrame(
-        dirtyNow, runInteractive,
-        viewportChanged || contentScaleChanged || debugCaptureActive,
-        profEnabled, prof);
+        frame.DirtyNow, frame.RunInteractive,
+        frame.ViewportChanged || frame.ContentScaleChanged || frame.DebugCaptureActive,
+        frame.ProfEnabled, frame.Prof);
     if (pointerFrame == PointerFrameResult::Handled)
     {
-        UpdateTooltipAndCursor(runInteractive);
-        PublishUpdateProfile(prof, profEnabled, totalStart);
-        return;
+        UpdateTooltipAndCursor(frame.RunInteractive);
+        PublishUpdateProfile(frame.Prof, frame.ProfEnabled, frame.TotalStart);
+        return true;
     }
     if (pointerFrame == PointerFrameResult::NotApplicable)
     {
@@ -656,8 +888,8 @@ void UIManager::Update(float deltaTime, bool interactive)
         // resolution runs with current pointer state (and layout-affecting
         // pseudo styles solve this frame). Any marks it raises are folded into
         // dirtyNow here, ahead of the hint-clear below that consumes them.
-        if (PreProcessPointerState(runInteractive))
-            dirtyNow |= m_DirtyHintFlags.load(std::memory_order_relaxed);
+        if (PreProcessPointerState(frame.RunInteractive))
+            frame.DirtyNow |= m_DirtyHintFlags.load(std::memory_order_relaxed);
     }
     else
     {
@@ -665,21 +897,21 @@ void UIManager::Update(float deltaTime, bool interactive)
         // be dispatched (ProcessHoverChain / DispatchEvents dedup via the
         // pre-pass bookkeeping). Fold the gate's marks into this frame's
         // dirty set and run the heavy pass.
-        dirtyNow |= m_DirtyHintFlags.load(std::memory_order_relaxed);
+        frame.DirtyNow |= m_DirtyHintFlags.load(std::memory_order_relaxed);
     }
+    return false;
+}
 
-    // Diagnostics for input frames that reach the heavy pass. With the
-    // pointer-only gate above, a bare mouse move should be serviced before
-    // this point — an entry with mouseMoved=1 and every other field 0 means
-    // the gate declined a frame it should have taken.
-    // Enable by setting GE_UI_HEAVY_INPUT_LOG=1.
-    static const bool s_HeavyInputLog = []() -> bool
-    {
-        const char* e = std::getenv("GE_UI_HEAVY_INPUT_LOG");
-        return (e && e[0] == '1');
-    }();
+// Diagnostics for input frames that reach the heavy pass. With the
+// pointer-only gate above, a bare mouse move should be serviced before
+// this point — an entry with mouseMoved=1 and every other field 0 means
+// the gate declined a frame it should have taken.
+// Enable by setting GE_UI_HEAVY_INPUT_LOG=1.
+void UIManager::LogHeavyInputFrame(const UpdateFrameState& frame)
+{
+    static const bool s_HeavyInputLog = Platform::EnvironmentSwitchEnabled("GE_UI_HEAVY_INPUT_LOG", false);
     static int s_HeavyInputLogBudget = 32;
-    if (s_HeavyInputLog && anyInput && s_HeavyInputLogBudget > 0)
+    if (s_HeavyInputLog && frame.AnyInput && s_HeavyInputLogBudget > 0)
     {
         --s_HeavyInputLogBudget;
         static constexpr const char* kGateDeclineNames[] = {
@@ -700,13 +932,15 @@ void UIManager::Update(float deltaTime, bool interactive)
             m_ButtonEdgeSinceLastUpdate ? 1 : 0,
             m_KeyInputSinceLastUpdate ? 1 : 0,
             m_MouseCaptured ? 1 : 0,
-            dirtyNow,
+            frame.DirtyNow,
             kGateDeclineNames[(size_t)m_PointerGateDecline],
             hoverTag,
             hoverId);
     }
+}
 
-
+void UIManager::BeginHeavyPass(UpdateFrameState& frame)
+{
     // Coalesce font-resolution invalidations: while fonts stream in, both
     // gates above decline (m_FontResolvedDirty), so every install lands in a
     // heavy pass whose BuildYoga measure-input diff picks up the new atlas.
@@ -727,108 +961,39 @@ void UIManager::Update(float deltaTime, bool interactive)
 
     // Snapshot viewport size for rendering (physical pixels).
     // Yoga layout uses logical dimensions (ctx.viewportW/H) instead.
-    m_LastLayoutWidth = viewportW;
-    m_LastLayoutHeight = viewportH;
+    m_LastLayoutWidth = frame.ViewportW;
+    m_LastLayoutHeight = frame.ViewportH;
     // PERF gate for the layout-signature pass. See UpdateContext's layout-signature
     // doc block (UIManager_Internal.h) for the invariants; don't widen these flags
-    // without reading it — Fix A (a3355481) measured a 2.4× regression from a
-    // single extra `||`.
-    const bool relayoutRequestedPre = ConsumeRelayoutRequest();
-    const bool computeLayoutSignaturesAll =
-        viewportChanged ||
-        contentScaleChanged ||
-        globalStylesheetSetChanged;
-    bool computeLayoutSignaturesThisFrame =
-        computeLayoutSignaturesAll ||
-        relayoutRequestedPre ||
+    // without reading it: turning on ComputeLayoutSignaturesAll from a scoped
+    // trigger disables the subtree-skip fast path for the whole frame.
+    bool forceLayoutSignaturesThisFrame = false;
+    frame.RelayoutRequestedPre = ConsumeRelayoutRequest();
+    frame.ComputeLayoutSignaturesAll =
+        frame.ViewportChanged ||
+        frame.ContentScaleChanged ||
+        frame.GlobalStylesheetSetChanged;
+    frame.ComputeLayoutSignaturesThisFrame =
+        frame.ComputeLayoutSignaturesAll ||
+        frame.RelayoutRequestedPre ||
         forceLayoutSignaturesThisFrame ||
-        ((dirtyNow & (UIElement::LayoutDirty | UIElement::ChildrenDirty)) != 0u);
+        ((frame.DirtyNow & (UIElement::LayoutDirty | UIElement::ChildrenDirty)) != 0u);
+}
 
-    // Build Yoga tree and collect nodes for layout and event dispatch.
-    // NOTE: all containers in this hot path are static thread_local to retain
-    // capacity across frames and avoid per-frame heap allocations entirely.
-    // The PMR scratch allocator was removed because MSVC's monotonic_buffer_resource
-    // consistently routes through the upstream (operator new) regardless of available
-    // buffer space, negating the benefit of the pre-allocated arena.
-    // Flat-table layout for effective stylesheet sets (sheets + aligned rule indices).
-    // All sheet and index pointers live in two contiguous flat buffers; each unique
-    // set is a {offset, count} range into them.  Elements share sets by index,
-    // avoiding per-element vector allocations entirely.
-    //
-    // PERF: static thread_local vectors retain capacity across frames, eliminating
-    // all heap allocations after the first heavy-path frame.
-    static thread_local std::vector<const Stylesheet*> flatSheets;
-    // Step 4: parallel-indexed handles. Mirrors flatSheets so the
-    // interner can be fed handle spans (it now stores keep-alives).
-    static thread_local std::vector<StylesheetHandle> flatHandles;
-    static thread_local std::vector<const StylesheetRuleIndex*> flatIndices;
-    static thread_local std::vector<SheetSetRef> sheetSetRefs;
-    flatSheets.clear();
-    flatHandles.clear();
-    flatIndices.clear();
-    sheetSetRefs.clear();
-
-    // Helper: look up a SheetSetRef by index (-1 = none).
-    auto getSheetSpan = [&](int32_t idx) -> std::span<const Stylesheet* const>
-    {
-        if (idx < 0)
-            return {};
-        const auto& ref = sheetSetRefs[(size_t)idx];
-        return {flatSheets.data() + ref.offset, ref.count};
-    };
-    auto getIndexSpan = [&](int32_t idx) -> std::span<const StylesheetRuleIndex* const>
-    {
-        if (idx < 0)
-            return {};
-        const auto& ref = sheetSetRefs[(size_t)idx];
-        return {flatIndices.data() + ref.offset, ref.count};
-    };
-
-    // Consume the force-rebuild fallback flag at the TOP of Update.
-    // Setters in prior frames (ResetRetainedYogaTree, RequestFullRebuild)
-    // need the flag to survive across the frame boundary.
-    m_ForceFullRebuildNextFrame = false;
-
-    // Debug: track pixel sizes used across all text runs this frame (when typing)
-    static thread_local std::vector<unsigned> dbgPixelSizes;
-    dbgPixelSizes.clear();
-
-    // Track the set of stylesheets currently attached/active so we can
-    // (a) cache dynamic pseudo-state analysis and
-    // (b) avoid work when hover/focus changes cannot affect style.
-    //
-    // PERF: reuse the hash table across frames to avoid per-frame allocations.
-    static thread_local std::unordered_set<const Stylesheet*> analysisSheets;
-    analysisSheets.clear();
-    analysisSheets.reserve(m_GlobalStylesheets.size() + 32);
-    uint64_t analysisSheetHash = 0;
-
-    // These will be aliased via UpdateContext (constructed later).
-    // Defined here so they're available for the ctx aggregate init.
-    bool anyLayoutSignatureChanged = false;
-    bool anyChildrenDirty = false;
-    bool didSolveLayout = false;
-    uint32_t cssRecomputeWhileSignaturePassDisabled = 0;
-
-    // Dirty flag counters observed during Yoga build (for optional spike diagnostics).
-    uint32_t dirtyStyleSeen = 0;
-    uint32_t dirtyLayoutSeen = 0;
-    uint32_t dirtyVisualSeen = 0;
-    uint32_t dirtyChildrenSeen = 0;
-
-    // Effective stylesheet list propagated top-down. Start from global sheets.
-    // Stored as StylesheetHandles (shared_ptrs) so the Stylesheet objects remain alive
-    // for the entire Update() frame even if m_GlobalStylesheets is modified mid-frame
-    // (e.g. by a hot-reload ReplaceGlobalStylesheetBlock call during event dispatch).
-    static thread_local std::vector<StylesheetHandle> rootSheets;
-    rootSheets.clear();
+// Collects this frame's analysis stylesheet set (global sheets plus
+// subtree-attached ones) and the global root sheet list.
+void UIManager::CollectFrameStylesheets(::UpdateContext& ctx)
+{
+    ctx.analysisSheets.clear();
+    ctx.analysisSheets.reserve(m_GlobalStylesheets.size() + 32);
+    ctx.rootSheets.clear();
     for (const StylesheetHandle& styleHandle : m_GlobalStylesheets)
     {
         if (styleHandle)
         {
-            if (analysisSheets.insert(styleHandle.get()).second)
-                analysisSheetHash ^= HashPtr64(styleHandle.get());
-            rootSheets.push_back(styleHandle);
+            if (ctx.analysisSheets.insert(styleHandle.get()).second)
+                ctx.analysisSheetHash ^= HashPtr64(styleHandle.get());
+            ctx.rootSheets.push_back(styleHandle);
         }
     }
     // Subtree-attached sheets (e.g. a game-UI HUD .css attached per-entity via
@@ -846,278 +1011,208 @@ void UIManager::Update(float deltaTime, bool interactive)
             continue;
         for (const StylesheetHandle& sheetHandle : sheetEl->GetStylesheets())
         {
-            if (sheetHandle && analysisSheets.insert(sheetHandle.get()).second)
-                analysisSheetHash ^= HashPtr64(sheetHandle.get());
+            if (sheetHandle && ctx.analysisSheets.insert(sheetHandle.get()).second)
+                ctx.analysisSheetHash ^= HashPtr64(sheetHandle.get());
         }
     }
-    const bool forceGlobalStyle =
-        (m_AppliedStylesheetSetGeneration != m_StylesheetSetGeneration) ||
-        (m_AppliedStylesheetContentGeneration != m_StylesheetContentGeneration);
+}
 
-    // Create the root (global) stylesheet set.
+// Create the root (global) stylesheet set.
+void UIManager::SeedRootSheetSet(::UpdateContext& ctx)
+{
+    SheetSetRef rootRef;
+    rootRef.offset = (uint32_t)ctx.flatSheets.size();
+    rootRef.count = (uint32_t)ctx.rootSheets.size();
+    for (const StylesheetHandle& sh : ctx.rootSheets)
     {
-        SheetSetRef rootRef;
-        rootRef.offset = (uint32_t)flatSheets.size();
-        rootRef.count = (uint32_t)rootSheets.size();
-        for (const StylesheetHandle& sh : rootSheets)
-        {
-            flatSheets.push_back(sh.get());
-            flatHandles.push_back(sh);                     // Step 4: parallel handle
-            flatIndices.push_back(GetOrBuildRuleIndex(sh.get()));
-        }
-        sheetSetRefs.push_back(rootRef);
+        ctx.flatSheets.push_back(sh.get());
+        ctx.flatHandles.push_back(sh);                     // index-parallel to flatSheets
+        ctx.flatIndices.push_back(GetOrBuildRuleIndex(sh.get()));
     }
-    const int32_t rootSheetSetIdx = 0; // first entry
+    ctx.sheetSetRefs.push_back(rootRef);
+}
 
-    // PERF: avoid std::function recursion overhead/allocations in this hot path.
-    // Use a recursive lambda (Y-combinator style) instead.
-
-    // Thread-local containers needed by UpdateContext and layout helper methods.
-    // Declared here (before ctx) so they're in scope; static thread_local retains capacity.
-    //
-    // Stage 7 step 7.1/7.2: nodeIndexByYG / nodeIndexByElement /
-    // nodesByInstanceId all removed. The first two were write-only;
-    // virtualization drain (the only nodesByInstanceId reader) now resolves
-    // via UIManager::FindElementByInstanceId (tree walk).
-    static thread_local std::vector<ScrollView*> scrollViews;
-    static thread_local std::vector<LayoutOverridePatchRec> layoutOverrideNodes;
-
-    // Reset the text measure pool for this frame (pool lives in UIManager_Layout.cpp).
-    GetTextMeasureCtxUsed() = 0;
-    TrimTextMeasureCtxPool();
-
-    // Hover chain scratch vectors: thread_local retains capacity across frames.
-    static thread_local std::vector<UIElement*> s_HoverLeft;
-    static thread_local std::vector<UIElement*> s_HoverEntered;
-    s_HoverLeft.clear();
-    s_HoverEntered.clear();
-
-    // Construct UpdateContext for methods extracted from Update().
-    // Must be after stylesheet setup (rootSheetSetIdx, forceGlobalStyle, etc. are set).
-    UpdateContext ctx{
-        flatSheets, flatHandles, flatIndices, sheetSetRefs, rootSheets, rootSheetSetIdx,
-        analysisSheets, analysisSheetHash,
-        scrollViews, layoutOverrideNodes,
-        dirtyStyleSeen, dirtyLayoutSeen, dirtyVisualSeen, dirtyChildrenSeen, anyChildrenDirty,
-        computeLayoutSignaturesThisFrame, computeLayoutSignaturesAll, relayoutRequestedPre, anyLayoutSignatureChanged, cssRecomputeWhileSignaturePassDisabled,
-        didSolveLayout, forceGlobalStyle,
-        // Yoga receives logical (CSS) pixels; layout rects are scaled back to physical after solve.
-        (uint32_t)std::lround((float)viewportW / contentScale),
-        (uint32_t)std::lround((float)viewportH / contentScale),
-        contentScale,
-        GetTextMeasureCtxUsed(),
-        {}, false, nullptr, s_HoverLeft, s_HoverEntered, 0, false, false, runInteractive,
-        profEnabled, &prof
-    };
-
-
-    // End the PreBuild scope so BuildYoga appears as a sibling in the call tree.
-    preBuildScope.reset();
-
-    // Snapshot the structure-change counter BEFORE BuildYoga so we can tell
-    // at end-of-Update whether anything structural happened. If the counter
-    // didn't advance (and layout wasn't solved), the node list is shape-
-    // identical to the previous frame — the derived maps and clip caches
-    // from last frame are still valid and the rebuild can be skipped entirely.
-    const uint64_t structCountBeforeBuild = ctx.subtreeStructureChanges;
-
+void UIManager::BuildInitialYogaTree(::UpdateContext& ctx, UpdateFrameState& frame)
+{
     BuiltNode rootBuilt{};
-    YGNodeRef rootNode = nullptr;
     {
         GE_CPU_PROFILE_SCOPE("UIManager.Update.BuildYoga.Initial");
-        ScopedSectionTimer _tBuild(profEnabled, &prof.BuildYogaMs);
+        ScopedSectionTimer _tBuild(frame.ProfEnabled, &frame.Prof.BuildYogaMs);
         const auto tStart = ProfClock::now();
-        rootBuilt = BuildYogaRecursive(rootEl, nullptr, 0, rootSheetSetIdx, ctx, /*shareCtx=*/nullptr);
-        rebuildInitialMs = std::chrono::duration<double, std::milli>(ProfClock::now() - tStart).count();
-        rootNode = rootBuilt.node;
+        rootBuilt = BuildYogaRecursive(frame.RootEl, nullptr, 0, ctx.rootSheetSetIdx, ctx, /*shareCtx=*/nullptr);
+        frame.RebuildInitialMs = std::chrono::duration<double, std::milli>(ProfClock::now() - tStart).count();
+        frame.RootNode = rootBuilt.node;
     }
     // Snapshot the tree generation at the end of the build so the next
     // Update can detect mid-frame mutations vs. truly idle frames.
     m_LastBuiltStructureGeneration = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+}
 
-    // PERF: resolving virtualization work items by instanceId should be O(1).
-    // Build a per-frame lookup table so DrainOnce doesn't scan nodes linearly.
-    // (nodesByInstanceId declared earlier for UpdateContext.)
-
-    // PERF: avoid repeated RTTI scans over all nodes. Build typed lists once per Yoga build.
-    // (scrollViews and layoutOverrideNodes declared earlier for UpdateContext.)
-
-    RebuildTypedNodeLists(ctx);
-
-    // Cache ScrollView instanceIds for scroll-only retained updates.
-    // Safe because instanceIds are stable; we revalidate against treeStructureGeneration.
+// Cache ScrollView instanceIds for scroll-only retained updates.
+// Safe because instanceIds are stable; we revalidate against treeStructureGeneration.
+void UIManager::CacheScrollViewInstanceIds(const ::UpdateContext& ctx)
+{
+    m_CachedScrollViewInstanceIds.clear();
+    m_CachedScrollViewInstanceIds.reserve(ctx.scrollViews.size());
+    for (ScrollView* sv : ctx.scrollViews)
     {
-        m_CachedScrollViewInstanceIds.clear();
-        m_CachedScrollViewInstanceIds.reserve(scrollViews.size());
-        for (ScrollView* sv : scrollViews)
-        {
-            if (!sv)
-                continue;
-            const std::uint64_t id = sv->GetInstanceId();
-            if (id != 0)
-                m_CachedScrollViewInstanceIds.push_back(id);
-        }
-        m_CachedScrollViewTreeGen = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+        if (!sv)
+            continue;
+        const std::uint64_t id = sv->GetInstanceId();
+        if (id != 0)
+            m_CachedScrollViewInstanceIds.push_back(id);
     }
+    m_CachedScrollViewTreeGen = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+}
 
-    // Shared helpers: keep the "flush scroll callbacks + drain virtualization" pattern consistent
-    // across phases, and avoid duplicating resolver/iteration code.
-
-    auto drainVirtualizationQueueBounded = [&](int maxIterations) -> bool
+// Shared helpers: keep the "flush scroll callbacks + drain virtualization" pattern consistent
+// across phases, and avoid duplicating resolver/iteration code.
+bool UIManager::DrainVirtualizationQueueBounded(int maxIterations)
+{
+    bool anyRan = false;
+    for (int it = 0; it < maxIterations; ++it)
     {
-        bool anyRan = false;
-        // Stage 7 step 7.1: virtualization resolves elements via UIManager::
-        // FindElementByInstanceId (a tree walk). The previous nodesByInstanceId
-        // map was an O(1) cache rebuilt every frame; the walk is cheap enough
-        // (few k entries max) that the per-frame map maintenance was net loss
-        // for this drain path.
-        for (int it = 0; it < maxIterations; ++it)
-        {
-            if (!m_VirtualizationCoordinator.HasPending())
-                break;
-            if (!m_VirtualizationCoordinator.DrainOnce(
-                    *this,
-                    /*userCtx=*/nullptr,
-                    +[](void* /*userCtx*/, UIManager& ui, std::uint64_t id) -> UIElement*
-                    {
-                        UIElement* el = ui.FindElementByInstanceId(id);
-                        if (!el)
-                            return nullptr;
-                        if (el->GetResolvedStyle().Layout.DisplayMode == DisplayMode::None)
-                            return nullptr;
-                        return el;
-                    }))
-                break;
-            anyRan = true;
-        }
-        return anyRan;
-    };
+        if (!m_VirtualizationCoordinator.HasPending())
+            break;
+        if (!m_VirtualizationCoordinator.DrainOnce(
+                *this,
+                /*userCtx=*/nullptr,
+                +[](void* /*userCtx*/, UIManager& ui, std::uint64_t id) -> UIElement*
+                {
+                    UIElement* el = ui.FindElementByInstanceId(id);
+                    if (!el)
+                        return nullptr;
+                    if (el->GetResolvedStyle().Layout.DisplayMode == DisplayMode::None)
+                        return nullptr;
+                    return el;
+                }))
+            break;
+        anyRan = true;
+    }
+    return anyRan;
+}
 
-    // Option A (phase separation): flush deferred ScrollView callbacks and drain virtualization work
-    // before the first Yoga solve so layout sees a stable, up-to-date tree.
+// Option A (phase separation): flush deferred ScrollView callbacks and drain virtualization work
+// before the first Yoga solve so layout sees a stable, up-to-date tree.
+//
+// Runs after the initial BuildYogaRecursive: FlushScrollCallbacks walks ctx.scrollViews, which
+// RebuildTypedNodeLists fills from the built tree.
+void UIManager::RunPreSolveDrain(::UpdateContext& ctx, UpdateFrameState& frame)
+{
+    frame.PreSolveChildrenDirty = false;
+    frame.PreSolveLayoutDirty = false;
+    frame.PreSolveRelayoutRequested = false;
+    GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain");
+    ScopedSectionTimer _tPreSolve(frame.ProfEnabled, &frame.Prof.PreSolveDrainMs);
+    const uint64_t treeGenBeforePreSolve = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+    bool preSolveAnyScrollCallbacksFlushed = false;
+    bool preSolveAnyVirtualizationRan = false;
+
+    constexpr int kMaxVirtualizationDrainIterationsPreSolve = 4;
+
+    // Attribute the tree-gen delta to FlushScrollCallbacks vs the virtualization drain
+    // so we can tell which one is forcing the AfterPreSolveDrain rebuild. Costs one
+    // atomic load per checkpoint — negligible.
+    {
+        GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain.FlushScrollCallbacks");
+        const auto t0 = ProfClock::now();
+        preSolveAnyScrollCallbacksFlushed = preSolveAnyScrollCallbacksFlushed || FlushScrollCallbacks(ctx);
+        frame.PreSolveFlushCallbacksMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
+    }
+    const uint64_t treeGenAfterFlush = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+
+    {
+        GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain.VirtualizationDrain");
+        const auto t0 = ProfClock::now();
+        preSolveAnyVirtualizationRan = preSolveAnyVirtualizationRan || DrainVirtualizationQueueBounded(kMaxVirtualizationDrainIterationsPreSolve);
+        frame.PreSolveVirtualizationMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
+    }
+    const uint64_t treeGenAfterPreSolve = m_TreeStructureGeneration.load(std::memory_order_relaxed);
+
+    // Walk the tree to detect any layout-affecting dirty marks set during the
+    // drain (e.g. virtualized cell rebinds via BindCell -> MarkDirtySubtree).
+    // BindCell writes new Width/Height/Position overrides on cell wrappers
+    // but doesn't bump m_TreeStructureGeneration, so a topology-only trigger
+    // would let the upcoming Yoga solve run with stale node styles. Probing
+    // here lets us include layout-dirty as a rebuild trigger below. Style-
+    // only dirties are intentionally NOT a trigger (paint-only changes
+    // don't need a Yoga rebuild — see same convention in the late-relayout
+    // probe in RunLateRelayout).
     //
-    // NOTE: We only have the per-frame 'nodes' list after buildYoga(), so we flush callbacks here.
-    bool preSolveChildrenDirty = false;
-    bool preSolveLayoutDirty = false;
-    bool preSolveRelayoutRequested = false;
+    // IMPORTANT: gate the probe on "virt or scroll-callback actually ran".
+    // Otherwise stale LayoutDirty/ChildrenDirty flags from previous frames
+    // (e.g. display:none-pruned subtrees BuildYogaRecursive didn't visit,
+    // or behind a Mount whose target wasn't reached) can fire the rebuild
+    // trigger every frame on idle and burn redundant Yoga rebuilds.
+    //
+    // Bail early once both flags are set; the walk prunes subtrees lacking
+    // SubtreeDirty so it stays cheap.
+    if (preSolveAnyVirtualizationRan || preSolveAnyScrollCallbacksFlushed)
     {
-        GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain");
-        ScopedSectionTimer _tPreSolve(profEnabled, &prof.PreSolveDrainMs);
-        const uint64_t treeGenBeforePreSolve = m_TreeStructureGeneration.load(std::memory_order_relaxed);
-        bool preSolveAnyScrollCallbacksFlushed = false;
-        bool preSolveAnyVirtualizationRan = false;
+        DirtyProbeResult probe;
+        ProbeLayoutDirtyFlags(frame.RootEl, /*trackStyle=*/false, probe);
+        frame.PreSolveChildrenDirty = probe.Children;
+        frame.PreSolveLayoutDirty = probe.Layout;
+    }
+    frame.PreSolveRelayoutRequested = m_RequestRelayout;
 
-        constexpr int kMaxVirtualizationDrainIterationsPreSolve = 4;
+    // If virtualization (or any scroll callback) mutated topology OR set
+    // layout-affecting dirties on existing nodes (BindCell rebinds), rebuild
+    // the Yoga tree now so the upcoming solve sees up-to-date node styles.
+    // Without this, e.g. wheel-scrolling a virtualized list rebinds cells
+    // with new Width/Height/Position overrides that never reach Yoga,
+    // leaving cells rendered at the previous frame's metrics.
+    const bool topologyMutatedDuringPreSolve = (treeGenAfterPreSolve != treeGenBeforePreSolve);
+    const bool layoutDirtyDuringPreSolve = (frame.PreSolveChildrenDirty || frame.PreSolveLayoutDirty);
+    if (topologyMutatedDuringPreSolve || layoutDirtyDuringPreSolve)
+    {
+        frame.RebuildAfterPreSolveFired = true;
+        frame.RebuildAfterPreSolveByFlush = (treeGenAfterFlush != treeGenBeforePreSolve);
+        frame.RebuildAfterPreSolveByVirt = topologyMutatedDuringPreSolve
+                                         ? (treeGenAfterPreSolve != treeGenAfterFlush)
+                                         : true;
 
-        // Attribute the tree-gen delta to FlushScrollCallbacks vs the virtualization drain
-        // so we can tell which one is forcing the AfterPreSolveDrain rebuild. Costs one
-        // atomic load per checkpoint — negligible.
+        ResetFlatSheetTable(ctx, *this);
+        BuiltNode rootBuilt{};
+        {
+            GE_CPU_PROFILE_SCOPE("UIManager.Update.BuildYoga.AfterPreSolveDrain");
+            ScopedSectionTimer _tBuild2(frame.ProfEnabled, &frame.Prof.BuildYogaMs);
+            const auto tStart = ProfClock::now();
+            rootBuilt = BuildYogaRecursive(frame.RootEl, nullptr, 0, ctx.rootSheetSetIdx, ctx, /*shareCtx=*/nullptr);
+            frame.RebuildAfterPreSolveMs = std::chrono::duration<double, std::milli>(ProfClock::now() - tStart).count();
+        }
+        frame.RootNode = rootBuilt.node;
+        RebuildTypedNodeLists(ctx);
+
+        // Second flush/drain pass over the rebuilt tree. Each call runs only when its first-pass
+        // counterpart did no work (the || short-circuits). Work done here is not in the Yoga tree
+        // built above, so it cannot feed the initial solve; work left queued runs in the
+        // SettleAfterEvents flush/drain, and RunLateRelayout re-solves in the same frame when
+        // that work dirties layout.
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain.FlushScrollCallbacks");
             const auto t0 = ProfClock::now();
             preSolveAnyScrollCallbacksFlushed = preSolveAnyScrollCallbacksFlushed || FlushScrollCallbacks(ctx);
-            preSolveFlushCallbacksMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
+            frame.PreSolveFlushCallbacksMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
         }
-        const uint64_t treeGenAfterFlush = m_TreeStructureGeneration.load(std::memory_order_relaxed);
-
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain.VirtualizationDrain");
             const auto t0 = ProfClock::now();
-            preSolveAnyVirtualizationRan = preSolveAnyVirtualizationRan || drainVirtualizationQueueBounded(kMaxVirtualizationDrainIterationsPreSolve);
-            preSolveVirtualizationMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
-        }
-        const uint64_t treeGenAfterPreSolve = m_TreeStructureGeneration.load(std::memory_order_relaxed);
-
-        // Walk the tree to detect any layout-affecting dirty marks set during the
-        // drain (e.g. virtualized cell rebinds via BindCell -> MarkDirtySubtree).
-        // BindCell writes new Width/Height/Position overrides on cell wrappers
-        // but doesn't bump m_TreeStructureGeneration, so a topology-only trigger
-        // would let the upcoming Yoga solve run with stale node styles. Probing
-        // here lets us include layout-dirty as a rebuild trigger below. Style-
-        // only dirties are intentionally NOT a trigger (paint-only changes
-        // don't need a Yoga rebuild — see same convention in the late-relayout
-        // probe at the end of this function).
-        //
-        // IMPORTANT: gate the probe on "virt or scroll-callback actually ran".
-        // Otherwise stale LayoutDirty/ChildrenDirty flags from previous frames
-        // (e.g. display:none-pruned subtrees BuildYogaRecursive didn't visit,
-        // or behind a Mount whose target wasn't reached) can fire the rebuild
-        // trigger every frame on idle and burn redundant Yoga rebuilds.
-        //
-        // Bail early once both flags are set; the walk prunes subtrees lacking
-        // SubtreeDirty so it stays cheap.
-        if (preSolveAnyVirtualizationRan || preSolveAnyScrollCallbacksFlushed)
-        {
-            auto dirtyProbe = [&](auto& self, UIElement* el) -> void {
-                if (!el) return;
-                if (preSolveChildrenDirty && preSolveLayoutDirty) return;
-                if (el->IsDirty(UIElement::ChildrenDirty))
-                    preSolveChildrenDirty = true;
-                if (el->IsDirty(UIElement::LayoutDirty))
-                    preSolveLayoutDirty = true;
-                if (!el->IsDirty(UIElement::SubtreeDirty))
-                    return;
-                for (const auto& ch : el->GetChildren())
-                    self(self, ch.get());
-                if (el->Kind() == UIElementKind::Mount)
-                    if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                        self(self, tgt);
-            };
-            dirtyProbe(dirtyProbe, rootEl);
-        }
-        preSolveRelayoutRequested = m_RequestRelayout;
-
-        // If virtualization (or any scroll callback) mutated topology OR set
-        // layout-affecting dirties on existing nodes (BindCell rebinds), rebuild
-        // the Yoga tree now so the upcoming solve sees up-to-date node styles.
-        // Without this, e.g. wheel-scrolling a virtualized list rebinds cells
-        // with new Width/Height/Position overrides that never reach Yoga,
-        // leaving cells rendered at the previous frame's metrics.
-        const bool topologyMutatedDuringPreSolve = (treeGenAfterPreSolve != treeGenBeforePreSolve);
-        const bool layoutDirtyDuringPreSolve = (preSolveChildrenDirty || preSolveLayoutDirty);
-        if (topologyMutatedDuringPreSolve || layoutDirtyDuringPreSolve)
-        {
-            rebuildAfterPreSolveFired = true;
-            rebuildAfterPreSolveByFlush = (treeGenAfterFlush != treeGenBeforePreSolve);
-            rebuildAfterPreSolveByVirt = topologyMutatedDuringPreSolve
-                                             ? (treeGenAfterPreSolve != treeGenAfterFlush)
-                                             : true;
-
-            ResetFlatSheetTable(ctx, *this);
-            {
-                GE_CPU_PROFILE_SCOPE("UIManager.Update.BuildYoga.AfterPreSolveDrain");
-                ScopedSectionTimer _tBuild2(profEnabled, &prof.BuildYogaMs);
-                const auto tStart = ProfClock::now();
-                rootBuilt = BuildYogaRecursive(rootEl, nullptr, 0, rootSheetSetIdx, ctx, /*shareCtx=*/nullptr);
-                rebuildAfterPreSolveMs = std::chrono::duration<double, std::milli>(ProfClock::now() - tStart).count();
-            }
-            rootNode = rootBuilt.node;
-            RebuildTypedNodeLists(ctx);
-
-            // Re-run one more bounded flush/drain pass in case newly-attached scroll views
-            // or controls need to observe initial scroll/viewport state.
-            {
-                GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain.FlushScrollCallbacks");
-                const auto t0 = ProfClock::now();
-                preSolveAnyScrollCallbacksFlushed = preSolveAnyScrollCallbacksFlushed || FlushScrollCallbacks(ctx);
-                preSolveFlushCallbacksMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
-            }
-            {
-                GE_CPU_PROFILE_SCOPE("UIManager.Update.PreSolveDrain.VirtualizationDrain");
-                const auto t0 = ProfClock::now();
-                preSolveAnyVirtualizationRan = preSolveAnyVirtualizationRan || drainVirtualizationQueueBounded(kMaxVirtualizationDrainIterationsPreSolve);
-                preSolveVirtualizationMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
-            }
-        }
-
-        if (preSolveAnyVirtualizationRan || preSolveAnyScrollCallbacksFlushed)
-        {
-            // If any work ran here, it may have introduced intrinsic layout changes; ensure
-            // signature contexts are ready and the initial solve can observe updated state.
-            computeLayoutSignaturesThisFrame = true;
+            preSolveAnyVirtualizationRan = preSolveAnyVirtualizationRan || DrainVirtualizationQueueBounded(kMaxVirtualizationDrainIterationsPreSolve);
+            frame.PreSolveVirtualizationMs += std::chrono::duration<double, std::milli>(ProfClock::now() - t0).count();
         }
     }
 
+    if (preSolveAnyVirtualizationRan || preSolveAnyScrollCallbacksFlushed)
+    {
+        // If any work ran here, it may have introduced intrinsic layout changes; ensure
+        // signature contexts are ready and the initial solve can observe updated state.
+        frame.ComputeLayoutSignaturesThisFrame = true;
+    }
+}
+
+void UIManager::SolveInitialLayout(::UpdateContext& ctx, UpdateFrameState& frame)
+{
     // Snapshot-consume the virtualization impact accumulated up to (and by) the
     // pre-solve drain: the initial solve below services exactly this work, so
     // leaving it armed would re-fire the late-relayout gate for a second
@@ -1129,7 +1224,7 @@ void UIManager::Update(float deltaTime, bool interactive)
     const uint32_t virtImpactPreSolve =
         m_VirtualizationImpactFlags.exchange(0u, std::memory_order_relaxed);
 
-    if (forceGlobalStyle)
+    if (frame.ForceGlobalStyle)
     {
         m_AppliedStylesheetSetGeneration = m_StylesheetSetGeneration;
         m_AppliedStylesheetContentGeneration = m_StylesheetContentGeneration;
@@ -1137,9 +1232,9 @@ void UIManager::Update(float deltaTime, bool interactive)
 
     // Refresh dynamic stylesheet analysis when stylesheet content changes or when
     // the attached stylesheet set changes (including subtree-attached sheets).
-    analysisSheetHash ^= (uint64_t)analysisSheets.size() * 0x9e3779b97f4a7c15ULL;
-    if (m_StyleAnalysisGeneration != m_StylesheetContentGeneration || m_StyleAnalysisSheetHash != analysisSheetHash)
-        RefreshDynamicStyleAnalysis(analysisSheets, analysisSheetHash);
+    frame.AnalysisSheetHash ^= (uint64_t)ctx.analysisSheets.size() * 0x9e3779b97f4a7c15ULL;
+    if (m_StyleAnalysisGeneration != m_StylesheetContentGeneration || m_StyleAnalysisSheetHash != frame.AnalysisSheetHash)
+        RefreshDynamicStyleAnalysis(ctx.analysisSheets, frame.AnalysisSheetHash);
 
     NotifyFocusChange();
 
@@ -1151,27 +1246,30 @@ void UIManager::Update(float deltaTime, bool interactive)
         ctx.activeTargetForYoga = ActiveTarget();
     }
 
-    const bool needInitialLayoutSolve =
-        viewportChanged ||
-        contentScaleChanged ||
-        relayoutRequestedPre ||
-        anyChildrenDirty ||
-        anyLayoutSignatureChanged ||
-        preSolveChildrenDirty ||
-        preSolveLayoutDirty ||
-        preSolveRelayoutRequested;
+    frame.NeedInitialLayoutSolve =
+        frame.ViewportChanged ||
+        frame.ContentScaleChanged ||
+        frame.RelayoutRequestedPre ||
+        frame.AnyChildrenDirty ||
+        frame.AnyLayoutSignatureChanged ||
+        frame.PreSolveChildrenDirty ||
+        frame.PreSolveLayoutDirty ||
+        frame.PreSolveRelayoutRequested;
 
     {
-        ScopedSectionTimer _tSolve(profEnabled, &prof.SolveAndApplyMs);
-        SolveAndApplyLayout(rootNode, ctx, needInitialLayoutSolve);
+        ScopedSectionTimer _tSolve(frame.ProfEnabled, &frame.Prof.SolveAndApplyMs);
+        SolveAndApplyLayout(frame.RootNode, ctx, frame.NeedInitialLayoutSolve);
     }
 
     // No solve ran, so the pre-solve impact snapshot was not serviced after
     // all — re-raise it for the late-relayout gate (conservative: matches the
     // pre-snapshot behavior for producers that notify without marking dirt).
-    if (!needInitialLayoutSolve && virtImpactPreSolve != 0u)
+    if (!frame.NeedInitialLayoutSolve && virtImpactPreSolve != 0u)
         m_VirtualizationImpactFlags.fetch_or(virtImpactPreSolve, std::memory_order_relaxed);
+}
 
+void UIManager::RefreshFocusOrderAndClips(::UpdateContext& ctx, UpdateFrameState& frame)
+{
     // Shared "nothing to do" signal for focus/indices/clips: when the tree
     // is structurally unchanged since the last build and layout wasn't
     // solved, every derived cache (focus order, per-node index maps, clip
@@ -1179,10 +1277,10 @@ void UIManager::Update(float deltaTime, bool interactive)
     // check is included in the indices/clips gate only — scroll shifts
     // layout rects, which affects clips but not focus order.
     const bool structureUnchangedSinceLastBuild =
-        (ctx.subtreeStructureChanges == structCountBeforeBuild);
+        (ctx.subtreeStructureChanges == frame.StructCountBeforeBuild);
 
     {
-        ScopedSectionTimer _tFocus(profEnabled, &prof.FocusOrderMs);
+        ScopedSectionTimer _tFocus(frame.ProfEnabled, &frame.Prof.FocusOrderMs);
         // Skip focus-order rebuild when the tree is stable. Focus order is
         // derived from (tabIndex, isEnabled, isFocusable, visibility) × node
         // list. None of those change without a style/class/tree mutation
@@ -1197,7 +1295,7 @@ void UIManager::Update(float deltaTime, bool interactive)
         const bool canSkipFocusOrder =
             m_IndicesAndClipsSkipEnabled &&  // reused as master skip knob
             structureUnchangedSinceLastBuild &&
-            !needInitialLayoutSolve &&
+            !frame.NeedInitialLayoutSolve &&
             m_FocusOrderPrimed;
         if (!canSkipFocusOrder)
         {
@@ -1207,48 +1305,33 @@ void UIManager::Update(float deltaTime, bool interactive)
     }
 
     {
-        ScopedSectionTimer _tIndicesAndClips(profEnabled, &prof.IndicesAndClipsMs);
+        ScopedSectionTimer _tIndicesAndClips(frame.ProfEnabled, &frame.Prof.IndicesAndClipsMs);
         ApplyScrollTransforms(ctx);
         // Clamp scroll offsets now that layout has converged and scroll transforms
         // are applied. This is deliberately separated from OnPostLayout (which fires
         // during intermediate convergence passes with potentially transient rects).
         ClampAllScrollOffsets(ctx);
 
-        // Stage 7 step 6.1: clip cache is debug-overlay-only; gate on
-        // debug capture being active. The legacy RebuildNodeIndices /
-        // canSkipMaps gate (Stage 7 step 7.2) is gone — nodeIndexByYG /
-        // nodeIndexByElement / nodesByInstanceId all retired.
+        // The clip cache is read only by the debug capture.
         if (m_DebugCaptureEnabled)
             RebuildClipCaches();
     }
+}
 
-    ProcessHoverChain(ctx);
-
-    ctx.treeGenBeforeEvents = m_TreeStructureGeneration.load(std::memory_order_relaxed);
-    ctx.treeMutatedDuringEvents = false;
-    ctx.treeRebuiltThisFrame = false;
-
-    DispatchEvents(ctx);
-
-    // Focus/active pseudo-state dirty marking is handled inside DispatchEvents.
-    bool& treeMutatedDuringEvents = ctx.treeMutatedDuringEvents;
-    bool& treeRebuiltThisFrame = ctx.treeRebuiltThisFrame;
-    if (dockspaceRebuiltBeforeLayout)
-        treeRebuiltThisFrame = true;
-
+void UIManager::RebuildAfterEventMutations(::UpdateContext& ctx, UpdateFrameState& frame)
+{
     // If the UI tree was mutated during event dispatch, rebuild Yoga/layout
     // from the now-stable tree state so we can still produce geometry for
     // this frame without using stale node pointers.
-    if (treeMutatedDuringEvents)
+    if (ctx.treeMutatedDuringEvents)
     {
-        treeRebuiltThisFrame = true;
+        ctx.treeRebuiltThisFrame = true;
         const bool hadCaptureRebuild = m_MouseCaptured;
         const std::string captureIdRebuild = m_CaptureId;
 
         // Tree mutated during event dispatch. Rebuild the Yoga view of the tree
         // using retained Yoga nodes (no per-frame create/free).
         ResetFlatSheetTable(ctx, *this);
-        // No-op: text measure contexts are pooled (thread-local).
 
         // Safety: hover/capture may reference elements that were replaced.
         m_Hovered = nullptr;
@@ -1263,28 +1346,28 @@ void UIManager::Update(float deltaTime, bool interactive)
         // but event dispatch can introduce layout-affecting changes (display toggles, new nodes,
         // text changes) in the same frame. When we rebuild the Yoga tree here, force the
         // signature/measure path so new retained nodes get correct Yoga styles + measure funcs.
-        computeLayoutSignaturesThisFrame = true;
+        frame.ComputeLayoutSignaturesThisFrame = true;
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.BuildYoga.AfterEventDispatch");
-            ScopedSectionTimer _tBuild(profEnabled, &prof.BuildYogaMs);
-            rootNode = BuildYogaRecursive(rootEl, nullptr, 0, rootSheetSetIdx, ctx, /*shareCtx=*/nullptr).node;
+            ScopedSectionTimer _tBuild(frame.ProfEnabled, &frame.Prof.BuildYogaMs);
+            frame.RootNode = BuildYogaRecursive(frame.RootEl, nullptr, 0, ctx.rootSheetSetIdx, ctx, /*shareCtx=*/nullptr).node;
         }
         RebuildTypedNodeLists(ctx);
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.YogaSolve.Primary");
-            ScopedSectionTimer _tYoga(profEnabled, &prof.YogaMs);
-            YogaAdapter::CalculateLayout(rootNode, (float)ctx.viewportW, (float)ctx.viewportH);
+            ScopedSectionTimer _tYoga(frame.ProfEnabled, &frame.Prof.YogaMs);
+            YogaAdapter::CalculateLayout(frame.RootNode, (float)ctx.viewportW, (float)ctx.viewportH);
         }
-        didSolveLayout = true;
+        frame.DidSolveLayout = true;
 
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.CommitLayoutRects.Primary");
-            CommitLayoutRects(rootEl, /*incremental=*/false);
+            CommitLayoutRects(frame.RootEl, /*incremental=*/false);
         }
 
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.ConvergePostLayout");
-            ConvergePostLayout(rootNode, ctx);
+            ConvergePostLayout(frame.RootNode, ctx);
         }
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.FinalizeSolve");
@@ -1292,158 +1375,126 @@ void UIManager::Update(float deltaTime, bool interactive)
         }
 
         // Rebuild tab focus order and hovered element using the rebuilt tree.
-        {
-            GE_CPU_PROFILE_SCOPE("UIManager.Update.RebuildFocusOrder");
-            m_FocusOrder.clear();
-            struct FocusCandidate
-            {
-                std::string id;
-                int tabIndex;
-                size_t domOrder;
-            };
-            static thread_local std::vector<FocusCandidate> focusCandidatesRebuild;
-            focusCandidatesRebuild.clear();
-            // Tree walk (skipping display:none subtrees) collects focus
-            // candidates in DFS order — domOrder mirrors the legacy
-            // m_Nodes index for stable-sort ties.
-            size_t domOrder = 0;
-            auto walk = [&](auto& self, UIElement* el) -> void {
-                if (!el) return;
-                const ResolvedStyle& rs = el->GetResolvedStyle();
-                if (rs.Layout.DisplayMode == DisplayMode::None)
-                    return;
-                if (!el->IsEnabled())
-                    return;  // disabled: the element and its contents leave the tab order
-                if (rs.Visual.Visible && el->IsFocusable())
-                {
-                    int tabIndex = el->GetTabIndex();
-                    if (tabIndex >= 0)
-                    {
-                        std::string id = el->GetId();
-                        if (id.empty())
-                            id = EnsureElementId(el);
-                        focusCandidatesRebuild.push_back({id, tabIndex, domOrder});
-                    }
-                }
-                ++domOrder;
-                for (const auto& ch : el->GetChildren())
-                    self(self, ch.get());
-                if (el->Kind() == UIElementKind::Mount)
-                    if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                        self(self, tgt);
-            };
-            walk(walk, rootEl);
-            std::stable_sort(focusCandidatesRebuild.begin(), focusCandidatesRebuild.end(), [](const FocusCandidate& a, const FocusCandidate& b)
-                             {
-                                 const auto rankA = (a.tabIndex > 0) ? 0 : 1;
-                                 const auto rankB = (b.tabIndex > 0) ? 0 : 1;
-                                 if (rankA != rankB) return rankA < rankB;
-                                 if (rankA == 0 && a.tabIndex != b.tabIndex) return a.tabIndex < b.tabIndex;
-                                 return a.domOrder < b.domOrder; });
-            for (const auto& c : focusCandidatesRebuild)
-                m_FocusOrder.push_back(c.id);
-        }
+        RebuildTabFocusOrder(frame.RootEl);
 
-        // Stage 7 step 7.2: RebuildNodeIndices retired. The post-rebuild
-        // scope only refreshes scroll transforms + (debug-only) clip cache
-        // now.
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.RebuildIndicesAndClips.Primary");
 
-            // Rebuild per-node parent indices + effective overflow clip for the
-            // rebuilt tree so hit-testing and geometry generation use up-to-date
-            // layout rectangles.
-            // NOTE: Layout rects were just rewritten from Yoga; re-apply scroll
-            // translations before computing overflow clips.
+            // Layout rects were just rewritten from Yoga: re-apply scroll
+            // translations so hit-testing, geometry generation and the
+            // debug clip cache see the scrolled rects.
             ApplyScrollTransforms(ctx);
             ClampAllScrollOffsets(ctx);
             if (m_DebugCaptureEnabled)
                 RebuildClipCaches();
         }
 
-        // Post-rebuild rehover: re-derive m_Hovered from a fresh hit walk
-        // because layout rects (and the elements themselves) may have moved.
-        // requirePointerEvents=false because some callers (legacy splitter
-        // capture restoration, in particular) rely on rehover snapping back
-        // to elements that have pointer-events disabled.
-        UIElement* newHoveredRebuild = IsMousePositionKnown()
-            ? HitTestTree(m_MouseX, m_MouseY, /*requirePointerEvents=*/false)
-            : nullptr;
-        m_Hovered = newHoveredRebuild;
-        m_HoveredInstanceId = newHoveredRebuild ? newHoveredRebuild->GetInstanceId() : 0;
+        RestoreHoverAndCaptureAfterRebuild(frame.RootEl, hadCaptureRebuild, captureIdRebuild);
+        ctx.treeMutatedDuringEvents = false;
+    }
+}
 
-        // Restore capture if the captured element still exists. This prevents
-        // splitter drags from being interrupted by rebuilds (e.g., GridView column changes).
-        if (hadCaptureRebuild && m_MouseDown && !captureIdRebuild.empty())
+// Tab order over the rebuilt tree: positive tab indices first, ascending,
+// then tab index 0; DFS order breaks ties.
+void UIManager::RebuildTabFocusOrder(UIElement* rootEl)
+{
+    GE_CPU_PROFILE_SCOPE("UIManager.Update.RebuildFocusOrder");
+    m_FocusOrder.clear();
+    static thread_local std::vector<TabFocusCandidate> focusCandidatesRebuild;
+    focusCandidatesRebuild.clear();
+    // Tree walk (skipping display:none subtrees) collects focus
+    // candidates in DFS order; domOrder is the DFS index, used for
+    // stable-sort ties.
+    size_t domOrder = 0;
+    CollectTabFocusCandidates(rootEl, focusCandidatesRebuild, domOrder);
+    std::stable_sort(focusCandidatesRebuild.begin(), focusCandidatesRebuild.end(),
+                     [](const TabFocusCandidate& a, const TabFocusCandidate& b)
+                     {
+                         const auto rankA = (a.TabIndex > 0) ? 0 : 1;
+                         const auto rankB = (b.TabIndex > 0) ? 0 : 1;
+                         if (rankA != rankB) return rankA < rankB;
+                         if (rankA == 0 && a.TabIndex != b.TabIndex) return a.TabIndex < b.TabIndex;
+                         return a.DomOrder < b.DomOrder;
+                     });
+    for (const auto& c : focusCandidatesRebuild)
+        m_FocusOrder.push_back(c.Id);
+}
+
+// Tree walk (skipping display:none subtrees and disabled elements with their
+// contents) collecting visible, focusable elements with tabIndex >= 0.
+void UIManager::CollectTabFocusCandidates(UIElement* el, std::vector<TabFocusCandidate>& out, size_t& domOrder)
+{
+    if (!el) return;
+    const ResolvedStyle& rs = el->GetResolvedStyle();
+    if (rs.Layout.DisplayMode == DisplayMode::None)
+        return;
+    if (!el->IsEnabled())
+        return;  // disabled: the element and its contents leave the tab order
+    if (rs.Visual.Visible && el->IsFocusable())
+    {
+        int tabIndex = el->GetTabIndex();
+        if (tabIndex >= 0)
         {
-            UIElement* restored = nullptr;
-            auto findById = [&](auto& self, UIElement* el) -> void {
-                if (!el || restored) return;
-                if (el->GetId() == captureIdRebuild)
-                {
-                    restored = el;
-                    return;
-                }
-                for (const auto& ch : el->GetChildren())
-                    self(self, ch.get());
-                if (el->Kind() == UIElementKind::Mount)
-                    if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                        self(self, tgt);
-            };
-            findById(findById, rootEl);
-            if (restored)
-            {
-                m_MouseCaptured = true;
-                m_CaptureElement = restored;
-                m_CaptureInstanceId = restored ? restored->GetInstanceId() : 0;
-                m_CaptureId = captureIdRebuild;
-            }
-            else
-            {
-                m_MouseCaptured = false;
-                m_CaptureElement = nullptr;
-                m_CaptureInstanceId = 0;
-                m_CaptureId.clear();
-            }
+            std::string id = el->GetId();
+            if (id.empty())
+                id = EnsureElementId(el);
+            out.push_back({id, tabIndex, domOrder});
+        }
+    }
+    ++domOrder;
+    el->ForEachLogicalChild([&](UIElement* child) { CollectTabFocusCandidates(child, out, domOrder); });
+}
+
+void UIManager::RestoreHoverAndCaptureAfterRebuild(UIElement* rootEl, bool hadCaptureRebuild,
+                                                   const std::string& captureIdRebuild)
+{
+    // Post-rebuild rehover: re-derive m_Hovered from a fresh hit walk
+    // because layout rects (and the elements themselves) may have moved.
+    // requirePointerEvents=false because some callers (legacy splitter
+    // capture restoration, in particular) rely on rehover snapping back
+    // to elements that have pointer-events disabled.
+    UIElement* newHoveredRebuild = IsMousePositionKnown()
+        ? HitTestTree(m_MouseX, m_MouseY, /*requirePointerEvents=*/false)
+        : nullptr;
+    m_Hovered = newHoveredRebuild;
+    m_HoveredInstanceId = newHoveredRebuild ? newHoveredRebuild->GetInstanceId() : 0;
+
+    // Restore capture if the captured element still exists. This prevents
+    // splitter drags from being interrupted by rebuilds (e.g., GridView column changes).
+    if (hadCaptureRebuild && m_MouseDown && !captureIdRebuild.empty())
+    {
+        UIElement* restored = nullptr;
+        FindLogicalDescendantById(rootEl, captureIdRebuild, restored);
+        if (restored)
+        {
+            m_MouseCaptured = true;
+            m_CaptureElement = restored;
+            m_CaptureInstanceId = restored ? restored->GetInstanceId() : 0;
+            m_CaptureId = captureIdRebuild;
         }
         else
         {
-            // If we cannot restore safely, clear capture state.
-            if (!hadCaptureRebuild)
-                m_CaptureId.clear();
+            m_MouseCaptured = false;
+            m_CaptureElement = nullptr;
+            m_CaptureInstanceId = 0;
+            m_CaptureId.clear();
         }
-        treeMutatedDuringEvents = false;
     }
-
-    // Check for control-issued dockspace rebuild requests via tree walk.
-    if (runInteractive && !m_RebuildDockspace)
+    else
     {
-        auto findDs = [&](auto& self, UIElement* el) -> void {
-            if (!el || m_RebuildDockspace) return;
-            if (auto* ds = dynamic_cast<DockspaceElement*>(el))
-            {
-                if (ds->ConsumeRebuildRequest())
-                {
-                    m_PendingDockspaceRebuild = ds;
-                    m_RebuildDockspace = true;
-                    return;
-                }
-            }
-            for (const auto& ch : el->GetChildren())
-                self(self, ch.get());
-            if (el->Kind() == UIElementKind::Mount)
-                if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                    self(self, tgt);
-        };
-        findDs(findDs, rootEl);
+        // If we cannot restore safely, clear capture state.
+        if (!hadCaptureRebuild)
+            m_CaptureId.clear();
     }
+}
 
+void UIManager::SettleAfterEvents(::UpdateContext& ctx, UpdateFrameState& frame)
+{
     // Scrollbar drags / scroll-wheel handlers can mutate scroll offsets during
     // event dispatch without requesting a Yoga relayout. Apply any remaining
     // scroll deltas now (and refresh overflow clip caches) so geometry built
     // this frame matches the scrolled layout.
-    bool scrollTranslatedAfterEvents = ApplyScrollTransforms(ctx);
-    if (scrollTranslatedAfterEvents)
+    if (ApplyScrollTransforms(ctx))
     {
         ClampAllScrollOffsets(ctx);
         if (m_DebugCaptureEnabled)
@@ -1458,10 +1509,7 @@ void UIManager::Update(float deltaTime, bool interactive)
     // Drain virtualization work requested by scroll callbacks (or other sources) at a stable point
     // outside event dispatch. This keeps the scheduling logic centralized and prepares us to
     // move virtualization earlier in the frame (pre-Yoga) without changing individual controls.
-    bool anyVirtualizationRan = false;
-    // Bounded draining: a virtualization pass may enqueue follow-up work (e.g. data+scroll changes).
-    constexpr int kMaxVirtualizationDrainIterations = 4;
-    anyVirtualizationRan = drainVirtualizationQueueBounded(kMaxVirtualizationDrainIterations);
+    DrainVirtualizationQueueBounded(kMaxVirtualizationDrainIterations);
 
     // Flushing callbacks may clamp scroll offsets (via SetContentSize/SetViewportSize), which can
     // require an additional translation pass. Apply any resulting deltas and refresh clip caches.
@@ -1472,79 +1520,36 @@ void UIManager::Update(float deltaTime, bool interactive)
         {
             if (m_DebugCaptureEnabled)
                 RebuildClipCaches();
-            scrollTranslatedAfterEvents = true;
         }
     }
 
     // Virtualized controls can expand their pools during scroll callbacks (e.g., first scroll
-    // after mount or when the viewport height changes). Those mutations happen after the
-    // per-frame 'nodes' traversal was built. Detect that here so we can rebuild the retained
+    // after mount or when the viewport height changes). Those mutations happen after this
+    // frame's Yoga tree was built. Detect that here so we can rebuild the retained
     // Yoga/tree view and avoid a 1-frame "blank until mouse move" artifact.
-    if (!treeMutatedDuringEvents) { if (m_TreeStructureGeneration.load(std::memory_order_relaxed) != ctx.treeGenBeforeEvents) treeMutatedDuringEvents = true; }
+    if (!ctx.treeMutatedDuringEvents) { if (m_TreeStructureGeneration.load(std::memory_order_relaxed) != ctx.treeGenBeforeEvents) ctx.treeMutatedDuringEvents = true; }
 
     FinalizeSolve(ctx);
 
-    // Dockspace rebuild requested during event dispatch: perform it now, before
-    // the late dirty-flag scan, so the re-solve below gives new elements valid
+    // Dockspace rebuilds requested during event dispatch run now, before the
+    // late dirty-flag scan, so the re-solve below gives new elements valid
     // layout rects in this same frame (avoiding a black-frame flash).
-    if (runInteractive && m_RebuildDockspace && m_PendingDockspaceRebuild)
-    {
-        auto invalidateRenderSlots = [&](auto& self, UIElement* el) -> void {
-            if (!el)
-                return;
-            FreeRenderSlots(el);
-            el->m_LastPrimitiveGenFrame = 0;
-            for (const auto& child : el->GetChildren())
-                self(self, child.get());
-            if (UIElement* target = el->GetMountTarget())
-                self(self, target);
-        };
+    if (frame.RunInteractive && RebuildPendingDockspaces())
+        ctx.treeRebuiltThisFrame = true;
+}
 
-        invalidateRenderSlots(invalidateRenderSlots, m_PendingDockspaceRebuild);
-        ResetRetainedYogaTree();
-        m_PendingDockspaceRebuild->RebuildFromModel();
-        InvalidateSheetSetSubtree(m_PendingDockspaceRebuild);
-        invalidateRenderSlots(invalidateRenderSlots, m_PendingDockspaceRebuild);
-        RequestRelayout();
-        treeRebuiltThisFrame = true;
-        m_PendingDockspaceRebuild = nullptr;
-        m_RebuildDockspace = false;
-        m_Hovered = nullptr;
-        m_HoveredInstanceId = 0;
-        m_MouseCaptured = false;
-        m_CaptureElement = nullptr;
-        m_CaptureInstanceId = 0;
-        m_CaptureId.clear();
-    }
-
+void UIManager::RunLateRelayout(::UpdateContext& ctx, UpdateFrameState& frame)
+{
     // Late tree mutations / relayout requests:
     // Virtualized controls may attach/detach pooled children or mutate text (layout) during the
     // deferred scroll-changed callback phase (after the initial Yoga build/solve). Those dirty marks
     // happen *during* this heavy pass (m_DirtyHintFlags was cleared), so we must explicitly detect
     // them and rebuild Yoga/layout now to avoid 1+ frame lag and "snap" artifacts.
-    bool lateChildrenDirty = false;
-    bool lateLayoutDirty = false;
-    bool lateStyleDirty = false;
-    {
-        auto probe = [&](auto& self, UIElement* el) -> void {
-            if (!el) return;
-            if (lateChildrenDirty && lateLayoutDirty && lateStyleDirty) return;
-            if (el->IsDirty(UIElement::ChildrenDirty))
-                lateChildrenDirty = true;
-            if (el->IsDirty(UIElement::LayoutDirty))
-                lateLayoutDirty = true;
-            if (el->IsDirty(UIElement::StyleDirty))
-                lateStyleDirty = true;
-            if (!el->IsDirty(UIElement::SubtreeDirty))
-                return;
-            for (const auto& ch : el->GetChildren())
-                self(self, ch.get());
-            if (el->Kind() == UIElementKind::Mount)
-                if (UIElement* tgt = static_cast<Mount*>(el)->GetTarget())
-                    self(self, tgt);
-        };
-        probe(probe, rootEl);
-    }
+    DirtyProbeResult late;
+    ProbeLayoutDirtyFlags(frame.RootEl, /*trackStyle=*/true, late);
+    const bool lateChildrenDirty = late.Children;
+    const bool lateLayoutDirty = late.Layout;
+    const bool lateStyleDirty = late.Style;
     const bool relayoutRequestedLate = ConsumeRelayoutRequest();
     const uint32_t virtualizationImpactThisFrame = m_VirtualizationImpactFlags.exchange(0u, std::memory_order_relaxed);
     const bool virtualizationLayoutAffectingLate =
@@ -1562,53 +1567,53 @@ void UIManager::Update(float deltaTime, bool interactive)
     const bool layoutAffectingLate =
         lateChildrenDirty || lateLayoutDirty ||
         relayoutRequestedLate || virtualizationLayoutAffectingLate;
-    if (profEnabled)
+    if (frame.ProfEnabled)
     {
-        if (lateChildrenDirty)               prof.LateRelayoutReasons |= 1u;
-        if (lateLayoutDirty)                 prof.LateRelayoutReasons |= 2u;
-        if (lateStyleDirty)                  prof.LateRelayoutReasons |= 4u;
-        if (relayoutRequestedLate)           prof.LateRelayoutReasons |= 8u;
-        if (virtualizationLayoutAffectingLate) prof.LateRelayoutReasons |= 16u;
+        if (lateChildrenDirty)               frame.Prof.LateRelayoutReasons |= 1u;
+        if (lateLayoutDirty)                 frame.Prof.LateRelayoutReasons |= 2u;
+        if (lateStyleDirty)                  frame.Prof.LateRelayoutReasons |= 4u;
+        if (relayoutRequestedLate)           frame.Prof.LateRelayoutReasons |= 8u;
+        if (virtualizationLayoutAffectingLate) frame.Prof.LateRelayoutReasons |= 16u;
     }
     if (layoutAffectingLate)
     {
-        if (profEnabled)
-            ++prof.LateRelayoutCount;
+        if (frame.ProfEnabled)
+            ++frame.Prof.LateRelayoutCount;
 
-        rebuildLateRelayoutFired = true;
-        if (lateChildrenDirty)               rebuildLateRelayoutReasons |= 1u;
-        if (lateLayoutDirty)                 rebuildLateRelayoutReasons |= 2u;
-        if (relayoutRequestedLate)           rebuildLateRelayoutReasons |= 8u;
-        if (virtualizationLayoutAffectingLate) rebuildLateRelayoutReasons |= 16u;
+        frame.RebuildLateRelayoutFired = true;
+        if (lateChildrenDirty)               frame.RebuildLateRelayoutReasons |= 1u;
+        if (lateLayoutDirty)                 frame.RebuildLateRelayoutReasons |= 2u;
+        if (relayoutRequestedLate)           frame.RebuildLateRelayoutReasons |= 8u;
+        if (virtualizationLayoutAffectingLate) frame.RebuildLateRelayoutReasons |= 16u;
 
         // Ensure layout signatures and intrinsic measurement contexts are refreshed for the
         // now-dirty nodes (e.g. Label text changes update Yoga measure contexts).
-        computeLayoutSignaturesThisFrame = true;
+        frame.ComputeLayoutSignaturesThisFrame = true;
 
         ResetFlatSheetTable(ctx, *this);
 
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.BuildYoga.LateRelayout");
-            ScopedSectionTimer _tBuild2(profEnabled, &prof.BuildYogaMs);
-            ScopedSectionTimer _tBuildLate(profEnabled, &prof.LateRelayoutBuildYogaMs);
+            ScopedSectionTimer _tBuild2(frame.ProfEnabled, &frame.Prof.BuildYogaMs);
+            ScopedSectionTimer _tBuildLate(frame.ProfEnabled, &frame.Prof.LateRelayoutBuildYogaMs);
             const auto tStart = ProfClock::now();
-            rootNode = BuildYogaRecursive(rootEl, nullptr, 0, rootSheetSetIdx, ctx, /*shareCtx=*/nullptr).node;
-            rebuildLateRelayoutMs = std::chrono::duration<double, std::milli>(ProfClock::now() - tStart).count();
+            frame.RootNode = BuildYogaRecursive(frame.RootEl, nullptr, 0, ctx.rootSheetSetIdx, ctx, /*shareCtx=*/nullptr).node;
+            frame.RebuildLateRelayoutMs = std::chrono::duration<double, std::milli>(ProfClock::now() - tStart).count();
         }
         RebuildTypedNodeLists(ctx);
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.YogaSolve.LateRelayout");
-            ScopedSectionTimer _tYoga2(profEnabled, &prof.YogaMs);
-            ScopedSectionTimer _tYogaLate(profEnabled, &prof.LateRelayoutYogaMs);
-            YogaAdapter::CalculateLayout(rootNode, (float)ctx.viewportW, (float)ctx.viewportH);
+            ScopedSectionTimer _tYoga2(frame.ProfEnabled, &frame.Prof.YogaMs);
+            ScopedSectionTimer _tYogaLate(frame.ProfEnabled, &frame.Prof.LateRelayoutYogaMs);
+            YogaAdapter::CalculateLayout(frame.RootNode, (float)ctx.viewportW, (float)ctx.viewportH);
         }
-        didSolveLayout = true;
-        CommitLayoutRects(rootEl, /*incremental=*/false);
+        frame.DidSolveLayout = true;
+        CommitLayoutRects(frame.RootEl, /*incremental=*/false);
 
         // Converge after relayout so scrollbars, popups, etc. settle in this frame.
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.ConvergePostLayout");
-            ConvergePostLayout(rootNode, ctx);
+            ConvergePostLayout(frame.RootNode, ctx);
         }
 
         // Layout may have changed (or even rebuilt). Refresh parent/clip caches so
@@ -1620,8 +1625,10 @@ void UIManager::Update(float deltaTime, bool interactive)
 
         // Relayout may clamp scroll offsets; flush any resulting scroll callbacks and re-apply.
         bool anyScrollCallbacksFlushed2 = FlushScrollCallbacks(ctx);
-        // Drain virtualization work enqueued during the relayout scroll flush.
-        anyVirtualizationRan = anyVirtualizationRan || drainVirtualizationQueueBounded(kMaxVirtualizationDrainIterations);
+        // Drain virtualization work the relayout enqueued (OnPostLayout viewport changes, the
+        // scroll flush above). This runs even when the SettleAfterEvents drain already ran work
+        // this frame; skipping it would leave those rows unbound until the next frame.
+        DrainVirtualizationQueueBounded(kMaxVirtualizationDrainIterations);
         if (anyScrollCallbacksFlushed2)
         {
             const bool translated3 = ApplyScrollTransforms(ctx);
@@ -1630,36 +1637,21 @@ void UIManager::Update(float deltaTime, bool interactive)
                 ClampAllScrollOffsets(ctx);
                 if (m_DebugCaptureEnabled)
                     RebuildClipCaches();
-                scrollTranslatedAfterEvents = true;
             }
         }
 
         FinalizeSolve(ctx);
     }
+}
 
-    // Retire the transition signal only on a pass that actually serviced it.
-    // Dispatch itself already happened at the callback and can never be eaten
-    // here, but the follow-up work this flag asks for — hover re-evaluation and
-    // the :active re-cascade — is interactive-only, so clearing it on a passive
-    // pass would drop a pressed style on the floor.
-    if (interactive)
-        m_ButtonEdgeSinceLastUpdate = false;
-
-    // Stage 7 step 8: retained Yoga nodes are now owned per-UIElement via
-    // m_YogaState; their YGNodes get destroyed automatically when the
-    // owning element destructs (e.g. on RemoveChild / TakeChild / scene
-    // teardown). No side-table sweep is needed.
-
-    if (debugCaptureActive)
-        EmitDebugCapture();
-
-
-    // Optional spike logger (GE_UI_SPIKE_LOG_MS). We log *after* all dirty/clear steps so we can
-    // include both the observed dirty flags and which expensive sub-stages ran.
-    if (spikeLogEnabled)
+// Optional spike logger (GE_UI_SPIKE_LOG_MS). We log *after* all dirty/clear steps so we can
+// include both the observed dirty flags and which expensive sub-stages ran.
+void UIManager::LogUpdateSpike(const ::UpdateContext& ctx, const UpdateFrameState& frame)
+{
+    if (frame.SpikeLogEnabled)
     {
-        const double totalMs = std::chrono::duration<double, std::milli>(ProfClock::now() - totalStart).count();
-        if (totalMs >= s_UiSpikeLogThresholdMs)
+        const double totalMs = std::chrono::duration<double, std::milli>(ProfClock::now() - frame.TotalStart).count();
+        if (totalMs >= frame.SpikeLogThresholdMs)
         {
             static ProfClock::time_point s_LastSpikeLog{};
             const auto now = ProfClock::now();
@@ -1673,55 +1665,54 @@ void UIManager::Update(float deltaTime, bool interactive)
                 std::snprintf(
                     line,
                     sizeof(line),
-                    "[UI Spike] total=%.2fms elems=%u dirtyPrev=0x%X dirtyNow=0x%X anyInput=%d viewportChanged=%d relayoutReq=%d layoutSigPass=%d layoutSigChanged=%d childrenDirty=%d didSolveLayout=%d treeChanged=%d hover(layout/paint/desc/sib)=%d/%d/%d/%d usesSib=%d dirtySeen(style/layout/visual/children)=%u/%u/%u/%u textMeasureNodes=%u",
+                    "[UI Spike] total=%.2fms elems=%u dirtyPrev=0x%X dirtyNow=0x%X anyInput=%d viewportChanged=%d relayoutReq=%d layoutSigPass=%d layoutSigChanged=%d childrenDirty=%d didSolveLayout=%d treeChanged=%d hover(layout/paint/desc/sib)=%d/%d/%d/%d usesSib=%d dirtySeen(style/layout/visual/children)=%u/%u/%u/%u",
                     totalMs,
-                    (unsigned)CountTreeElements(rootEl),
-                    (unsigned)dirtyPrev,
-                    (unsigned)dirtyNow,
-                    anyInput ? 1 : 0,
-                    viewportChanged ? 1 : 0,
-                    relayoutRequestedPre ? 1 : 0,
-                    computeLayoutSignaturesThisFrame ? 1 : 0,
-                    anyLayoutSignatureChanged ? 1 : 0,
-                    anyChildrenDirty ? 1 : 0,
-                    didSolveLayout ? 1 : 0,
-                    treeRebuiltThisFrame ? 1 : 0,
+                    (unsigned)CountTreeElements(frame.RootEl),
+                    (unsigned)frame.DirtyPrev,
+                    (unsigned)frame.DirtyNow,
+                    frame.AnyInput ? 1 : 0,
+                    frame.ViewportChanged ? 1 : 0,
+                    frame.RelayoutRequestedPre ? 1 : 0,
+                    frame.ComputeLayoutSignaturesThisFrame ? 1 : 0,
+                    frame.AnyLayoutSignatureChanged ? 1 : 0,
+                    frame.AnyChildrenDirty ? 1 : 0,
+                    frame.DidSolveLayout ? 1 : 0,
+                    ctx.treeRebuiltThisFrame ? 1 : 0,
                     (m_StyleAnalysis.Hover.AffectsLayout ? 1 : 0),
                     (m_StyleAnalysis.Hover.AffectsPaint ? 1 : 0),
                     (m_StyleAnalysis.Hover.MayAffectDescendants ? 1 : 0),
                     (m_StyleAnalysis.Hover.MayAffectSiblings ? 1 : 0),
                     (m_StyleAnalysis.UsesSiblingCombinators ? 1 : 0),
-                    (unsigned)dirtyStyleSeen,
-                    (unsigned)dirtyLayoutSeen,
-                    (unsigned)dirtyVisualSeen,
-                    (unsigned)dirtyChildrenSeen,
-                    (unsigned)ctx.textMeasureCtxUsed);
+                    (unsigned)frame.DirtyStyleSeen,
+                    (unsigned)frame.DirtyLayoutSeen,
+                    (unsigned)frame.DirtyVisualSeen,
+                    (unsigned)frame.DirtyChildrenSeen);
                 Logger::Log::Warning("{}", line);
 
                 // Second line: redundant-BuildYoga attribution. Emitted only when a
                 // post-initial rebuild fired so we know which mutation source caused it.
-                if (rebuildAfterPreSolveFired || rebuildLateRelayoutFired)
+                if (frame.RebuildAfterPreSolveFired || frame.RebuildLateRelayoutFired)
                 {
                     char rebuildLine[512];
                     std::snprintf(
                         rebuildLine,
                         sizeof(rebuildLine),
                         "[UI Rebuild] initial=%.2fms preSolve(flush=%.2fms virt=%.2fms) afterPreSolve=%.2fms(fired=%d byFlush=%d byVirt=%d) lateRelayout=%.2fms(fired=%d reasons=0x%X ch=%d lay=%d sty=%d req=%d virt=%d)",
-                        rebuildInitialMs,
-                        preSolveFlushCallbacksMs,
-                        preSolveVirtualizationMs,
-                        rebuildAfterPreSolveMs,
-                        rebuildAfterPreSolveFired ? 1 : 0,
-                        rebuildAfterPreSolveByFlush ? 1 : 0,
-                        rebuildAfterPreSolveByVirt ? 1 : 0,
-                        rebuildLateRelayoutMs,
-                        rebuildLateRelayoutFired ? 1 : 0,
-                        rebuildLateRelayoutReasons,
-                        (rebuildLateRelayoutReasons & 1u) ? 1 : 0,
-                        (rebuildLateRelayoutReasons & 2u) ? 1 : 0,
-                        (rebuildLateRelayoutReasons & 4u) ? 1 : 0,
-                        (rebuildLateRelayoutReasons & 8u) ? 1 : 0,
-                        (rebuildLateRelayoutReasons & 16u) ? 1 : 0);
+                        frame.RebuildInitialMs,
+                        frame.PreSolveFlushCallbacksMs,
+                        frame.PreSolveVirtualizationMs,
+                        frame.RebuildAfterPreSolveMs,
+                        frame.RebuildAfterPreSolveFired ? 1 : 0,
+                        frame.RebuildAfterPreSolveByFlush ? 1 : 0,
+                        frame.RebuildAfterPreSolveByVirt ? 1 : 0,
+                        frame.RebuildLateRelayoutMs,
+                        frame.RebuildLateRelayoutFired ? 1 : 0,
+                        frame.RebuildLateRelayoutReasons,
+                        (frame.RebuildLateRelayoutReasons & 1u) ? 1 : 0,
+                        (frame.RebuildLateRelayoutReasons & 2u) ? 1 : 0,
+                        (frame.RebuildLateRelayoutReasons & 4u) ? 1 : 0,
+                        (frame.RebuildLateRelayoutReasons & 8u) ? 1 : 0,
+                        (frame.RebuildLateRelayoutReasons & 16u) ? 1 : 0);
                     Logger::Log::Warning("{}", rebuildLine);
                 }
 
@@ -1729,10 +1720,13 @@ void UIManager::Update(float deltaTime, bool interactive)
             }
         }
     }
+}
 
+void UIManager::FinishUpdateProfiling(UpdateFrameState& frame)
+{
     // Finalize update profiling (optional, enabled via F9/F10).
-    PublishUpdateProfile(prof, profEnabled, totalStart);
-    if (profEnabled)
+    PublishUpdateProfile(frame.Prof, frame.ProfEnabled, frame.TotalStart);
+    if (frame.ProfEnabled)
     {
 
         if (m_UpdateProfilingDumpRequested)
@@ -1780,10 +1774,13 @@ void UIManager::Update(float deltaTime, bool interactive)
         // Clear stale dump requests when profiling is disabled.
         m_UpdateProfilingDumpRequested = false;
     }
+}
 
-    // Correctness mode asserts: after Update completes, there should be no remaining
-    // topology/layout dirties on live elements. If there are, something mutated at an
-    // unsafe time or failed to converge within this frame.
+// Correctness mode asserts: after Update completes, there should be no remaining
+// topology/layout dirties on live elements. If there are, something mutated at an
+// unsafe time or failed to converge within this frame.
+void UIManager::ReportUnconvergedDirtyFlags()
+{
     if (m_CorrectnessModeEnabled && m_CorrectnessModeAssertsEnabled)
     {
         uint32_t layoutDirtyCount = 0;
@@ -1803,12 +1800,7 @@ void UIManager::Update(float deltaTime, bool interactive)
                     ++layoutDirtyCount;
                 if (el->IsDirty(UIElement::ChildrenDirty))
                     ++childrenDirtyCount;
-                for (const auto& ch : el->GetChildren())
-                    if (ch)
-                        stack.push_back(ch.get());
-                if (auto* m = dynamic_cast<Mount*>(el))
-                    if (UIElement* tgt = m->GetTarget())
-                        stack.push_back(tgt);
+                el->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
             }
         }
         if (layoutDirtyCount || childrenDirtyCount)
@@ -1820,34 +1812,16 @@ void UIManager::Update(float deltaTime, bool interactive)
                 childrenDirtyCount);
         }
     }
+}
 
-
-    // Update cursor based on hovered element's computed style.
-    // We check cursor style each frame and invoke the callback when it changes.
-    // Populate ResolvedStyle on each element from the style cascade.
-    // This runs after all layout and geometry so the resolved style is
-    // guaranteed to be set on every element.
-    // A heavy pass rebuilt styles above (cascade/overrides), so the resolve
-    // walk must run regardless of when the last dirty mark landed. Setting
-    // the flag keeps heavy-frame behavior identical to the ungated path;
-    // ResolveStyles consumes it, so the render-side call becomes a no-op
-    // unless something (e.g. TransitionEngine below) dirties styles again.
-    m_ResolvedStylesDirty.store(true, std::memory_order_relaxed);
-    ResolveStyles();
-
-    if (!m_TransitionEngine)
-        m_TransitionEngine = std::make_unique<TransitionEngine>();
-    {
-        ScopedSectionTimer _tTransitions(profEnabled, &prof.TransitionMs);
-        m_TransitionEngine->Advance(m_Root.get(), m_TransitioningElements, m_Time);
-    }
-
-    // Transition interpolation runs after the cascade so it can compare the
-    // previous and current CSS targets. Paint properties can be consumed
-    // directly by rendering, but layout properties must also be copied into
-    // Yoga and solved before committed geometry reflects the interpolated
-    // value. Without this pass, `top`, width, padding, etc. snap to the CSS
-    // target while only ResolvedStyle contains the animation in between.
+// Transition interpolation runs after the cascade so it can compare the
+// previous and current CSS targets. Paint properties can be consumed
+// directly by rendering, but layout properties must also be copied into
+// Yoga and solved before committed geometry reflects the interpolated
+// value. Without this pass, `top`, width, padding, etc. snap to the CSS
+// target while only ResolvedStyle contains the animation in between.
+void UIManager::ApplyLayoutTransitions(::UpdateContext& ctx, UpdateFrameState& frame)
+{
     const auto& activeLayoutTransitionElements =
         m_TransitionEngine->GetActiveLayoutElements();
     if (!activeLayoutTransitionElements.empty())
@@ -1868,23 +1842,25 @@ void UIManager::Update(float deltaTime, bool interactive)
             retained.HasPrevInputs = true;
             YogaAdapter::ApplyStyle(retained.Node, element->GetResolvedStyle());
             ApplyBlockFlowShrinkDefault(retained.Node, element->GetResolvedStyle(), parentStyle);
-            ApplyWeightedPaneFlexGrowOverride(element, retained.Node);
         }
 
         {
             GE_CPU_PROFILE_SCOPE("UIManager.Update.YogaSolve.LayoutTransitions");
-            ScopedSectionTimer _tYoga(profEnabled, &prof.YogaMs);
-            YogaAdapter::CalculateLayout(rootNode, (float)ctx.viewportW, (float)ctx.viewportH);
+            ScopedSectionTimer _tYoga(frame.ProfEnabled, &frame.Prof.YogaMs);
+            YogaAdapter::CalculateLayout(frame.RootNode, (float)ctx.viewportW, (float)ctx.viewportH);
         }
-        didSolveLayout = true;
-        CommitLayoutRects(rootEl, /*incremental=*/false);
+        frame.DidSolveLayout = true;
+        CommitLayoutRects(frame.RootEl, /*incremental=*/false);
         FinalizeSolve(ctx);
         ApplyScrollTransforms(ctx);
         ClampAllScrollOffsets(ctx);
         if (m_DebugCaptureEnabled)
             RebuildClipCaches();
     }
+}
 
+void UIManager::DispatchCompletedTransitions()
+{
     for (const auto& ct : m_TransitionEngine->GetCompletedTransitions())
     {
         UIEvent e{};
@@ -1894,34 +1870,31 @@ void UIManager::Update(float deltaTime, bool interactive)
         e.TransitionProperty = ct.Property;
         ct.Element->DispatchEvent(e);
     }
+}
 
-    UpdateTooltipAndCursor(runInteractive);
-
-    // Block E (E0/E1): mutation paths that bypass MarkDirty get mirrored
-    // into the regen flag here so the render side always sees a correct
-    // signal.
+void UIManager::MarkPrimitiveRegenCauses(const ::UpdateContext& ctx, const UpdateFrameState& frame)
+{
+    // Mutation paths that bypass MarkDirty get mirrored into the regen flag
+    // here so the render side always sees a correct signal.
     //
-    // didSolveLayout is intentionally NOT in this set (E1 step 3): the
-    // Yoga commit walk in SolveAndApplyLayout already pushed elements
+    // didSolveLayout is intentionally NOT in this set: the Yoga commit
+    // walk in SolveAndApplyLayout already pushed elements
     // whose rect actually changed onto m_PrimitiveDataDirty, and set
     // m_PrimitivesNeedRegen itself only for newly-visible elements that
     // need full DFS to allocate their slot range.
-    if (treeRebuiltThisFrame)        MarkPrimitivesNeedRegen(0x2u);
-    if (forceGlobalStyle)            MarkPrimitivesNeedRegen(0x4u);
-    if (viewportChanged)             MarkPrimitivesNeedRegen(0x8u);
-    if (relayoutRequestedPre)        MarkPrimitivesNeedRegen(0x10u);
+    if (ctx.treeRebuiltThisFrame)        MarkPrimitivesNeedRegen(0x2u);
+    if (frame.ForceGlobalStyle)            MarkPrimitivesNeedRegen(0x4u);
+    if (frame.ViewportChanged)             MarkPrimitivesNeedRegen(0x8u);
+    if (frame.RelayoutRequestedPre)        MarkPrimitivesNeedRegen(0x10u);
     // Scroll translation is drain-only: ApplyScrollTransforms queues the
     // translated subtree and the drain re-emits it at the patched rects.
     if (m_TransitionEngine && m_TransitionEngine->HasActiveTransitions())
         MarkPrimitivesNeedRegen(0x40u);
-
-#else
-    (void)interactive;
-#endif
 }
+#endif
 
 // ---------------------------------------------------------------------------
-// PumpVirtualizedControlChanges: C-8 per-frame provider change pump. For each
+// PumpVirtualizedControlChanges: per-frame provider change pump. For each
 // attached virtualized control, compare its provider's change version to the
 // value last seen by the pump; on movement, enqueue the control's DataChanged
 // coordinator work (the same work its scroll path uses). This is what turns a
@@ -1983,7 +1956,7 @@ bool UIManager::TryIdleFrame(unsigned dirtyNow, bool viewportOrScaleChanged, boo
     if (dirtyNow != 0u)
         return false;
     m_IdleGateDecline = IdleGateDecline::RelayoutOrRebuild;
-    if (m_RequestRelayout || m_ForceFullRebuildNextFrame || m_RebuildDockspace)
+    if (m_RequestRelayout || m_ForceFullRebuildNextFrame)
         return false;
     m_IdleGateDecline = IdleGateDecline::Virtualization;
     if (m_VirtualizationImpactFlags.load(std::memory_order_relaxed) != 0u)
@@ -2147,4 +2120,62 @@ void UIManager::DismissActiveTooltip()
 {
     if (m_TooltipOverlay)
         m_TooltipOverlay->Hide();
+}
+
+void UIManager::RequestDockspaceRebuild(DockspaceElement* dockspace)
+{
+    if (dockspace && std::find(m_PendingDockspaceRebuilds.begin(), m_PendingDockspaceRebuilds.end(), dockspace) ==
+                         m_PendingDockspaceRebuilds.end())
+        m_PendingDockspaceRebuilds.push_back(dockspace);
+}
+
+void UIManager::CancelDockspaceRebuild(DockspaceElement* dockspace)
+{
+    std::erase(m_PendingDockspaceRebuilds, dockspace);
+}
+
+bool UIManager::RebuildPendingDockspaces()
+{
+    // A rebuild can queue another request (for itself or a nested dockspace);
+    // bounding the pass to the requests present now defers those to next frame.
+    bool rebuiltAny = false;
+    for (size_t remaining = m_PendingDockspaceRebuilds.size(); remaining > 0 && !m_PendingDockspaceRebuilds.empty();
+         --remaining)
+    {
+        DockspaceElement* dockspace = m_PendingDockspaceRebuilds.front();
+        m_PendingDockspaceRebuilds.erase(m_PendingDockspaceRebuilds.begin());
+        if (!dockspace->ConsumeRebuildRequest())
+            continue;
+
+        GE_CPU_PROFILE_SCOPE("UIManager.Update.DockspaceRebuild");
+        InvalidateDockspaceRenderState(dockspace);
+        // Rebuilding destroys and recreates large portions of the tree; drop
+        // retained Yoga nodes first so none keeps a stale UIElement* key.
+        ResetRetainedYogaTree();
+        dockspace->RebuildFromModel();
+        InvalidateSheetSetSubtree(dockspace);
+        InvalidateDockspaceRenderState(dockspace);
+        rebuiltAny = true;
+    }
+    if (!rebuiltAny)
+        return false;
+
+    RequestRelayout();
+    // Input state may reference elements in the rebuilt subtree.
+    m_Hovered = nullptr;
+    m_HoveredInstanceId = 0;
+    m_MouseCaptured = false;
+    m_CaptureElement = nullptr;
+    m_CaptureInstanceId = 0;
+    m_CaptureId.clear();
+    return true;
+}
+
+void UIManager::InvalidateDockspaceRenderState(UIElement* el)
+{
+    if (!el)
+        return;
+    FreeRenderSlots(el);
+    el->m_LastPrimitiveGenFrame = 0;
+    el->ForEachLogicalChild([this](UIElement* child) { InvalidateDockspaceRenderState(child); });
 }

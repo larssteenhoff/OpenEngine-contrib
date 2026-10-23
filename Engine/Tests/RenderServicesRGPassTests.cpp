@@ -1,3 +1,4 @@
+#include "Engine/Rendering/Pipeline/Nodes/WorldRenderNode.h"
 #include <gtest/gtest.h>
 
 #include "Engine/Rendering/DDGIProbeFeature.h"
@@ -2161,6 +2162,64 @@ TEST(RenderServicesRGPassTests, GlossyResolveDeclaresTheLobeTargetsItBindsWithLo
         EXPECT_EQ(glossy.Id, glossyBlurId);
 
         f.Device->DestroyBuffer(viewParams);
+    }
+    f.Down();
+}
+
+TEST(RenderServicesRGPassTests, SortedArtworkWithoutMeshSubmissionsKeepsItsDrainActive)
+{
+    RsFixture f;
+    ASSERT_TRUE(f.Up());
+    {
+        FramePools pools(f.Device.get());
+        RenderGraph::RGFrame frame(f.Device.get(), &pools.Persistent, &pools.Transient, &pools.Ring);
+        frame.BeginFrame(0);
+        const auto color = frame.ImportPersistentTexture("Artwork.Color", ColorTargetDesc());
+        const auto depth = frame.ImportPersistentTexture("Artwork.Depth", DepthTargetDesc());
+        SortedTransparentCommand sprite{};
+        sprite.Sorting.Order = 3;
+        sprite.Entity.id = 1;
+        uint32 calls = 0;
+        const auto ordinaryProducer = f.Rs.RegisterForwardEmit(
+            [&](ForwardEmitContext& context)
+            {
+                if (context.ViewId == f.View)
+                    f.Rs.EmitSortedTransparentCommand(context.ViewId, sprite);
+            }, {.WritesDepth = false});
+        const auto producer = f.Rs.RegisterForwardEmit(
+            [&](ForwardEmitContext& context)
+            {
+                if (context.ViewId != f.View)
+                    return;
+                ++calls;
+                EXPECT_EQ(context.Frame, &frame);
+                if (context.Frame)
+                    f.Rs.EmitSortedTransparentCommand(context.ViewId, sprite);
+            }, {.WritesDepth = false, .RequiresFrame = true});
+        f.Rs.BeginWorldDrawFrame();
+        f.Rs.BuildWorldBatchKeys();
+        EXPECT_EQ(calls, 0u);
+        ASSERT_TRUE(f.Rs.GetEntityBatchKeys(f.View).empty());
+        Pipeline::ViewDeclare declaration(frame, *f.Rs.Views().FindViewDesc(f.View), f.Rs, "World");
+        declaration.ViewColor = color;
+        declaration.ViewDepth = depth;
+        declaration.PipelineHasSortedTransparentPass = true;
+        Pipeline::Nodes::WorldRenderNode node;
+        ASSERT_TRUE(node.Initialize("World", "{}", nullptr));
+        node.DeclareForView(declaration);
+        EXPECT_EQ(calls, 1u);
+        EXPECT_TRUE(f.Rs.IsSortedTransparentActive(f.View));
+        EXPECT_TRUE(f.Rs.GetForwardCommands(f.View).empty());
+        ASSERT_EQ(f.Rs.Views().PerView(f.View).SortedTransparentCommands.size(), 2u);
+        node.DeclareForView(declaration);
+        EXPECT_EQ(calls, 1u);
+        EXPECT_EQ(f.Rs.Views().PerView(f.View).SortedTransparentCommands.size(), 2u);
+        f.Rs.ClearForwardCommands();
+        EXPECT_TRUE(f.Rs.Views().PerView(f.View).SortedTransparentCommands.empty());
+        frame.BeginFrame(1);
+        f.Rs.EmitFrameForwardCommandsForView(frame, f.View);
+        EXPECT_EQ(calls, 2u);
+        EXPECT_EQ(f.Rs.Views().PerView(f.View).SortedTransparentCommands.size(), 1u);
     }
     f.Down();
 }

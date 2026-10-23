@@ -1,6 +1,8 @@
 #include "Inspectors/SkinnedMeshRendererInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
+#include "Rendering/Sorting/RenderSortingEditor.h"
 
 #include "Assets/AssetManager.h"
 #include "Components/Animation/SkeletonRef.h"
@@ -10,6 +12,8 @@
 #include "ECS/ECSTemplates.h"
 
 #include "Inspectors/InspectorUIHelpers.h"
+
+#include <utility>
 
 namespace GameEngine
 {
@@ -47,6 +51,19 @@ std::string RigOwnerLabel(const ECS::World& world, ECS::EntityHandle entity, con
 
 void RegisterSkinnedMeshRendererInspector()
 {
+    constexpr int kSkinnedMeshRendererSortKey = 32;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Skinned Mesh Renderer";
+        traits.Category = "Rendering";
+        traits.SortKey = kSkinnedMeshRendererSortKey;
+        traits.Tooltip = "Renders a mesh deformed by a skeleton for animation";
+        traits.InspectorIconClass = "inspector-section-icon-skinned-mesh";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::SkinnedMeshRenderer>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())
@@ -61,6 +78,7 @@ void RegisterSkinnedMeshRendererInspector()
             return;
         }
 
+        Editor::AddRenderSortingDiagnostic(ctx);
         AddLine(ctx.Parent, std::string("MeshId: ") + std::to_string(smr->meshId));
         // The rig is authored on the entity's SkeletonRef: the model it comes
         // from and the entity whose instance shares its pose. The numeric

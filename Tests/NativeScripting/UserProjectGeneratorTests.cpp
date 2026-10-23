@@ -7,6 +7,7 @@
 
 #include "NativeScripting/NativeBuildConfig.h"
 #include "NativeScripting/UserProjectGenerator.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
@@ -207,9 +208,8 @@ TEST(UserProjectGenerator, SourceGlobHonoursTheSourceRootsOwnAssetIgnoreFile)
     // A root-relative path prefix is a directory rule too: the staleness digest skips it, so the
     // compile must skip it as well, or an edit under it would compile without ever invalidating
     // the build cache.
-    const fs::path root = fs::temp_directory_path() / "ge_userprojgen_assetignore";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_userprojgen_assetignore");
     std::error_code ec;
-    fs::remove_all(root, ec);
     const auto config = MakeSdkConfig(root, "/editor/SDK");
     fs::create_directories(config.SourceDir, ec);
     {
@@ -275,9 +275,8 @@ TEST(UserProjectGenerator, OutOfSdkLayoutKeepsAbsolutePathsAndNoSdkBlock)
 
 TEST(UserProjectGenerator, SeparateProjectDirKeepsGeneratedFilesOutOfPackageSources)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_userprojgen_package_cache";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_userprojgen_package_cache");
     std::error_code ec;
-    fs::remove_all(root, ec);
 
     auto config = MakeSdkConfig(root / "Package", root / "Editor" / "SDK");
     config.SourceDir = root / "SignedEditor.app" / "Contents" / "MacOS" /
@@ -308,9 +307,8 @@ TEST(UserProjectGenerator, SeparateProjectDirKeepsGeneratedFilesOutOfPackageSour
 
 TEST(UserProjectGenerator, SeparateProjectDirRemovesStaleGeneratedListsFromSources)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_userprojgen_stray_cleanup";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_userprojgen_stray_cleanup");
     std::error_code ec;
-    fs::remove_all(root, ec);
 
     auto config = MakeSdkConfig(root / "Package", root / "Editor" / "SDK");
     config.SourceDir = root / "Bundle" / "Packages" / "sample" / "Native";
@@ -346,9 +344,8 @@ TEST(UserProjectGenerator, SeparateProjectDirRemovesStaleGeneratedListsFromSourc
 
 TEST(UserProjectGenerator, DeadBakedSdkDirIsRefreshedOnNextGenerate)
 {
-    const fs::path root = fs::temp_directory_path() / "ge_userprojgen_relocation";
+    const fs::path root = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_userprojgen_relocation");
     std::error_code ec;
-    fs::remove_all(root, ec);
 
     // Generate against the "old" SDK location, then delete it — the on-disk file now
     // bakes a dead last-known-good, exactly what a moved/deleted Editor leaves behind.

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Editor/Settings/TrackedEditorWindows.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -52,7 +54,7 @@ private:
     void Load();
     void Save();
     void ApplyToTrackedManagers();
-    void ApplyToManager(UIManager* ui) const;
+    void ApplyToManager(UIManager& ui) const;
 
     bool m_BackgroundEnabled = kDefaultBackgroundEnabled;
     uint32_t m_BackgroundColor = kDefaultBackgroundColor;
@@ -61,6 +63,7 @@ private:
     bool m_ShadowEnabled = kDefaultShadowEnabled;
     bool m_CardsVisible = kDefaultCardsVisible;
     std::vector<UIManagerRef> m_TrackedManagers;
+    TrackedEditorWindows m_Windows;
 };
 
 void RegisterInfoCardAppearanceSettingsCategory();

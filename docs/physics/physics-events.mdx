@@ -192,3 +192,23 @@ In ECS, “listen to every collision” just means iterating the buffers without
 ## Limits
 
 - **Impulse/strength**: the contact event carries no impulse. Jolt does not provide the final impulse at `OnContactAdded`.
+
+## Contact surfaces and physics materials
+
+Assign a `.physmat` asset in the collider inspector to share friction and restitution across colliders. The asset overrides the collider's inline material. If the asset cannot load, the inline settings apply. For a compound body, the first collider with a resolved physics material supplies the contact material for the body. Editing the material updates existing bodies before the next physics step.
+
+```json title="A bouncy surface.physmat"
+{
+  "schemaVersion": 1,
+  "assetType": "PhysicsMaterial",
+  "friction": 0.5,
+  "restitution": 0.9,
+  "restitutionCombine": "maximum"
+}
+```
+
+Friction must fit a finite, nonnegative 32-bit float. Restitution is between 0 and 1. A multiplied coefficient saturates at the largest finite float instead of overflowing. Each value has its own combine mode: `average`, `minimum`, `multiply`, or `maximum`. When two materials select different modes, the later mode in that list wins. A contact with no assigned material on either body retains the backend's ordinary response.
+
+Native gameplay can register a `PhysicsWorld::SetContactModifyCallback` to accept or reject a contact and set its surface response. The callback runs synchronously on physics workers. It must not mutate the world or access mutable ECS state. Its context must outlive its registration. Passing `nullptr` clears the callback.
+
+`PhysicsECS::ContactSurfaceTable::Decide` implements the default surface policy. A one-way surface accepts only downward landings on its top face; a body moving up passes through it. To author one, set a tile's collision mode to **One Way** in the Tile Set editor; tile-map collision bodies then carry `kContactFlagOneWay`. A body flagged `kContactFlagIgnoreOneWay` passes through one-way surfaces. There is no authored or script setting for drop-through yet: native code sets it with `PhysicsWorld::SetBodyContactFlags` before the physics step, and wakes the body if it may be asleep. A game callback can delegate to `ContactSurfaceTable::Decide` to preserve this policy.

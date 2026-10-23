@@ -1,6 +1,7 @@
 #include "Assets/Packages/PackagesLockFile.h"
 
 #include "AssetCore/SharedFileRead.h"
+#include "Types/Fnv1a.h"
 
 #include <cstdint>
 #include <fstream>
@@ -16,19 +17,6 @@ namespace
 {
 
 constexpr int kLockFormatVersion = 1;
-
-// Local FNV-1a 64 so the asset-side lock format has no NativeScripting
-// dependency (that module owns an identical helper for build digests).
-std::uint64_t Fnv1a64(std::string_view data)
-{
-    std::uint64_t hash = 0xcbf29ce484222325ULL;
-    for (const char c : data)
-    {
-        hash ^= static_cast<unsigned char>(c);
-        hash *= 0x100000001b3ULL;
-    }
-    return hash;
-}
 
 std::string ReadStringField(const nlohmann::json& node, const char* key)
 {
@@ -163,7 +151,7 @@ bool UpsertPackagesLockEntry(const std::filesystem::path& lockFile,
 std::string HashPackageManifestIntegrity(std::string_view manifestText)
 {
     constexpr char kHexDigits[] = "0123456789abcdef";
-    const std::uint64_t hash = Fnv1a64(manifestText);
+    const std::uint64_t hash = Hashing::Fnv1a64(manifestText);
     std::string text = "fnv1a64-";
     for (int shift = 60; shift >= 0; shift -= 4)
         text += kHexDigits[(hash >> shift) & 0xF];

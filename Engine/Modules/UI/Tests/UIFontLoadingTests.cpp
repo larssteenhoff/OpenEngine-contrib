@@ -14,6 +14,7 @@
 #include "Rendering/Core/Device.h"
 #include "RobotoTestFont.h"
 #include "UIRgTestHarness.h"
+#include "TestTempDir.h"
 
 #include "UI/Parsers/XMLParser.h"
 #include "UI/Registration/ElementRegistration.h"
@@ -58,8 +59,8 @@ TEST(UIFontLoadingTests, RequestsFamilyOnceAndAppliesOnCompletion)
     ui.SetRoot(std::move(root));
 
     // Style: explicitly request Roboto so the family resolver is exercised.
-    const auto tmpDir = std::filesystem::temp_directory_path();
-    const auto cssPath = tmpDir / "ui_font_loading_resolver_test.css";
+    const TestUtils::ScopedTempDir tempDir(TestUtils::MakeUniqueTempDirectory("ui_font_loading_resolver_test"));
+    const auto cssPath = tempDir.Path() / "ui_font_loading_resolver_test.css";
     {
         std::ofstream f(cssPath);
         f << R"(
@@ -155,8 +156,8 @@ TEST(UIFontLoadingTests, PassesWeightAndStyleToResolver)
     UIManager ui(dev);
     ui.SetRoot(std::move(root));
 
-    const auto tmpDir = std::filesystem::temp_directory_path();
-    const auto cssPath = tmpDir / "ui_font_loading_weight_style_test.css";
+    const TestUtils::ScopedTempDir tempDir(TestUtils::MakeUniqueTempDirectory("ui_font_loading_weight_style_test"));
+    const auto cssPath = tempDir.Path() / "ui_font_loading_weight_style_test.css";
     {
         std::ofstream f(cssPath);
         f << R"(
@@ -266,4 +267,102 @@ TEST(UIFontLoadingTests, PendingFamilyUsesExplicitDefaultInsteadOfArbitraryLoade
 
     EXPECT_EQ(ui.ResolveFontForStyle(style), defaultAtlas);
     EXPECT_TRUE((bool)pendingRoboto);
+}
+
+TEST(UIFontLoadingTests, LoadFontWaitsForResolvedFaceAndPreparesGlyphData)
+{
+    auto dev = MakeHeadlessDevice();
+    ASSERT_NE(dev, nullptr);
+    UIManager ui(dev.get());
+    const auto bytes = LoadRobotoBytes();
+    ASSERT_FALSE(bytes.empty());
+    ASSERT_TRUE(ui.SetDefaultFontBytes(bytes));
+    UIManager::FontResolveCallback complete;
+    int calls = 0;
+    ui.SetFontResolver([&](const std::string&, int weight, FontStyle style, FontVariant,
+                          UIManager::FontResolveCallback cb) {
+        EXPECT_EQ(weight, 700);
+        EXPECT_EQ(style, FontStyle::Italic);
+        ++calls;
+        complete = std::move(cb);
+    });
+    UIManager::FontFaceRequest request;
+    request.Family = "Level Title";
+    request.Text = "Cave — 0123456789";
+    request.Weight = 700;
+    request.Style = FontStyle::Italic;
+    using Status = UIManager::FontLoadStatus;
+    EXPECT_EQ(ui.LoadFont(request), Status::Loading);
+    EXPECT_EQ(ui.LoadFont(request), Status::Loading);
+    EXPECT_EQ(calls, 1);
+    UIManager::FontResolveResult result;
+    result.Bytes = bytes;
+    complete(std::move(result));
+    ui.DrainDeferredActionsOnce();
+    EXPECT_EQ(ui.LoadFont(request), Status::Loaded);
+    ResolvedStyle style{};
+    style.Visual.FontFamily = std::make_shared<const std::vector<std::string>>(
+        std::vector<std::string>{request.Family});
+    style.Visual.FontWeight = request.Weight;
+    style.Visual.FontStyle = request.Style;
+    auto* atlas = ui.ResolveFontForStyle(style);
+    ASSERT_NE(atlas, nullptr);
+    EXPECT_GT(atlas->GetSlugPageCount(), 0);
+    const auto generation = atlas->GetSlugPageGeneration(0);
+    EXPECT_EQ(ui.LoadFont(request), Status::Loaded);
+    EXPECT_EQ(atlas->GetSlugPageGeneration(0), generation);
+}
+
+TEST(UIFontLoadingTests, FailedLoadDoesNotReportFallbackAsLoaded)
+{
+    auto dev = MakeHeadlessDevice();
+    ASSERT_NE(dev, nullptr);
+    UIManager ui(dev.get());
+    auto bytes = LoadRobotoBytes();
+    ASSERT_FALSE(bytes.empty());
+    ASSERT_TRUE(ui.SetDefaultFontBytes(bytes));
+    UIManager::FontResolveCallback complete;
+    ui.SetFontResolver([&](const std::string&, int, FontStyle, FontVariant,
+                          UIManager::FontResolveCallback cb) { complete = std::move(cb); });
+    UIManager::FontFaceRequest request;
+    request.Family = "Missing Face";
+    request.Text = "Loading";
+    using Status = UIManager::FontLoadStatus;
+    EXPECT_EQ(ui.LoadFont(request), Status::Loading);
+    complete({});
+    ui.DrainDeferredActionsOnce();
+    EXPECT_EQ(ui.LoadFont(request), Status::Failed);
+    request.Family.clear();
+    EXPECT_EQ(ui.LoadFont(request), Status::Loaded);
+}
+
+TEST(UIFontLoadingTests, CancelledResolverCannotClearReplacementRequest)
+{
+    auto dev = MakeHeadlessDevice();
+    ASSERT_NE(dev, nullptr);
+    UIManager ui(dev.get());
+    UIManager::FontResolveCallback oldComplete, newComplete;
+    ui.SetFontResolver([&](const std::string&, int, FontStyle, FontVariant,
+                          UIManager::FontResolveCallback cb) { oldComplete = std::move(cb); });
+    ui.RequestFontFamily("Same Family");
+    int newCalls = 0;
+    ui.SetFontResolver([&](const std::string&, int, FontStyle, FontVariant,
+                          UIManager::FontResolveCallback cb) {
+        ++newCalls;
+        newComplete = std::move(cb);
+    });
+    ui.RequestFontFamily("Same Family");
+    oldComplete({});
+    ui.DrainDeferredActionsOnce();
+    UIManager::FontFaceRequest request;
+    request.Family = "Same Family";
+    using Status = UIManager::FontLoadStatus;
+    EXPECT_EQ(ui.LoadFont(request), Status::Loading);
+    EXPECT_EQ(newCalls, 1);
+    UIManager::FontResolveResult result;
+    result.Bytes = LoadRobotoBytes();
+    ASSERT_FALSE(result.Bytes.empty());
+    newComplete(std::move(result));
+    ui.DrainDeferredActionsOnce();
+    EXPECT_EQ(ui.LoadFont(request), Status::Loaded);
 }

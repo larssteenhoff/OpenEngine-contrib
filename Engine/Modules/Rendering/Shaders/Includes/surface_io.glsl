@@ -116,6 +116,7 @@ struct SurfaceOutput
     vec3 coatNormalWS; // clear-coat shading normal; == normalWS unless a coat normal map perturbs it (GE_COAT_NORMAL_ENABLED)
     vec3 emissive;
     float opacity;
+    float planarReflectionMask; // 0 = dry/non-planar, 1 = full planar coverage; independent of opacity
 
     // Extended (used by specific lighting models)
     float ao;
@@ -150,6 +151,8 @@ struct SurfaceOutput
     // OpenPBR transmission (refractive dielectric / glass). transmissionWeight splits energy
     // out of the diffuse budget into a refracted environment sample; transmissionColor tints it.
     float transmissionWeight;
+    float transmissionRefractionStrength; // screen-space thin refraction scale
+    float transmissionBlur; // screen-space blur radius in pixels; 0 keeps the single-tap path
     vec3 transmissionColor;
     float refractionDistance; // world units; path length for the thick (two-surface) refraction lens
 
@@ -219,6 +222,7 @@ SurfaceOutput DefaultSurfaceOutput()
     o.coatNormalWS = vec3(0.0, 1.0, 0.0); // mirrors normalWS; the coat lobe reads it only under GE_COAT_NORMAL_ENABLED
     o.emissive = vec3(0.0);
     o.opacity = 1.0;
+    o.planarReflectionMask = 1.0;
     o.ao = 1.0;
     o.bentNormalWS = vec3(0.0, 1.0, 0.0);
     o.clearCoat = 0.0;
@@ -241,6 +245,8 @@ SurfaceOutput DefaultSurfaceOutput()
     o.specularIor = 1.5;
     o.diffuseRoughness = 0.0;
     o.transmissionWeight = 0.0;
+    o.transmissionRefractionStrength = 0.3;
+    o.transmissionBlur = 0.0;
     o.transmissionColor = vec3(1.0);
     o.refractionDistance = 1.0;
     o.attenuationColor = vec3(1.0);  // white -> log(1)=0 -> no absorption
@@ -275,6 +281,23 @@ SurfaceOutput DefaultSurfaceOutput()
 #endif
     return o;
 }
+
+// Optional material-owned lighting response. Default surfaces preserve the
+// renderer's visibility and indirect-light budget without additional state.
+#ifdef GE_USER_CUSTOM_LIGHTING
+bool ge_SurfaceReceivesShadows = true;
+float GE_SurfaceDirectionalVisibility(float visibility, float depth, vec3 directionToLight);
+vec3 GE_SurfaceDiffuseIrradiance(vec3 environment, vec3 ambientFloor);
+#else
+float GE_SurfaceDirectionalVisibility(float visibility, float depth, vec3 directionToLight)
+{
+    return visibility;
+}
+vec3 GE_SurfaceDiffuseIrradiance(vec3 environment, vec3 ambientFloor)
+{
+    return environment + ambientFloor;
+}
+#endif
 
 SurfaceInput DefaultSurfaceInput()
 {

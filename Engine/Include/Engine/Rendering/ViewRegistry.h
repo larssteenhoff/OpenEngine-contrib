@@ -15,6 +15,7 @@
 #include "Rendering/Core/RenderGraph/RGFrame.h"   // RGTexture, RGFrameStamp
 #include "Rendering/Materials/ShaderVariantKey.h" // MaterialKeyword
 #include "Engine/Rendering/CameraAspectRatio.h"   // ViewLetterbox, PixelPerfectViewState
+#include "Engine/Rendering/SortedTransparentCommand.h"
 #include "Engine/Rendering/DrawCommand.h"         // DrawCommand
 #include "Engine/Rendering/DepthPassTypes.h"      // DepthPassType
 #include "Engine/Rendering/ParallaxReliefDepth.h" // ReliefDepthSource
@@ -119,6 +120,7 @@ public:
         // Alpha-blended contributor draws that must execute after late surface
         // features (ocean/refraction) instead of being captured into them.
         std::vector<DrawCommand> LateForwardCommands;
+        std::vector<SortedTransparentCommand> SortedTransparentCommands;
         // Render-graph textures the ForwardCommands sample descriptor-direct
         // (EmitForwardSampledRead). AddWorldPassForView declares each as a
         // SampledVertex read so the writing sim orders before the draw and the
@@ -149,6 +151,7 @@ public:
         };
         std::vector<ForwardSampledBuffer> ForwardSampledBufferRG;
         Rendering::RenderGraph::RGFrameStamp ForwardSampledFor;
+        Rendering::RenderGraph::RGFrameStamp FrameForwardEmittedFor;
         // Forward draws of this frame that write their own depth
         // (ForwardDrawDepth::ColourPass). Non-zero keeps the view's world depth
         // writable under a prepass. Cleared with the command stream.
@@ -339,6 +342,7 @@ public:
                                                     uint32 renderWidth, uint32 renderHeight);
 
     void SetViewCamera(Rendering::ViewId id, Rendering::CameraId cameraId);
+    void SetViewBackgroundOnly(Rendering::ViewId id, bool enabled);
     void SetViewRenderLayerMask(Rendering::ViewId id, Rendering::RenderLayerMask layers);
     void SetViewActiveRenderPipeline(Rendering::ViewId id, bool enabled);
 

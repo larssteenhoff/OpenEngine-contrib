@@ -22,11 +22,11 @@
 #include "Rendering/ShaderCache/ShaderPackageIO.h"
 #include "StagedTestPaths.h"
 #include "TestUtils.h"
+#include "TestTempDir.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -56,18 +56,15 @@ constexpr MaterialKeyword kDebugOverlayWorldPass =
 
 fs::path MakeTempCacheRoot()
 {
-    static std::atomic<uint32_t> counter{0};
-    return fs::temp_directory_path() /
-           ("ge_fwd_variant_" +
-            std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + "_" +
-            std::to_string(counter.fetch_add(1)));
+    return TestUtils::MakeUniqueTempDirectory("ge_fwd_variant");
 }
 
 // A stock material on the engine's built-in surface shader: an empty
 // surfaceShader makes the composer substitute Surfaces/standard_surface.glsl,
 // which is what an ordinary scene material compiles as.
 MaterialBuildResult BuildStockMaterial(const std::string& lightingModel, MaterialKeyword keywords,
-                                       const std::string& surfaceShader = {}, bool heightMapped = false)
+                                       const std::string& surfaceShader = {}, bool heightMapped = false,
+                                       MaterialAlphaMode alphaMode = MaterialAlphaMode::Opaque)
 {
     MaterialDocument doc{};
     doc.materialName = "ForwardAdapterVariantProbe";
@@ -75,6 +72,7 @@ MaterialBuildResult BuildStockMaterial(const std::string& lightingModel, Materia
     doc.surfaceShader = surfaceShader;
     if (heightMapped)
         doc.textures["heightMap"] = "__embedded__:0";
+    doc.alphaMode = alphaMode;
 
     MaterialBuildContext ctx{};
     ctx.AdapterShaderDir = GameEngine::Rendering::Tests::GetAdapterShaderDir();
@@ -876,4 +874,122 @@ void main()
     device->Shutdown();
     std::error_code ec;
     fs::remove_all(cache, ec);
+}
+
+// Execute the shipped LOD-crossfade dither on the GPU with the fade code where the fragment reads
+// it: in the high byte of the instance flags, under the cast and receive-shadow bits. A record that
+// is not fading (code 0) keeps every pixel whatever its flags; the two records of a fading pair
+// carry one weight and opposite phases, and keep complementary pixel sets. The function is read
+// from the staged include, never copied into this oracle.
+TEST(ForwardAdapterLodCrossfadeReadback, FlagBitsDoNotFadeARecordAndAPhasePairKeepsComplementaryPixels)
+{
+    const fs::path shaders = GameEngine::Rendering::Tests::GetAdapterShaderDir();
+    std::ifstream input(shaders / "Includes/lod_crossfade.glsl", std::ios::binary);
+    ASSERT_TRUE(input.good()) << (shaders / "Includes/lod_crossfade.glsl").string();
+    const std::string crossfade{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+
+    DeviceDesc desc{};
+    desc.preferredAPI = GraphicsAPI::Vulkan;
+    desc.enableSwapchain = false;
+    desc.enableDynamicRendering = true;
+    desc.enableDebugLayer = true;
+    auto device = DeviceFactory::CreateDevice(desc);
+    if (!device || !device->Initialize(desc))
+        GTEST_SKIP() << "No Vulkan device available";
+    if (!device->GetValidationStats().Enabled)
+    {
+        device->Shutdown();
+        GTEST_SKIP() << "Vulkan validation layer unavailable";
+    }
+    constexpr uint32_t kInstanceFlags = 0x3u;   // castShadows | receiveShadows
+    constexpr uint32_t kWeight = 64u;           // of 127: the Bayer levels 0..8 of 16 lie below it
+    constexpr uint32_t kPhaseBit = 0x80000000u;
+    const uint32_t kCodes[3] = {kInstanceFlags, (kWeight << 24) | kInstanceFlags,
+                                kPhaseBit | (kWeight << 24) | kInstanceFlags};
+    const fs::path cache = MakeTempCacheRoot();
+    std::vector<uint8_t> kept[3];
+    for (int record = 0; record < 3; ++record)
+    {
+        SCOPED_TRACE(record);
+        ShaderProgramCompileRequest request{};
+        request.debugName = "ForwardAdapterLodCrossfadeProbe";
+        request.cacheRoot = cache;
+        request.baseDirectory = shaders / "Adapters";
+        ShaderStageCompileSpec vertex{};
+        vertex.stage = "vs";
+        vertex.sourcePath = "crossfade-probe.vert";
+        vertex.inlineSource = R"(#version 450
+void main()
+{
+    const vec2 positions[3] = vec2[3](vec2(-1, -1), vec2(3, -1), vec2(-1, 3));
+    gl_Position = vec4(positions[gl_VertexIndex], 0.5, 1);
+}
+)";
+        ShaderStageCompileSpec fragment{};
+        fragment.stage = "fs";
+        fragment.sourcePath = "crossfade-probe.frag";
+        fragment.inlineSource = "#version 450\n#define GE_LOD_CROSSFADE\n" + crossfade +
+                                "\nlayout(location=0) out vec4 color;\nvoid main() {\n"
+                                "if (!GE_LodCrossfadeKeep(" + std::to_string(kCodes[record]) +
+                                "u, gl_FragCoord.xy)) discard;\ncolor = vec4(1.0);\n}\n";
+        request.stages = {vertex, fragment};
+        ShaderProgramCompileResult program{};
+        std::string error;
+        const bool compiled = ShaderCompileService::CompileProgramToCache(
+            request, ShaderSourceKind::SpirV, program, &error);
+        ASSERT_TRUE(compiled) << error;
+        kept[record] = DrawAdapterProbe(*device, program, false);
+        ASSERT_EQ(kept[record].size(), size_t(kProbeWidth) * kProbeHeight * 4);
+    }
+    size_t incoming = 0;
+    for (size_t at = 0; at < kept[0].size(); at += 4)
+    {
+        EXPECT_EQ(kept[0][at], 255) << "a record that is not fading lost pixel " << at / 4;
+        EXPECT_NE(kept[1][at] == 255, kept[2][at] == 255)
+            << "pixel " << at / 4 << " must be kept by exactly one record of the pair";
+        incoming += kept[1][at] == 255;
+    }
+    EXPECT_EQ(incoming, size_t(kProbeWidth) * kProbeHeight * 9 / 16) << "the incoming level keeps 9 of 16 levels";
+    EXPECT_EQ(device->GetValidationStats().ErrorCount, 0u);
+    device->Shutdown();
+    std::error_code ec;
+    fs::remove_all(cache, ec);
+}
+
+TEST(ForwardAdapterVariantCompile, MaskedPuddleSurfaceCompilesWithAndWithoutReflectionOutputs)
+{
+    for (const auto keywords : {
+        kWorldDrawBase | MaterialKeyword::IBL,
+        kWorldDrawBase | MaterialKeyword::ForwardPlus | MaterialKeyword::IBL |
+            MaterialKeyword::SSSRNormalRoughness,
+        kWorldDrawBase | MaterialKeyword::ForwardPlus | MaterialKeyword::IBL |
+            MaterialKeyword::Shadows | MaterialKeyword::SSSRNormalRoughness | MaterialKeyword::GTAO})
+    {
+        const auto result = BuildStockMaterial("StandardPBR", keywords, "Surfaces/puddle_ground.glsl");
+        SKIP_WITHOUT_SHADERC(result);
+        ExpectBuildSucceeded(result);
+        EXPECT_TRUE(FragmentSpvNames(result, "planarReflectionMask"));
+    }
+}
+
+TEST(ForwardAdapterVariantCompile, RainSurfacesCompileForWorldAndPlanarCapture)
+{
+    for (const auto extra : {MaterialKeyword::None, MaterialKeyword::SSSRNormalRoughness})
+    {
+        const auto keywords = kWorldDrawBase | MaterialKeyword::ForwardPlus | MaterialKeyword::IBL | extra;
+        const auto wet = BuildStockMaterial("StandardPBR", keywords | MaterialKeyword::ClearCoat |
+            MaterialKeyword::CoatNormal, "Surfaces/rain_wet_object.glsl");
+        SKIP_WITHOUT_SHADERC(wet);
+        ExpectBuildSucceeded(wet);
+        const auto wetWithoutCoat = BuildStockMaterial("StandardPBR", keywords, "Surfaces/rain_wet_object.glsl");
+        ExpectBuildSucceeded(wetWithoutCoat);
+        const auto rain = BuildStockMaterial("StandardPBR", keywords | MaterialKeyword::Transmission |
+            MaterialKeyword::SceneColorGrab, "Surfaces/rain_falling.glsl", false, MaterialAlphaMode::Mask);
+        SKIP_WITHOUT_SHADERC(rain);
+        ExpectBuildSucceeded(rain);
+        const auto glass = BuildStockMaterial("StandardPBR", keywords | MaterialKeyword::Transmission |
+            MaterialKeyword::SceneColorGrab, "Surfaces/rain_window.glsl");
+        SKIP_WITHOUT_SHADERC(glass);
+        ExpectBuildSucceeded(glass);
+    }
 }

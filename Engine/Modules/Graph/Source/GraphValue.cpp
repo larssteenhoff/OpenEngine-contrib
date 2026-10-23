@@ -1,6 +1,7 @@
 #include "Graph/GraphValue.h"
 
 #include <Types/ParseNumber.h>
+#include <Types/StringUtils.h>
 
 #include <algorithm>
 #include <cctype>
@@ -14,34 +15,9 @@ namespace GameEngine {
 namespace Graph {
 namespace {
 
-bool EqualsIgnoreCase(std::string_view a, std::string_view b)
-{
-    if (a.size() != b.size())
-        return false;
-    for (std::size_t i = 0; i < a.size(); ++i)
-    {
-        const unsigned char ca = static_cast<unsigned char>(a[i]);
-        const unsigned char cb = static_cast<unsigned char>(b[i]);
-        if (std::tolower(ca) != std::tolower(cb))
-            return false;
-    }
-    return true;
-}
-
-std::string_view TrimAsciiSpace(std::string_view text)
-{
-    std::size_t begin = 0;
-    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin])))
-        ++begin;
-    std::size_t end = text.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1])))
-        --end;
-    return text.substr(begin, end - begin);
-}
-
 bool ParseBoolText(std::string_view text, bool& outValue)
 {
-    text = TrimAsciiSpace(text);
+    text = TrimWhitespaceView(text);
     if (EqualsIgnoreCase(text, "true") || EqualsIgnoreCase(text, "yes") ||
         EqualsIgnoreCase(text, "on") || text == "1")
     {
@@ -72,7 +48,7 @@ bool TryNarrowFloatToInt64(double value, std::int64_t& outValue)
 
 bool ParseIntText(std::string_view text, std::int64_t& outValue)
 {
-    std::string_view number = TrimAsciiSpace(text);
+    std::string_view number = TrimWhitespaceView(text);
     if (number.empty())
         return false;
     if (number[0] == '+')

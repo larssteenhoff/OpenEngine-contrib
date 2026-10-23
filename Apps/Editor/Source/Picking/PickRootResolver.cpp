@@ -44,6 +44,8 @@ bool SubtreeRendersSingleModel(ECS::World& world,
                                ECS::EntityHandle root,
                                const GUID& model)
 {
+    const std::vector<ECS::ComponentTypeId> pickRootTypes =
+        EditorComponentTraitsRegistry::Get().PickInstanceRootTypes();
     // Reused across calls so hover/click resolves don't heap-allocate the
     // traversal stack each time (picking runs on the main thread; thread_local
     // keeps any future off-thread use safe).
@@ -57,9 +59,9 @@ bool SubtreeRendersSingleModel(ECS::World& world,
 
         // Components registered as their own pick target (plugin traits) stop
         // the model-instance grouping: their entity never folds into a root.
-        for (const auto& [typeId, traits] : EditorComponentTraitsRegistry::Get().Snapshot())
+        for (const ECS::ComponentTypeId typeId : pickRootTypes)
         {
-            if (traits.IsPickInstanceRoot && world.HasComponent(current, typeId))
+            if (world.HasComponent(current, typeId))
                 return false;
         }
         const auto* mr = world.GetComponent<Components::MeshRenderer>(current);

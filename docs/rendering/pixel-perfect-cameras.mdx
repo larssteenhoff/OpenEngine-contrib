@@ -1,0 +1,21 @@
+---
+title: Pixel-perfect cameras
+description: Match an orthographic camera and newly placed sprites to a tile scene’s pixel density.
+---
+
+Enable **Pixel Perfect** on an orthographic camera to set a fixed pixel grid. Reference Width and Reference Height set the minimum visible pixel window. In the editor Game View and Scene View, the low-resolution result is enlarged by an integer scale before display-resolution post effects.
+
+The Player applies the camera framing and pixel snap at window resolution. Its runtime host does not allocate the low-resolution targets needed for the integer upscale crossing.
+
+**Auto Pixels Per Unit** derives the grid from a visible tile-map layer: tile width in pixels divided by cell width in world units. When the scene has no visible tile-map layer with a tile set, the camera uses its authored Pixels Per Unit. Turn automatic density off to choose a fixed density yourself. Scenes with mixed tile densities use a deterministic map and layer selection; one camera cannot make every density pixel-perfect simultaneously.
+
+Enable Expand to show more world when the viewport does not match the reference aspect ratio. With Expand disabled, the reference window remains fixed and unused space is letterboxed. Pixel Snap stabilizes the camera’s raster grid as the camera moves.
+
+The Scene View’s 2D pixel-perfect mode uses the same scene density as the game camera. Integer zoom steps preserve the texel grid. The mouse wheel steps the integer zoom in the same direction as the other 2D wheel zoom, and **Reverse Scroll Wheel Dolly** in the Scene View settings reverses both. New textures dropped into a 2D view become sprites sized for that scene density, or one unit per pixel in a scene without tile maps. Existing sprites keep their authored size.
+
+To run display effects at the panel resolution, add a **PixelPerfectUpscale** node to a custom render pipeline after temporal antialiasing and before display-resolution effects. Its output texture uses the output extent. Without this node, the Game View enlarges the finished image with a nearest upscale after the pipeline and HUD. The shipped Forward Plus pipeline includes this crossing; when pixel-perfect rendering is inactive, the node passes its input through.
+
+## Changes to existing scenes
+
+- **Auto Pixels Per Unit** is on by default, including for cameras saved before the setting existed. A pixel-perfect camera in a scene with a tile map now takes its density from the tile map instead of its authored Pixels Per Unit. To keep the authored value, turn **Auto Pixels Per Unit** off on the camera.
+- The CRT effect's emulated-resolution divisor is rounded to the nearest whole number of screen pixels per emulated pixel, so a fractional divisor such as 5.6 renders as 6. To get a different size, set the divisor to the whole number you want.

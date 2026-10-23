@@ -26,4 +26,11 @@ namespace GameEngine::Rendering
     void ApplyMetaImageShapeToLayout(const ShaderMeta& meta,
                                      DescriptorSetLayoutDesc& layout,
                                      uint32_t set = 0);
+
+    /**
+     * @brief ApplyMetaImageShapeToLayout for one set's meta; also how
+     * MaterialBuilder shapes the layouts it builds from reflection, so a
+     * reflected layout and a hand-built one follow one rule.
+     */
+    void ApplySetMetaImageShapeToLayout(const DescriptorSetMeta& setMeta, DescriptorSetLayoutDesc& layout);
 }

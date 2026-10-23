@@ -32,6 +32,7 @@
 #include "Engine/Rendering/Pipeline/RenderPipeline.h"
 #include "Engine/Rendering/Pipeline/RenderPipelineNodes.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Common/Utils.h"
 #include "Rendering/Core/BindlessResourceManager.h"
 #include "Rendering/Core/Device.h"
@@ -54,6 +55,7 @@
 #include "Rendering/Utils/CubeLutFileParser.h"
 #include "Rendering/Utils/CubeLutGpuUpload.h"
 #include "Rendering/Core/NamedPushConstantWriter.h"
+#include "Types/Fnv1a.h"
 #include "Types/StringId.h"
 #include "Mathematics/Matrix4x4.h"
 #include "Mathematics/MatrixOps.h"
@@ -65,12 +67,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cassert>
 #include <cstring>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -88,15 +88,11 @@ using namespace ::GameEngine::Rendering;
 namespace
 {
 // L1a kill switch (GE_SHADOW_CACHE=0 forces every shadowed point light to
-// re-render its faces each frame). ON-unless-"0", read once — the standard
-// GE_ flag idiom (mirrors IsCasterReductionEnabled / GE_SHADOW_WALK_EARLYOUT).
+// re-render its faces each frame). On unless switched off, read once (mirrors
+// IsCasterReductionEnabled / GE_SHADOW_WALK_EARLYOUT).
 bool IsPointShadowCacheEnabled()
 {
-    static const bool s_Enabled = []()
-    {
-        const char* env = std::getenv("GE_SHADOW_CACHE");
-        return !env || std::strcmp(env, "0") != 0;
-    }();
+    static const bool s_Enabled = Platform::EnvironmentSwitchEnabled("GE_SHADOW_CACHE", true);
     return s_Enabled;
 }
 
@@ -108,25 +104,10 @@ bool IsPointShadowCacheEnabled()
 // produces a byte-stable key frame to frame.
 uint64_t HashPointShadowContent(const float positionWS[3], float range, uint8_t faceMask, uint32_t renderLayerMask)
 {
-    constexpr uint64_t kFnvOffset = 14695981039346656037ull;
-    constexpr uint64_t kFnvPrime = 1099511628211ull;
-    uint64_t h = kFnvOffset;
-    const auto mix32 = [&](uint32_t v)
-    {
-        for (int byte = 0; byte < 4; ++byte)
-        {
-            h ^= (v >> (byte * 8)) & 0xFFu;
-            h *= kFnvPrime;
-        }
-    };
-    mix32(std::bit_cast<uint32_t>(positionWS[0]));
-    mix32(std::bit_cast<uint32_t>(positionWS[1]));
-    mix32(std::bit_cast<uint32_t>(positionWS[2]));
-    mix32(std::bit_cast<uint32_t>(range));
-    mix32(renderLayerMask);
-    h ^= faceMask;
-    h *= kFnvPrime;
-    return h;
+    uint64_t h = Hashing::Fnv1a64(positionWS, sizeof(float) * 3);
+    h = Hashing::Fnv1a64Value(h, range);
+    h = Hashing::Fnv1a64Value(h, renderLayerMask);
+    return Hashing::Fnv1a64Value(h, faceMask);
 }
 
 const char* PointShadowDirtyCauseName(PointShadowDirtyCause cause)
@@ -412,6 +393,42 @@ ResolvedPassResources RenderServices::BuildShadowPassResources(
     // general private builder so the resolution logic stays in one place.
     return BuildPassResourcesRG(frame, viewId, Rendering::MaterialKeyword::None, nullptr, camBuf,
                                 camOffset);
+}
+
+void RenderServices::PublishDirectionalShadowDataRG(Rendering::RenderGraph::RGFrame& frame,
+    Rendering::ViewId viewId, Rendering::RenderGraph::RGFrame::TypedUpload<ShadowDataGPU> data)
+{
+    ViewFrameRGFor(frame, viewId).DirectionalShadowData = data;
+}
+
+bool RenderServices::ShareDirectionalShadowsRG(Rendering::RenderGraph::RGFrame& frame,
+    Rendering::ViewId sourceView, Rendering::ViewId receiverView)
+{
+    if (sourceView == receiverView) return false;
+    const auto* sourceDesc = Views().FindViewDesc(sourceView);
+    const auto* receiverDesc = Views().FindViewDesc(receiverView);
+    const auto* sourceFrame = FindViewFrameRGFor(frame, sourceView);
+    if (!sourceDesc || !receiverDesc || sourceDesc->worldId != receiverDesc->worldId ||
+        !sourceFrame || !sourceFrame->ShadowMapArray.IsValid() ||
+        !sourceFrame->DirectionalShadowData.Valid()) return false;
+    const auto* sourceCamera = Views().FindCameraData(sourceDesc->cameraId);
+    const auto* receiverCamera = Views().FindCameraData(receiverDesc->cameraId);
+    if (!sourceCamera || !receiverCamera) return false;
+    auto data = frame.AllocUpload<ShadowDataGPU>();
+    if (!data.Valid()) return false;
+    *data.Ptr = *sourceFrame->DirectionalShadowData.Ptr;
+    RebaseDirectionalShadowData(*data.Ptr, *sourceCamera, *receiverCamera);
+    // Copy before inserting: the destination can rehash m_ViewFrameRG.
+    const auto source = *sourceFrame;
+    auto& receiver = ViewFrameRGFor(frame, receiverView);
+    receiver.ShadowMapArray = source.ShadowMapArray;
+    receiver.TransmittanceShadowArray = source.TransmittanceShadowArray;
+    receiver.MsmMoments = source.MsmMoments;
+    receiver.ShadowPcssPyramid = source.ShadowPcssPyramid;
+    receiver.DirectionalShadowData = data;
+    if (const auto* sampler = Views().GetViewShadowResources(sourceView))
+        Views().SetViewShadowSampler(receiverView, sampler->shadowSampler);
+    return true;
 }
 
 void RenderServices::PublishAreaShadow(ShadowDeclareSeam, Rendering::RenderGraph::RGFrame& frame,
@@ -842,6 +859,12 @@ Rendering::RenderGraph::RGPass RenderServices::AddWorldDepthPrepassImpl(
     const bool isRecover = phase == Rendering::GPUDrawStreamBuilder::SlicePhase::B;
     // The non-occluding prepass loads the camera prepass's depth and adds the non-occluding heads.
     const bool isNonOccluding = !isRecover && heads == PrepassHeads::NonOccluding;
+
+    // Pixelation bands discard out-of-band geometry in their color fragment
+    // shader. A vertex-only depth prepass would occlude the background with
+    // those rejected fragments. Let the band color pass write its own depth.
+    if (IsDepthPixelationView(viewId))
+        return {};
 
     if (!depth.IsValid())
         return {};

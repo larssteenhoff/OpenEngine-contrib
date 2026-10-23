@@ -62,10 +62,6 @@ bool WriteBuildCacheRecord(const std::filesystem::path& dir, const BuildCacheRec
 std::string ReadEngineAbiMarker(const std::filesystem::path& dir);
 bool WriteEngineAbiMarker(const std::filesystem::path& dir, const std::string& abiDigest);
 
-// FNV-1a over `data`, chainable via `seed`: pass a prior result to keep hashing one
-// logical stream across several pieces. Shared by the digests below, the manager's
-// content-addressed shadow-copy naming, and the full staleness digest.
-std::uint64_t Fnv1aHash(std::string_view data, std::uint64_t seed = 0xcbf29ce484222325ULL);
 std::string ToHexDigest(std::uint64_t hash);
 
 // Hash of the ABI inputs alone: config + the Engine binary's link stamp + compile

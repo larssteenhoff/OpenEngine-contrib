@@ -225,7 +225,7 @@ struct CanaryFunctor {
 
 struct CanaryEntityFunctor : CanaryFunctor {
     using CanaryFunctor::CanaryFunctor;
-    void operator()(EntityHandle, const Position&, Velocity&) const { CheckCanary(); }
+    void operator()(EntityHandle, const Position&, Writable<Velocity>) const { CheckCanary(); }
 };
 } // namespace
 

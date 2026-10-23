@@ -23,6 +23,7 @@
 #include "Scripting/PathResolver.h"
 #include "Logger/Logger.h"
 #include "Logger/CallbackSink.h"
+#include "TestTempDir.h"
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -125,9 +126,8 @@ class LogCapture
 
 TEST(ScriptsProjectGeneration, GeneratedProjectAnchorsPathsAndGuardsEngineBinDir)
 {
-    const std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_ScriptsCsprojGen";
+    const std::filesystem::path ws = TestUtils::MakeUniqueTempDirectory("GE_ScriptsCsprojGen");
     std::error_code ec;
-    std::filesystem::remove_all(ws, ec);
     std::filesystem::create_directories(ws / "Assets", ec);
 
     JobSystem::WorkStealingThreadPool pool(2);
@@ -173,9 +173,8 @@ TEST(ScriptsProjectGeneration, GeneratedProjectAnchorsPathsAndGuardsEngineBinDir
 
 TEST(ScriptsProjectGeneration, SelfHealsStaleEngineBinDirWithLoudDiagnostic)
 {
-    const std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_ScriptsCsprojSelfHeal";
+    const std::filesystem::path ws = TestUtils::MakeUniqueTempDirectory("GE_ScriptsCsprojSelfHeal");
     std::error_code ec;
-    std::filesystem::remove_all(ws, ec);
     std::filesystem::create_directories(ws / "Assets", ec);
 
     JobSystem::WorkStealingThreadPool pool(2);
@@ -224,9 +223,8 @@ TEST(ScriptsProjectGeneration, PackageReferencesBakedAndRemovedWithModuleSet)
     // runtime assemblies must appear as <Reference> items, Editor-kind ones
     // must not (GameEngine.Scripts.dll loads in the Player), and clearing the
     // package set must remove them again.
-    const std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_ScriptsCsprojPkgRefs";
+    const std::filesystem::path ws = TestUtils::MakeUniqueTempDirectory("GE_ScriptsCsprojPkgRefs");
     std::error_code ec;
-    std::filesystem::remove_all(ws, ec);
     std::filesystem::create_directories(ws / "Assets", ec);
 
     JobSystem::WorkStealingThreadPool pool(2);
@@ -381,11 +379,9 @@ TEST(ScriptsProjectGeneration, CrossRootLayoutFallsBackToAbsoluteSourcePath)
     // sharing the workspace produced a "..\..\..\..\.." Compile Include that
     // re-anchored to the repo root. Such layouts must bake the absolute scripts
     // root instead of a relative climb.
-    const std::filesystem::path wsA = std::filesystem::temp_directory_path() / "GE_ScriptsCsprojCrossRootA";
-    const std::filesystem::path wsB = std::filesystem::temp_directory_path() / "GE_ScriptsCsprojCrossRootB";
+    const std::filesystem::path wsA = TestUtils::MakeUniqueTempDirectory("GE_ScriptsCsprojCrossRootA");
+    const std::filesystem::path wsB = TestUtils::MakeUniqueTempDirectory("GE_ScriptsCsprojCrossRootB");
     std::error_code ec;
-    std::filesystem::remove_all(wsA, ec);
-    std::filesystem::remove_all(wsB, ec);
     std::filesystem::create_directories(wsA / "Assets", ec);
     std::filesystem::create_directories(wsB, ec);
 
@@ -425,9 +421,8 @@ TEST(ScriptsProjectGeneration, CrossRootLayoutFallsBackToAbsoluteSourcePath)
 // dll/pdb files no resolved module produces, and keep the resolved ones.
 TEST(ScriptsProjectGeneration, StalePackageAssembliesArePrunedOnPackageSetRebind)
 {
-    const std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_ScriptsPkgPrune";
+    const std::filesystem::path ws = TestUtils::MakeUniqueTempDirectory("GE_ScriptsPkgPrune");
     std::error_code ec;
-    std::filesystem::remove_all(ws, ec);
     std::filesystem::create_directories(ws / "Assets", ec);
 
     JobSystem::WorkStealingThreadPool pool(2);
@@ -471,9 +466,8 @@ TEST(ScriptsProjectGeneration, StalePackageAssembliesArePrunedOnPackageSetRebind
 // fresh resolution of the workspace manifest before any initial load.
 TEST(ScriptsProjectGeneration, InitializePrunesStalePackageAssembliesFromFreshResolution)
 {
-    const std::filesystem::path ws = std::filesystem::temp_directory_path() / "GE_ScriptsPkgPruneInit";
+    const std::filesystem::path ws = TestUtils::MakeUniqueTempDirectory("GE_ScriptsPkgPruneInit");
     std::error_code ec;
-    std::filesystem::remove_all(ws, ec);
     std::filesystem::create_directories(ws / "Assets", ec);
 
     // A package that still resolves, with Runtime + Editor CSharp modules

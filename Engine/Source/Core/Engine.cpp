@@ -66,6 +66,8 @@
 #include "CBTTerrainECS/Systems/RegisterCBTSystems.h"
 #include "TerrainGrass/RegisterTerrainGrass.h"
 #include "Ocean/Systems/RegisterOceanSystems.h"
+#include "TileMapECS/RegisterTileMap.h"
+#include "TileMapECS/TileMapRuntimeStore.h"
 #include "MarkupECS/MarkupService.h"
 #include "SplineECS/SplineService.h"
 #include "SplineECS/Systems/RegisterSplineSystems.h"
@@ -86,6 +88,7 @@
 #include "Engine/Rendering/FrameOrchestrator.h"
 #include "Engine/Rendering/RenderServices.h"
 #include "Engine/Rendering/Systems/LensFlareExtractionSystem.h"
+#include "Engine/Rendering/2D/Systems/SpriteAnimationSystem.h"
 #include "Engine/Rendering/RenderWorldHooks.h"
 #include "Engine/Video/VideoTextureSystem.h"
 #include "PluginAPI/EnginePlugin.h"
@@ -277,6 +280,8 @@ const WorldServiceLifecycle kWorldServices[] = {
      &MarkupECS::MarkupService::Shutdown},
     {&PathfindingECS::NavigationService::IsInitialized, &PathfindingECS::NavigationService::Initialize,
      &PathfindingECS::NavigationService::Shutdown},
+    {&TileMapECS::TileMapRuntimeStore::IsInitialized, &TileMapECS::TileMapRuntimeStore::Initialize,
+     &TileMapECS::TileMapRuntimeStore::Shutdown},
 };
 
 void InitializeWorldServices()
@@ -1155,19 +1160,6 @@ void EngineCore::Shutdown()
             m_ShaderHotReloadHandle = 0;
         }
 
-        // Unregister core engine asset types
-        try
-        {
-            auto& typeRegistry = m_AssetManager->GetAssetTypeRegistry();
-            typeRegistry.UnregisterAssetType(AssetType::Audio);
-            typeRegistry.UnregisterAssetType(AssetType::Model);
-            Logger::Log::Info("Core asset types unregistered");
-        }
-        catch (const std::exception& e)
-        {
-            Logger::Log::Error("Exception unregistering core asset types: {}", e.what());
-        }
-
         m_AssetManager->Shutdown();
         m_AssetManager.reset();
 
@@ -1484,6 +1476,10 @@ bool EngineCore::EnableRenderingLoop(Engine::Renderer::RenderServices* renderSer
         TerrainECS::AddTerrainSystemsToSchedule(schedule, renderServices);
         CBTTerrainECS::AddCBTSystemsToSchedule(schedule, renderServices);
         Ocean::AddOceanSystemsToSchedule(schedule, renderServices);
+        TileMapECS::AddTileMapSystemsToSchedule(schedule, renderServices);
+        schedule.Add<Engine::Renderer::SpriteAnimationSystem>(
+            "SpriteAnimation", ECS::SystemPhase::Extraction, 7,
+            {"TransformHierarchy"}, renderServices);
         schedule.Add<Engine::Renderer::LensFlareExtractionSystem>(
             "LensFlareExtraction", ECS::SystemPhase::Extraction, 7,
             {"TransformHierarchy", "Camera"}, renderServices);

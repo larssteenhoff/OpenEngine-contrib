@@ -27,6 +27,8 @@
 #include "ECS/ECSTemplates.h"
 #include "Mathematics/Matrix4x4.h"
 
+#include "TestTempDir.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -1321,9 +1323,8 @@ TEST(OceanQueryTests, DepthCacheAssetSamplesAndRoundTrips)
     EXPECT_NEAR(depth, 5.0f, 1e-5f);
     EXPECT_FALSE(cache.SampleDepth(2.1f, 1.0f, depth));
 
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanDepthCacheAsset_Test.oceandepth";
-    std::filesystem::remove(path);
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_OceanDepthCacheAsset_Test")};
+    const std::filesystem::path path = directory.Path() / "GameEngine_OceanDepthCacheAsset_Test.oceandepth";
     ASSERT_TRUE(cache.SaveBinary(path));
 
     OceanDepthCacheAsset loaded;
@@ -1720,9 +1721,8 @@ TEST(OceanQueryTests, SavedDepthCacheReloadsWhenSourceFileChanges)
     OceanDepthCacheAsset second;
     ASSERT_TRUE(second.Reset(desc, {7.0f, 7.0f, 7.0f, 7.0f}));
 
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanDepthCacheReload_Test.oceandepth";
-    std::filesystem::remove(path);
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_OceanDepthCacheReload_Test")};
+    const std::filesystem::path path = directory.Path() / "GameEngine_OceanDepthCacheReload_Test.oceandepth";
     ASSERT_TRUE(first.SaveBinary(path));
 
     std::error_code ec;
@@ -1762,9 +1762,8 @@ TEST(OceanQueryTests, SavedDepthCacheReloadsWhenRevisionChangesWithoutTimestampC
     OceanDepthCacheAsset second;
     ASSERT_TRUE(second.Reset(desc, {7.0f, 7.0f, 7.0f, 7.0f}));
 
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanDepthCacheRevision_Test.oceandepth";
-    std::filesystem::remove(path);
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_OceanDepthCacheRevision_Test")};
+    const std::filesystem::path path = directory.Path() / "GameEngine_OceanDepthCacheRevision_Test.oceandepth";
     ASSERT_TRUE(first.SaveBinary(path));
 
     std::error_code ec;
@@ -1815,12 +1814,9 @@ TEST(OceanQueryTests, SavedDepthCacheLoadsAndComposesMultipleFiles)
     OceanDepthCacheAsset right;
     ASSERT_TRUE(right.Reset(rightDesc, {4.0f}));
 
-    const std::filesystem::path leftPath =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanDepthCache_Left.oceandepth";
-    const std::filesystem::path rightPath =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanDepthCache_Right.oceandepth";
-    std::filesystem::remove(leftPath);
-    std::filesystem::remove(rightPath);
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_OceanDepthCache")};
+    const std::filesystem::path leftPath = directory.Path() / "GameEngine_OceanDepthCache_Left.oceandepth";
+    const std::filesystem::path rightPath = directory.Path() / "GameEngine_OceanDepthCache_Right.oceandepth";
     ASSERT_TRUE(left.SaveBinary(leftPath));
     ASSERT_TRUE(right.SaveBinary(rightPath));
 
@@ -1864,9 +1860,8 @@ TEST(OceanQueryTests, FFTCollisionAssetBakesSamplesAndRoundTrips)
     EXPECT_NEAR(sample.Height, 4.0f, 1e-4f);
     EXPECT_NEAR(sample.VelocityWS[1], 0.0f, 0.1f);
 
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanFFTCollision_Test.oceanfft";
-    std::filesystem::remove(path);
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_OceanFFTCollision_Test")};
+    const std::filesystem::path path = directory.Path() / "GameEngine_OceanFFTCollision_Test.oceanfft";
     ASSERT_TRUE(asset.SaveBinary(path));
     OceanFFTCollisionAsset loaded;
     ASSERT_TRUE(loaded.LoadBinary(path));
@@ -2081,9 +2076,8 @@ TEST(OceanQueryTests, OceanSettingsAssetRoundTripsAndAssetTypesAreRegistered)
     settings.DynamicWaves.SimulationFrequency = 90.0f;
     settings.DynamicWaves.MaximumSubsteps = 6u;
     settings.DynamicWaves.CourantNumber = 0.6f;
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanSettings_Test.oceansettings";
-    std::filesystem::remove(path);
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_OceanSettings_Test")};
+    const std::filesystem::path path = directory.Path() / "GameEngine_OceanSettings_Test.oceansettings";
     ASSERT_TRUE(settings.SaveJson(path));
     OceanSettingsAsset loaded;
     ASSERT_TRUE(loaded.LoadJson(path));
@@ -2123,9 +2117,8 @@ TEST(OceanQueryTests, OceanPresetAppliesLiveBaseAndSparseOverrides)
     EXPECT_TRUE(instance.ResetField("Renderer.LodCount"));
     EXPECT_EQ(*std::get_if<uint64>(instance.Resolve("Renderer.LodCount")), 3u);
 
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "GameEngine_OceanPreset_Test.oceanpreset";
-    std::filesystem::remove(path);
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_OceanPreset_Test")};
+    const std::filesystem::path path = directory.Path() / "GameEngine_OceanPreset_Test.oceanpreset";
     ASSERT_TRUE(preset->SaveJson(path));
     OceanPresetAsset loaded;
     ASSERT_TRUE(loaded.LoadJson(path));

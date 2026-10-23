@@ -118,6 +118,9 @@ struct Camera {
     // The volume layers this camera takes: a PostProcessVolume affects it when the
     // volume's VolumeLayers intersect these.
     Rendering::RenderLayerMask VolumeLayers = Rendering::RenderLayerMask::All();
+    // When true, game UI is composited into this camera's image before fullscreen
+    // post-processing. Disable to keep HUD/UI crisp and unaffected by camera effects.
+    bool IncludeUIInPostProcessing {true};
 
     // Exposure (the camera's sensor/eye) — the single source of truth for exposure. When this camera
     // drives a view, its exposure sets that view's exposure (PostProcessVolumes contribute only grading
@@ -183,7 +186,14 @@ struct Camera {
     // yielding integer screen-pixels-per-source-texel for crisp pixel art.
     bool PixelPerfect {false};
     // Reference pixel size: source texels per world unit (Pixels Per Unit).
+    // Ignored while PixelPerfectAutoPixelsPerUnit resolves a density from the
+    // scene; it stays the authored fallback for a scene with no tilemap.
     uint32 PixelPerfectPixelsPerUnit {32};
+    // Derive Pixels Per Unit from the scene's tilemaps (first visible layer's
+    // tile pixel width / cell width) instead of the authored value, so the
+    // camera follows the art rather than a number that goes stale on a tileset
+    // change. Falls back to PixelPerfectPixelsPerUnit when nothing resolves.
+    bool PixelPerfectAutoPixelsPerUnit {true};
     // Reference resolution the integer upscale is computed against.
     uint32 PixelPerfectReferenceWidth {320};
     uint32 PixelPerfectReferenceHeight {180};

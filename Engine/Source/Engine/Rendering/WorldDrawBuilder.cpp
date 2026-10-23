@@ -5,6 +5,7 @@
 #include "Engine/Rendering/MaterialDeformationClassify.h"
 #include "Engine/Rendering/MaterialVertexAnimation.h"
 #include "Engine/Rendering/MeshGPURegistry.h"
+#include "JobSystem/WorkStealingThreadPool.h"
 #include "Rendering/Core/ThreadingUtils.h"
 
 #include <algorithm>
@@ -15,22 +16,24 @@ namespace Engine::Renderer
 {
 using namespace ::GameEngine::Rendering;
 
-thread_local uint32 WorldDrawBuilder::t_MySlot = UINT32_MAX;
+WorldDrawBuilder::WorldDrawBuilder(const JobSystem::WorkStealingThreadPool* jobSystem)
+    : m_JobSystem(jobSystem),
+      m_OffPoolBufferIndex(jobSystem ? jobSystem->GetWorkerCount() : 0),
+      m_ThreadBuffers(m_OffPoolBufferIndex + 1)
+{
+}
 
 void WorldDrawBuilder::BeginFrame()
 {
-    // Each submitting thread owns one slot; slots on separate lines keep the
-    // threads from invalidating each other's records.
+    // Each submitting thread owns one buffer; buffers on separate lines keep
+    // the threads from invalidating each other's records.
     static_assert(alignof(decltype(m_ThreadBuffers)::value_type) == kFalseSharingSeparation);
 
-    // Clear per-thread buffers (only those that were used last frame)
-    const uint32 usedSlots = m_NextThreadSlot.load(std::memory_order_relaxed);
-    for (uint32 i = 0; i < usedSlots; ++i)
+    for (FalseSharingPadded<ThreadSubmissionBuffer>& slot : m_ThreadBuffers)
     {
-        m_ThreadBuffers[i].Value.records.clear();
-        m_ThreadBuffers[i].Value.drained = 0;
+        slot.Value.records.clear();
+        slot.Value.drained = 0;
     }
-    m_NextThreadSlot.store(0, std::memory_order_relaxed);
 
     // Clear merged data
     for (auto& [viewId, submissions] : m_SubmissionsByView)
@@ -54,29 +57,22 @@ void WorldDrawBuilder::Submit(std::span<const WorldSubmissionRecord> records)
     if (records.empty())
         return;
 
-    // Each thread lazily acquires a unique slot (lock-free)
-    uint32 slot = t_MySlot;
-    if (slot >= m_NextThreadSlot.load(std::memory_order_relaxed) || slot == UINT32_MAX)
-    {
-        slot = m_NextThreadSlot.fetch_add(1, std::memory_order_relaxed);
-        t_MySlot = slot;
-    }
-    assert(slot < kMaxSubmitThreads && "Too many threads submitting draws concurrently");
-
-    auto& buf = m_ThreadBuffers[slot].Value.records;
+    // A worker owns the buffer at its id. Off the pool the id is invalid
+    // (SIZE_MAX), which clamps to the off-pool buffer.
+    const size_t workerId = m_JobSystem ? m_JobSystem->GetCurrentWorkerId() : SIZE_MAX;
+    auto& buf = m_ThreadBuffers[std::min(workerId, m_OffPoolBufferIndex)].Value.records;
     buf.insert(buf.end(), records.begin(), records.end());
 }
 
 void WorldDrawBuilder::MergeSubmissions()
 {
-    // Idempotent incremental drain: each slot tracks how many records it has
+    // Idempotent incremental drain: each buffer tracks how many records it has
     // already been drained for this frame, so late submissions (e.g. thumbnail
     // views submitted after the main scene pipeline has already built keys)
     // still land in m_SubmissionsByView on the next MergeSubmissions() call.
-    const uint32 count = m_NextThreadSlot.load(std::memory_order_acquire);
-    for (uint32 i = 0; i < count; ++i)
+    for (FalseSharingPadded<ThreadSubmissionBuffer>& slot : m_ThreadBuffers)
     {
-        auto& buf = m_ThreadBuffers[i].Value;
+        ThreadSubmissionBuffer& buf = slot.Value;
         const uint32 total = static_cast<uint32>(buf.records.size());
         for (uint32 r = buf.drained; r < total; ++r)
         {

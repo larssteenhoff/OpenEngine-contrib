@@ -747,7 +747,8 @@ cgltf_type BaseAttributeType(const cgltf_attribute& attribute)
     case cgltf_attribute_type_normal:
         return cgltf_type_vec3;
     case cgltf_attribute_type_texcoord:
-        return attribute.index == 0 ? cgltf_type_vec2 : cgltf_type_invalid;
+        // TEXCOORD_0 and TEXCOORD_1 (the second UV set material surfaces such as lightmaps use).
+        return attribute.index <= 1 ? cgltf_type_vec2 : cgltf_type_invalid;
     case cgltf_attribute_type_tangent:
     case cgltf_attribute_type_joints:
     case cgltf_attribute_type_weights:
@@ -1516,13 +1517,19 @@ bool ModelAsset::LoadGLTF(const Vector<uint8>& data, const FbxLoaderOptions& loa
                         const float* normal = attributeFloats.data() + i * 3;
                         convertVec(normal[0], normal[1], normal[2], mesh.Vertices[i].Normal);
                     }
-                } else if (a.type == cgltf_attribute_type_texcoord) {
+                } else if (a.type == cgltf_attribute_type_texcoord && a.index == 0) {
                     haveTexcoords = true;
                     for (size_t i = 0; i < count; ++i) {
                         const float* texcoord = attributeFloats.data() + i * 2;
                         mesh.Vertices[i].TexCoords[0] = texcoord[0];
                         mesh.Vertices[i].TexCoords[1] = texcoord[1];
                     }
+                } else if (a.type == cgltf_attribute_type_texcoord && a.index == 1) {
+                    // Preserve the authored second UV set for material surfaces. The accessor was
+                    // unpacked above (interleaved, normalized and sparse data), and keeps glTF's
+                    // texture-coordinate convention like UV0.
+                    mesh.TexCoords1.resize(count * 2u);
+                    std::copy_n(attributeFloats.data(), count * 2u, mesh.TexCoords1.data());
                 } else if (a.type == cgltf_attribute_type_tangent) {
                     haveTangents = true;
                     for (size_t i = 0; i < count; ++i) {
@@ -1568,6 +1575,14 @@ bool ModelAsset::LoadGLTF(const Vector<uint8>& data, const FbxLoaderOptions& loa
 
             if (!havePositions || positionVertexCount == 0)
                 continue;
+
+            // POSITION defines the authoritative vertex count for indexed geometry.
+            // Other attributes can be missing or sparse; trim any oversize tail so
+            // index validation stays tied to real POSITION vertices.
+            if (mesh.Vertices.size() != positionVertexCount)
+                mesh.Vertices.resize(positionVertexCount);
+            if (!mesh.HasTexCoords1())
+                mesh.TexCoords1.clear();
 
             const std::string indexPastTheVertices = IndexPastTheVertices(mesh.Indices, mesh.Vertices.size());
             if (!indexPastTheVertices.empty()) {

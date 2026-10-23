@@ -36,6 +36,9 @@ json BuildNode(UIElement* element, int depth, const UITreeDumpOptions& options,
     // Mark hidden elements so the caller knows they're not visible.
     if (hidden)
         node["hidden"] = true;
+    // Mark controls that refuse input (SetEnabled(false), the :disabled state).
+    if (!element->IsEnabled())
+        node["disabled"] = true;
 
     const auto& id = element->GetId();
     if (!id.empty())
@@ -89,21 +92,12 @@ json BuildNode(UIElement* element, int depth, const UITreeDumpOptions& options,
     if (depth < options.MaxDepth)
     {
         json children = json::array();
-        for (auto& child : element->GetChildren())
-        {
-            if (!child)
-                continue;
-            json childNode = BuildNode(child.get(), depth + 1, options, outCompleteness);
+        // Includes mount targets (portal-like non-owned children used by the dock system).
+        element->ForEachLogicalChild([&](UIElement* child) {
+            json childNode = BuildNode(child, depth + 1, options, outCompleteness);
             if (!childNode.is_null())
                 children.push_back(std::move(childNode));
-        }
-        // Follow mount targets (portal-like non-owned children used by the dock system).
-        if (UIElement* mounted = element->GetMountTarget())
-        {
-            json mountedNode = BuildNode(mounted, depth + 1, options, outCompleteness);
-            if (!mountedNode.is_null())
-                children.push_back(std::move(mountedNode));
-        }
+        });
         if (!children.empty())
             node["ch"] = std::move(children);
     }

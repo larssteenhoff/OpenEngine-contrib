@@ -38,8 +38,9 @@ namespace
 {
 
 void StartAnimatorPlayback(ECS::World& world, AssetManager& am, ECS::EntityHandle rootEntity,
-                           Components::Animator& animator)
+                           ECS::Writable<Components::Animator> animatorRow)
 {
+    const Components::Animator& animator = animatorRow.Get();
     std::vector<ECS::EntityHandle> subtree;
     CollectEntitiesInSubtree(world, rootEntity, subtree);
 
@@ -113,7 +114,7 @@ void StartAnimatorPlayback(ECS::World& world, AssetManager& am, ECS::EntityHandl
         return;
     }
 
-    Engine::Renderer::StartAnimatorFromSource(world, am, animator, subtree);
+    Engine::Renderer::StartAnimatorFromSource(world, am, animatorRow.Mutable(), subtree);
 }
 
 } // namespace
@@ -121,8 +122,8 @@ void StartAnimatorPlayback(ECS::World& world, AssetManager& am, ECS::EntityHandl
 void ApplyAnimatorOnEnterPlayMode(ECS::World& world, AssetManager& am)
 {
     world.Query<ECS::Write<Components::Animator>>().Each(
-        [&](ECS::EntityHandle rootEntity, Components::Animator& animator)
-        { StartAnimatorPlayback(world, am, rootEntity, animator); });
+        [&](ECS::EntityHandle rootEntity, ECS::Writable<Components::Animator> animatorRow)
+        { StartAnimatorPlayback(world, am, rootEntity, animatorRow); });
 }
 
 } // namespace GameEngine::Editor

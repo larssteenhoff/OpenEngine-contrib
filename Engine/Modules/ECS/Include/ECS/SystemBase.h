@@ -9,15 +9,16 @@
 //     struct SpinnerSystem : ECS::SystemBase {
 //         void OnUpdate(ECS::World& w, float dt) {
 //             w.Query<ECS::Read<Demo::Spinner>, ECS::Write<Transform>>().Each(
-//                 [dt](const Demo::Spinner& s, Transform& xf){
-//                     xf.RotationEuler.Y += s.Speed * dt;   // (fields illustrative)
+//                 [dt](const Demo::Spinner& s, ECS::Writable<Transform> xf){
+//                     xf.Mutable().RotationEuler.Y += s.Speed * dt;   // (fields illustrative)
 //                 });
 //         }
 //     };
 //
 // Access is declared explicitly (D-SDK): Read<T>/Write<T> qualifiers plus
-// concrete const-correct parameter types. Generic auto& parameters on
-// unqualified component types are a compile error.
+// concrete const-correct parameter types; a Write<T> component arrives as
+// ECS::Writable<T>. Generic auto& parameters on unqualified component types
+// are a compile error.
 //
 // LIFECYCLE METHODS are detected by name (all optional), invoked by the engine's user-system
 // bridge during PLAY MODE:

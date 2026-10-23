@@ -8,6 +8,7 @@
 
 #include "Rendering/Materials/MaterialDocument.h"
 #include "Rendering/ShaderGraph/SgGraphFileIO.h"
+#include "TestTempDir.h"
 
 #include <filesystem>
 #include <fstream>
@@ -966,14 +967,14 @@ TEST(MaterialGraphCompilerTest, CompileFromFileUsesJsonFenceNotTags)
 {
     const std::string tags = "// @sg-graph name=FenceOnly\n";
     const std::string fenced = Graph::AppendAuthoringJsonFence(tags, kMinimalGraphJson);
-    const auto path = std::filesystem::temp_directory_path() / "ge-graph-fence-compile.glsl";
+    const TestUtils::ScopedTempDir tempDir(TestUtils::MakeUniqueTempDirectory("ge-graph-fence-compile"));
+    const auto path = tempDir.Path() / "ge-graph-fence-compile.glsl";
     {
         std::ofstream out(path);
         ASSERT_TRUE(static_cast<bool>(out));
         out << fenced;
     }
     const auto result = MaterialGraphCompiler::CompileFromFile(path);
-    std::filesystem::remove(path);
     ASSERT_TRUE(result.success) << (result.errors.empty() ? "" : result.errors.front().Message);
     EXPECT_NE(result.glslSource.find("EvaluateSurface"), std::string::npos);
 }
@@ -985,14 +986,14 @@ TEST(MaterialGraphCompilerTest, CompileFromFileInvalidFenceFails)
         "// GE-GRAPH-JSON-BEGIN\n"
         "// {not-json\n"
         "// GE-GRAPH-JSON-END\n";
-    const auto path = std::filesystem::temp_directory_path() / "ge-graph-fence-invalid.glsl";
+    const TestUtils::ScopedTempDir tempDir(TestUtils::MakeUniqueTempDirectory("ge-graph-fence-invalid"));
+    const auto path = tempDir.Path() / "ge-graph-fence-invalid.glsl";
     {
         std::ofstream out(path);
         ASSERT_TRUE(static_cast<bool>(out));
         out << broken;
     }
     const auto result = MaterialGraphCompiler::CompileFromFile(path);
-    std::filesystem::remove(path);
     EXPECT_FALSE(result.success);
     ASSERT_FALSE(result.errors.empty());
     EXPECT_NE(result.errors.front().Message.find("invalid graph JSON fence"), std::string::npos);

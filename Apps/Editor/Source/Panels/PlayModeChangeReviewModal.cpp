@@ -1,6 +1,7 @@
 #include "Panels/PlayModeChangeReviewModal.h"
 
 #include "UI/Controls/Button.h"
+#include "UI/Controls/CollapsibleInfoCard.h"
 #include "UI/Controls/Label.h"
 #include "UI/Controls/ScrollView.h"
 #include "UI/Controls/Toggle.h"
@@ -49,10 +50,8 @@ PlayModeChangeReviewModal::PlayModeChangeReviewModal()
         auto content = std::make_unique<UIElement>();
         content->AddClass("pmcr-content");
 
-        auto help = std::make_unique<Label>();
-        help->SetText("Applied changes are pushed onto the Undo stack as a single compound action.");
-        help->AddClass("pmcr-help");
-        content->AddChild(std::move(help));
+        content->AddChild(std::make_unique<EditorUI::CollapsibleInfoCard>(
+            "Applied changes are pushed onto the Undo stack as a single compound action."));
 
         auto scroll = std::make_unique<ScrollView>();
         scroll->AddClass("pmcr-scroll");

@@ -1,0 +1,27 @@
+---
+title: Tile terrain and rule authoring
+description: Paint terrain transitions and generate tile layers from IntGrid values.
+---
+
+Terrain painting selects transition tiles from the edge and corner matches authored in a tile set. An IntGrid layer is a grid of small whole-number values, such as ground or water, that rules turn into tiles. IntGrid painting stores these values in a separate layer and generates tiles with rules.
+
+## Paint terrain transitions
+
+1. Open the tile set in the Tile Set Editor. Add a terrain set, choose its matching mode, and add named terrains.
+2. Select a terrain and annotate the tiles in the terrain canvas. Corner and side annotations describe which neighboring terrain each part of a tile matches.
+3. Apply and save the tile set. Select a tile layer and choose a terrain in the Tile Palette.
+4. Paint in the Scene View. The Terrain tool chooses matching tiles and repairs neighboring transitions. Choose Erase in the terrain list to clear cells while repairing their neighbors.
+
+The default Terrain shortcut is `7`. A stroke, line, or rectangle produces one undo entry.
+
+## Generate tiles from IntGrid values
+
+1. Add an IntGrid layer from the Tile Palette.
+2. Open **Tile Rules** from the panel list. Select the IntGrid layer and define its named values and display colors.
+3. Select a Tiles layer. In Tile Rules, choose the IntGrid layer as its source.
+4. Add rule groups and rules, or use the terrain wizard to generate rules from the tile set's terrain annotations.
+5. Choose an IntGrid value in the Tile Palette and paint with the IntGrid tool. The default shortcut is `8`. Dependent tile layers update as the values change.
+
+Pattern cells cycle between ignored, required, forbidden, and any occupied value. **From Palette** takes the selected palette tiles as a rule's output. The rule options control mirroring, match chance, placement intervals, and whether later rules may continue matching a cell.
+
+Use **Save Map** in Tile Rules to persist the map's values and rules. The Scene View tint can be disabled from the Tile Palette when inspecting the generated artwork.

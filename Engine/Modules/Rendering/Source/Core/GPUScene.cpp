@@ -5,6 +5,7 @@
 
 #include "Rendering/Core/GPUScene.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Core/CommandList.h"
 #include "Rendering/Core/Device.h"
 #include "Rendering/Core/GPUCulling.h"
@@ -22,7 +23,6 @@ static_assert(GameEngine::Rendering::kMaxCullingViewsPerDispatch ==
 #include <algorithm>
 #include <bit>
 #include <cassert>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -94,11 +94,7 @@ GPUInstance MakeTombstoneInstance()
 // to pick the matching pipeline/binding, so they agree by construction.
 bool ScatterHotEnabledFromEnv()
 {
-    static const bool kEnabled = []()
-    {
-        const char* env = std::getenv("GE_SCATTER_COMPACT");
-        return env == nullptr || env[0] != '0';
-    }();
+    static const bool kEnabled = Platform::EnvironmentSwitchEnabled("GE_SCATTER_COMPACT", true);
     return kEnabled;
 }
 

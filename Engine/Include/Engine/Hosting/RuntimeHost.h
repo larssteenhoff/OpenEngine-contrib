@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Engine/Rendering/SortingLayers.h"
+
 #include "Core/WindowInputRouter.h"
 #include "Engine/Build/GameConfig.h"
 #include "Engine/Rendering/AntiAliasingProjectSettings.h"
@@ -55,6 +57,7 @@ struct RuntimeHostDesc
     Rendering::LodProjectSettings LodSelection;
     /// The engine-wide anti-aliasing and render scale; per-camera overrides still win per view.
     Rendering::AntiAliasingProjectSettings RenderQuality;
+    Rendering::SortingLayers SortingLayers = Rendering::SortingLayers::Defaults();
     /// Asset-relative path of the .rendergraph to render with; empty selects the engine's
     /// default pipeline.
     std::string RenderPipeline;

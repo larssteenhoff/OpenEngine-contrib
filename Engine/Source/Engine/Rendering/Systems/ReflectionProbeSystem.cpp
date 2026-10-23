@@ -1,23 +1,24 @@
 #include "ECSModules/Rendering/Systems/ReflectionProbeSystem.h"
 
-#include "Components/Rendering/Camera.h"
+#include "Components/Rendering/Light.h"
+#include "Components/Rendering/LocalBounds.h"
+#include "Components/Rendering/MeshRenderer.h"
 #include "Components/Rendering/ReflectionProbe.h"
 #include "Components/Transform.h"
+#include "ECS/Components.h"
 #include "ECS/Query.h"
-#include "Engine/Rendering/Camera.h"
 #include "Engine/Rendering/ImageBasedLightingFeature.h"
+#include "Engine/Rendering/Material.h"
 #include "Engine/Rendering/RenderServices.h"
 #include "Engine/Rendering/SceneReflectionProbeEnvironmentSource.h"
-#include "Engine/Rendering/SkyEnvironmentSource.h"
 
-#include "Logger/Logger.h"
 #include "Mathematics/VectorOps.h"
+#include "Types/Fnv1a.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <memory>
-#include <optional>
+#include <vector>
 
 namespace GameEngine { namespace Engine::Renderer {
 
@@ -27,6 +28,7 @@ using Mathematics::Dot3;
 
 constexpr float kReflectionProbeDegToRad = 0.01745329251994329577f;
 constexpr float kMinProbeExtent = 0.0001f;
+constexpr float kMinProjectionScale = 0.001f;
 
 SceneReflectionProbeUpdateMode ToSceneUpdateMode(Components::ReflectionProbeUpdateMode mode)
 {
@@ -40,23 +42,6 @@ SceneReflectionProbeUpdateMode ToSceneUpdateMode(Components::ReflectionProbeUpda
     }
 }
 
-struct ProbeCandidate
-{
-    Components::ReflectionProbe Probe{};
-    uint32 Priority = 0;
-    float NormalizedDistanceSq = 0.0f;
-    float Weight = 1.0f;
-    float InfluenceRadius = 0.0f;
-    float Position[3] = {0.0f, 0.0f, 0.0f};
-    float BoxCenter[3] = {0.0f, 0.0f, 0.0f};
-    float BoxHalfExtents[3] = {0.0f, 0.0f, 0.0f};
-    float BoxAxisX[3] = {1.0f, 0.0f, 0.0f};
-    float BoxAxisY[3] = {0.0f, 1.0f, 0.0f};
-    float BoxAxisZ[3] = {0.0f, 0.0f, 1.0f};
-    bool HasBox = false;
-    uint64_t SourceKey = 0;
-};
-
 struct ProbeVolume
 {
     float Center[3] = {0.0f, 0.0f, 0.0f};
@@ -67,64 +52,14 @@ struct ProbeVolume
     bool Valid = false;
 };
 
-// The probe the camera missed by the least, recorded while the selection loop runs so
-// the no-probe-selected warning can name the closest fix. A rejection on its own is a
-// routine outcome in a multi-probe scene (each probe covers its own room); only the
-// selection OUTCOME — no probe accepted the camera — is a diagnostic.
-struct NearestRejectedProbe
+// A mesh renderer the digest pass reads, copied once per update and sorted by
+// entity id so the digest does not depend on query order.
+struct ProbeSceneObject
 {
-    bool Valid = false;
-    uint32 EntityId = 0;
-    // How far the camera overshoots the volume, in world units: worst-axis overshoot
-    // for a box (exact when one axis rejects, a lower bound when several do), radial
-    // overshoot past the surface for an ellipsoid.
-    float OvershootWorld = 0.0f;
-    int WorstAxis = -1; // 0/1/2 = box local axis; -1 = ellipsoid (radial) rejection
-    float CameraLocal[3] = {0.0f, 0.0f, 0.0f};
-    float HalfExtents[3] = {0.0f, 0.0f, 0.0f};
+    ECS::EntityHandle Entity;
+    Components::WorldTransform Transform;
+    Components::MeshRenderer Mesh;
 };
-
-void RecordIfNearest(NearestRejectedProbe& nearest, uint32 entityId, float overshootWorld,
-                     int worstAxis, const float cameraLocal[3], const float halfExtents[3])
-{
-    if (nearest.Valid && overshootWorld >= nearest.OvershootWorld)
-        return;
-    nearest.Valid = true;
-    nearest.EntityId = entityId;
-    nearest.OvershootWorld = overshootWorld;
-    nearest.WorstAxis = worstAxis;
-    for (int i = 0; i < 3; ++i)
-    {
-        nearest.CameraLocal[i] = cameraLocal[i];
-        nearest.HalfExtents[i] = halfExtents[i];
-    }
-}
-
-void ClearProbeSourceIfActive(ImageBasedLightingFeature* feature, uint64_t worldId)
-{
-    if (!feature)
-        return;
-    if (auto* probeSource =
-            dynamic_cast<SceneReflectionProbeEnvironmentSource*>(feature->GetEnvironmentSource()))
-    {
-        // The IBL feature is engine-global but this system ticks per world: a
-        // probe-less world (preview, play-mode isolation) must not tear down a
-        // source another world's probe installed — that destroy/recreate churn
-        // reallocated the six capture views every frame and no capture ever
-        // completed. Only the owning world clears it.
-        if (probeSource->GetProbe().WorldId == worldId)
-            feature->ClearEnvironmentSource();
-    }
-    else if (auto* skySource = dynamic_cast<SkyEnvironmentSource*>(feature->GetEnvironmentSource()))
-        skySource->ClearProbeOverrides();
-}
-
-bool IsBetterCandidate(const ProbeCandidate& candidate, const ProbeCandidate& best)
-{
-    if (candidate.Priority != best.Priority)
-        return candidate.Priority > best.Priority;
-    return candidate.NormalizedDistanceSq < best.NormalizedDistanceSq;
-}
 
 ProbeVolume ExtractProbeVolume(const Components::WorldTransform& xf)
 {
@@ -180,276 +115,241 @@ float ComputeBoxCaptureRadius(const ProbeVolume& volume, const float capturePosi
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-float ComputeEllipsoidDistanceToEdge(const float local[3], const float half[3], float normalizedRadius)
+SceneReflectionProbeEnvironmentDesc BuildProbeDesc(ECS::World& world, ECS::EntityHandle entity,
+                                                   const Components::ReflectionProbe& probe,
+                                                   const ProbeVolume& volume)
 {
-    if (normalizedRadius <= kMinProbeExtent)
-        return std::min({half[0], half[1], half[2]});
-
-    const float localLen = std::sqrt(Dot3(local, local));
-    if (localLen <= kMinProbeExtent)
-        return std::min({half[0], half[1], half[2]});
-
-    return std::max(0.0f, localLen * ((1.0f / normalizedRadius) - 1.0f));
-}
-
-void CopyVolumeToCandidate(const ProbeVolume& volume, ProbeCandidate& candidate)
-{
+    SceneReflectionProbeEnvironmentDesc desc{};
+    const float projectionScale[3] = {probe.ProjectionScaleX, probe.ProjectionScaleY, probe.ProjectionScaleZ};
     for (int i = 0; i < 3; ++i)
     {
-        candidate.BoxCenter[i] = volume.Center[i];
-        candidate.BoxHalfExtents[i] = volume.HalfExtents[i];
-        candidate.BoxAxisX[i] = volume.AxisX[i];
-        candidate.BoxAxisY[i] = volume.AxisY[i];
-        candidate.BoxAxisZ[i] = volume.AxisZ[i];
+        desc.Position[i] = volume.Center[i] + volume.AxisX[i] * probe.OriginOffsetX +
+                           volume.AxisY[i] * probe.OriginOffsetY + volume.AxisZ[i] * probe.OriginOffsetZ;
+        desc.BoxCenter[i] = volume.Center[i];
+        desc.BoxHalfExtents[i] = volume.HalfExtents[i];
+        desc.BoxAxisX[i] = volume.AxisX[i];
+        desc.BoxAxisY[i] = volume.AxisY[i];
+        desc.BoxAxisZ[i] = volume.AxisZ[i];
+        desc.ProjectionCenter[i] = volume.Center[i] + volume.AxisX[i] * probe.ProjectionOffsetX +
+                                   volume.AxisY[i] * probe.ProjectionOffsetY +
+                                   volume.AxisZ[i] * probe.ProjectionOffsetZ;
+        desc.ProjectionHalfExtents[i] = volume.HalfExtents[i] * std::max(kMinProjectionScale, projectionScale[i]);
     }
+
+    const bool isBox = probe.InfluenceShape == Components::ReflectionProbeInfluenceShape::Box;
+    desc.InfluenceShape = static_cast<uint32_t>(probe.InfluenceShape);
+    desc.InfluenceRadius = ComputeBoxCaptureRadius(volume, desc.Position);
+    if (isBox)
+    {
+        ProbeVolume projection = volume;
+        for (int i = 0; i < 3; ++i)
+        {
+            projection.Center[i] = desc.ProjectionCenter[i];
+            projection.HalfExtents[i] = desc.ProjectionHalfExtents[i];
+        }
+        desc.InfluenceRadius = std::max(desc.InfluenceRadius, ComputeBoxCaptureRadius(projection, desc.Position));
+    }
+    desc.BoxProjection = isBox;
+    desc.BlendDistance = std::max(0.0f, probe.BlendDistance);
+    desc.Priority = probe.Priority;
+    desc.MaxDistance = std::max(0.0f, probe.MaxDistance);
+    desc.CapturedLayers = probe.CapturedLayers;
+    desc.WorldId = world.GetWorldId();
+    desc.SourceKey = (static_cast<uint64_t>(world.GetWorldId()) << 32u) ^ static_cast<uint64_t>(entity.id);
+    if (desc.SourceKey == 0)
+        desc.SourceKey = 1;
+    desc.Intensity = std::max(0.0f, probe.Intensity);
+    desc.ExposureEV = probe.ExposureEV;
+    desc.RotationRadians = probe.RotationDegrees * kReflectionProbeDegToRad;
+    desc.LowerHemisphereDarkness = std::clamp(probe.IblLowerHemisphereDarkness, 0.0f, 1.0f);
+    desc.CaptureEnvironment = probe.CaptureEnvironment;
+    desc.CaptureResolution = ImageBasedLightingFeature::NormalizeCaptureResolution(probe.CaptureResolution);
+    desc.UpdateMode = ToSceneUpdateMode(probe.UpdateMode);
+    desc.RealtimeUpdateInterval = std::max(0.0f, probe.RealtimeUpdateInterval);
+    return desc;
+}
+
+// True when the object's world bounds reach within farDistance of the capture
+// position; folds those bounds into the hash. An object without LocalBounds
+// is included conservatively.
+bool ObjectWithinCaptureReach(ECS::World& world, const ProbeSceneObject& object,
+                              const float position[3], float farDistance, uint64_t& hash)
+{
+    const auto* bounds = world.GetComponent<Components::LocalBounds>(object.Entity);
+    if (!bounds)
+        return true;
+    const auto aabb = bounds->Box.TransformToAABB(object.Transform.matrix);
+    const float nearest[3] = {
+        std::clamp(position[0], aabb.min.x, aabb.max.x),
+        std::clamp(position[1], aabb.min.y, aabb.max.y),
+        std::clamp(position[2], aabb.min.z, aabb.max.z)};
+    float distanceSq = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        const float d = position[i] - nearest[i];
+        distanceSq += d * d;
+    }
+    if (distanceSq > farDistance * farDistance)
+        return false;
+    hash = Hashing::Fnv1a64Value(hash, bounds->Box.center);
+    hash = Hashing::Fnv1a64Value(hash, bounds->Box.halfExtents);
+    return true;
+}
+
+// Membership, transforms and material versions inside the capture's far
+// sphere, plus every directional light (unbounded reach, included even in a
+// scene without a SkyEnvironment). A move across the boundary changes
+// membership in both affected probes. Fills desc.MaterialKeys and
+// desc.SceneEditDigest.
+void ComputeProbeSceneDigest(ECS::World& world, const RenderServices& services,
+                             const std::vector<ProbeSceneObject>& objects,
+                             SceneReflectionProbeEnvironmentDesc& desc)
+{
+    uint64_t hash = Hashing::kFnv1a64OffsetBasis;
+    const float farDistance = std::max(1.0f, desc.MaxDistance > 0.0f ? desc.MaxDistance : desc.InfluenceRadius);
+    for (const ProbeSceneObject& object : objects)
+    {
+        if (!object.Mesh.RenderLayers.Intersects(desc.CapturedLayers))
+            continue;
+        if (!ObjectWithinCaptureReach(world, object, desc.Position, farDistance, hash))
+            continue;
+        const GUID materialKey = object.Mesh.materialAssetGuid.ToGuid();
+        if (!materialKey.IsNull() &&
+            std::find(desc.MaterialKeys.begin(), desc.MaterialKeys.end(), materialKey) == desc.MaterialKeys.end())
+            desc.MaterialKeys.push_back(materialKey);
+        hash = Hashing::Fnv1a64Value(hash, object.Entity.id);
+        hash = Hashing::Fnv1a64Value(hash, object.Transform.matrix);
+        hash = Hashing::Fnv1a64Value(hash, object.Mesh.modelAssetGuid);
+        hash = Hashing::Fnv1a64Value(hash, object.Mesh.meshId);
+        hash = Hashing::Fnv1a64Value(hash, object.Mesh.MeshNameId);
+        hash = Hashing::Fnv1a64Value(hash, object.Mesh.meshGpuHandleId);
+        hash = Hashing::Fnv1a64Value(hash, object.Mesh.materialAssetGuid);
+        if (const Material* material = services.Materials().Registry().Find(materialKey))
+        {
+            hash = Hashing::Fnv1a64Value(hash, material->GetVersion());
+            hash = Hashing::Fnv1a64Value(hash, material->GetContentRevision());
+        }
+    }
+    world.Query<ECS::Read<Components::Light>, ECS::Read<Components::WorldTransform>>()
+        .Without<ECS::Disabled>()
+        .Each([&](ECS::EntityHandle lightEntity, const Components::Light& light,
+                  const Components::WorldTransform& transform) {
+            if (!light.CastsLight || light.Type != Components::LightType::Directional)
+                return;
+            hash = Hashing::Fnv1a64Value(hash, lightEntity.id);
+            hash = Hashing::Fnv1a64Value(hash, transform.matrix);
+            hash = Hashing::Fnv1a64Value(hash, light.Color);
+            hash = Hashing::Fnv1a64Value(hash, light.Intensity);
+            hash = Hashing::Fnv1a64Value(hash, light.IntensityUnit);
+            hash = Hashing::Fnv1a64Value(hash, light.UseColorTemperature);
+            hash = Hashing::Fnv1a64Value(hash, light.ColorTemperature);
+        });
+    desc.SceneEditDigest = hash != 0 ? hash : 1;
+}
+
+bool EntityIdLess(const ProbeSceneObject& a, const ProbeSceneObject& b)
+{
+    return a.Entity.id < b.Entity.id;
+}
+
+// True when any C column was write-granted after the gate; advances the gate
+// to the caller's entry sample.
+template <typename C>
+bool ColumnWrittenSince(ECS::World& world, ECS::ChangeGate& gate, uint64_t entryVersion)
+{
+    auto q = world.Query<ECS::Read<C>>();
+    q.template Changed<C>(gate);
+    bool written = false;
+    q.BatchEach([&](const C*, std::size_t) { written = true; });
+    gate.LastRunVersion = entryVersion;
+    return written;
+}
+
+// Versions of every material a probe's capture reach holds. Material edits are
+// not ECS writes, so the idle fast path compares this instead.
+uint64_t ComputeProbeMaterialDigest(const RenderServices& services,
+                                    const std::vector<SceneReflectionProbeEnvironmentDesc>& probes)
+{
+    uint64_t hash = Hashing::kFnv1a64OffsetBasis;
+    for (const SceneReflectionProbeEnvironmentDesc& desc : probes)
+        for (const GUID& key : desc.MaterialKeys)
+        {
+            hash = Hashing::Fnv1a64Value(hash, key);
+            if (const Material* material = services.Materials().Registry().Find(key))
+            {
+                hash = Hashing::Fnv1a64Value(hash, material->GetVersion());
+                hash = Hashing::Fnv1a64Value(hash, material->GetContentRevision());
+            }
+        }
+    return hash;
 }
 } // namespace
 
+bool ReflectionProbeSystem::SceneUnchangedSinceLastBuild(ECS::World& world)
+{
+    // Sample before probing, and write the sample back as every gate (ChangeGate contract).
+    const uint64_t version = world.GetGlobalSystemVersion();
+    bool anyChange = ColumnWrittenSince<Components::ReflectionProbe>(world, m_ProbeGate, version);
+    anyChange |= ColumnWrittenSince<Components::MeshRenderer>(world, m_MeshGate, version);
+    anyChange |= ColumnWrittenSince<Components::WorldTransform>(world, m_TransformGate, version);
+    anyChange |= ColumnWrittenSince<Components::LocalBounds>(world, m_BoundsGate, version);
+    anyChange |= ColumnWrittenSince<Components::Light>(world, m_LightGate, version);
+    return m_HasBuild && !anyChange && ECS::ChangeFilter::Enabled() &&
+           m_BuiltWorldId == world.GetWorldId() &&
+           m_BuiltStructuralVersion == world.GetStructuralChangeVersion() &&
+           m_BuiltMaterialDigest == ComputeProbeMaterialDigest(*m_RenderServices, m_Probes);
+}
+
+// Every valid probe in the world goes to the IBL feature, which keeps up to
+// ImageBasedLightingFeature::kMaxLocalProbes captures per world, chosen by
+// priority and entity key. Fragments weight their probes by position; the
+// camera position plays no part. The sky stays the global source. A world
+// without probes skips the scene walk; an idle frame re-sends the last
+// descriptors without rescanning meshes or rehashing materials.
 void ReflectionProbeSystem::Update(ECS::World& world, float32 /*deltaTime*/)
 {
     RenderServices* rs = m_RenderServices;
     if (!rs)
         return;
 
-    float cameraPos[3] = {0.0f, 0.0f, 0.0f};
-    const std::optional<Camera> activeCamera = FindActiveCamera(world);
-    const bool hasCamera = activeCamera.has_value();
-    if (hasCamera)
-    {
-        const float* m = activeCamera->worldTransform.Data();
-        cameraPos[0] = m[12];
-        cameraPos[1] = m[13];
-        cameraPos[2] = m[14];
-    }
-
-    ProbeCandidate best{};
-    bool found = false;
-    NearestRejectedProbe nearestRejected{};
-
     auto q = world.Query<
         ECS::Read<Components::ReflectionProbe>,
         ECS::Read<Components::WorldTransform>>();
-
-    q
-     .Each([&](ECS::EntityHandle e,
-               const Components::ReflectionProbe& probe,
-               const Components::WorldTransform& xf) {
-        const ProbeVolume volume = ExtractProbeVolume(xf);
-        if (!volume.Valid)
-            return;
-
-        float normalizedDistanceSq = 0.0f;
-        float weight = 1.0f;
-        const float capturePosition[3] = {
-            volume.Center[0] + volume.AxisX[0] * probe.OriginOffsetX +
-                               volume.AxisY[0] * probe.OriginOffsetY +
-                               volume.AxisZ[0] * probe.OriginOffsetZ,
-            volume.Center[1] + volume.AxisX[1] * probe.OriginOffsetX +
-                               volume.AxisY[1] * probe.OriginOffsetY +
-                               volume.AxisZ[1] * probe.OriginOffsetZ,
-            volume.Center[2] + volume.AxisX[2] * probe.OriginOffsetX +
-                               volume.AxisY[2] * probe.OriginOffsetY +
-                               volume.AxisZ[2] * probe.OriginOffsetZ};
-        const bool hasBox = probe.BoxProjection;
-        const float originOffsetLocal[3] = {
-            probe.OriginOffsetX,
-            probe.OriginOffsetY,
-            probe.OriginOffsetZ};
-        const float influenceRadius = hasBox
-                                          ? ComputeBoxCaptureRadius(volume, capturePosition)
-                                          : std::max({volume.HalfExtents[0], volume.HalfExtents[1], volume.HalfExtents[2]}) +
-                                                std::sqrt(Dot3(originOffsetLocal, originOffsetLocal));
-        if (hasCamera && hasBox)
-        {
-            float local[3] = {0.0f, 0.0f, 0.0f};
-            ProjectToVolumeLocal(volume, cameraPos, local);
-            const float ax = std::fabs(local[0]);
-            const float ay = std::fabs(local[1]);
-            const float az = std::fabs(local[2]);
-            if (ax > volume.HalfExtents[0] ||
-                ay > volume.HalfExtents[1] ||
-                az > volume.HalfExtents[2])
-            {
-                const float overshoot[3] = {ax - volume.HalfExtents[0],
-                                            ay - volume.HalfExtents[1],
-                                            az - volume.HalfExtents[2]};
-                const int worst = overshoot[0] > overshoot[1]
-                                      ? (overshoot[0] > overshoot[2] ? 0 : 2)
-                                      : (overshoot[1] > overshoot[2] ? 1 : 2);
-                RecordIfNearest(nearestRejected, e.id, overshoot[worst], worst, local,
-                                volume.HalfExtents);
-                return;
-            }
-
-            const float nx = local[0] / volume.HalfExtents[0];
-            const float ny = local[1] / volume.HalfExtents[1];
-            const float nz = local[2] / volume.HalfExtents[2];
-            normalizedDistanceSq = (nx * nx + ny * ny + nz * nz) / 3.0f;
-
-            const float distanceToEdge = std::min({
-                volume.HalfExtents[0] - ax,
-                volume.HalfExtents[1] - ay,
-                volume.HalfExtents[2] - az});
-            const float blend = std::clamp(probe.BlendDistance, 0.0f, std::min({
-                volume.HalfExtents[0],
-                volume.HalfExtents[1],
-                volume.HalfExtents[2]}));
-            if (blend > 0.0001f && distanceToEdge < blend)
-            {
-                weight = std::clamp(distanceToEdge / blend, 0.0f, 1.0f);
-                if (weight <= 0.0f)
-                    return;
-            }
-        }
-        else if (hasCamera)
-        {
-            float local[3] = {0.0f, 0.0f, 0.0f};
-            ProjectToVolumeLocal(volume, cameraPos, local);
-            const float nx = local[0] / volume.HalfExtents[0];
-            const float ny = local[1] / volume.HalfExtents[1];
-            const float nz = local[2] / volume.HalfExtents[2];
-            const float normalizedRadiusSq = nx * nx + ny * ny + nz * nz;
-            if (normalizedRadiusSq > 1.0f)
-            {
-                // Radial overshoot past the ellipsoid surface, in world units: the camera
-                // sits at localLen, the surface at localLen / normalizedRadius along the
-                // same ray (normalizedRadius > 1 here).
-                const float localLen = std::sqrt(Dot3(local, local));
-                const float normalizedRadius = std::sqrt(normalizedRadiusSq);
-                RecordIfNearest(nearestRejected, e.id,
-                                localLen * (1.0f - 1.0f / normalizedRadius), -1, local,
-                                volume.HalfExtents);
-                return;
-            }
-            const float normalizedRadius = std::sqrt(std::max(0.0f, normalizedRadiusSq));
-            normalizedDistanceSq = normalizedRadiusSq;
-
-            const float blend = std::clamp(probe.BlendDistance, 0.0f, influenceRadius);
-            if (blend > 0.0001f)
-            {
-                const float distanceToEdge = ComputeEllipsoidDistanceToEdge(
-                    local, volume.HalfExtents, normalizedRadius);
-                if (distanceToEdge < blend)
-                    weight = std::clamp(distanceToEdge / blend, 0.0f, 1.0f);
-                if (weight <= 0.0f)
-                    return;
-            }
-        }
-
-        ProbeCandidate candidate{};
-        candidate.Probe = probe;
-        candidate.Priority = probe.Priority;
-        candidate.NormalizedDistanceSq = normalizedDistanceSq;
-        candidate.Weight = weight;
-        candidate.InfluenceRadius = influenceRadius;
-        candidate.Position[0] = capturePosition[0];
-        candidate.Position[1] = capturePosition[1];
-        candidate.Position[2] = capturePosition[2];
-        candidate.HasBox = hasBox;
-        if (hasBox)
-            CopyVolumeToCandidate(volume, candidate);
-        candidate.SourceKey = (static_cast<uint64_t>(world.GetWorldId()) << 32u) ^
-                              static_cast<uint64_t>(e.id);
-
-        if (!found || IsBetterCandidate(candidate, best))
-        {
-            best = candidate;
-            found = true;
-        }
-    });
-
-    if (!found)
+    if (q.Count() == 0)
     {
-        // Selection is camera-driven, so when every enabled probe rejects the camera the
-        // IBL silently reverts to the sky and nothing on screen says so — every reflective
-        // surface simply loses the probe content. Warn once per lost-reflections episode
-        // (latched until a probe is accepted again), naming the probe the camera missed by
-        // the least. A world with no probes at all records no rejection and stays silent.
-        if (nearestRejected.Valid && !m_LoggedNoProbeSelected)
-        {
-            if (nearestRejected.WorstAxis >= 0)
-                Logger::Log::Warning(
-                    "No ReflectionProbe contributes: the active camera is outside every "
-                    "enabled probe's influence volume, so reflections fall back to the sky. "
-                    "Nearest is the box probe on entity {}, missed by {:.2f} on its local {} "
-                    "axis (camera local ({:.2f}, {:.2f}, {:.2f}) against half-extents "
-                    "({:.2f}, {:.2f}, {:.2f})). Grow that probe's Transform.scale on that "
-                    "axis, or move the camera inside.",
-                    nearestRejected.EntityId, nearestRejected.OvershootWorld,
-                    "XYZ"[nearestRejected.WorstAxis], nearestRejected.CameraLocal[0],
-                    nearestRejected.CameraLocal[1], nearestRejected.CameraLocal[2],
-                    nearestRejected.HalfExtents[0], nearestRejected.HalfExtents[1],
-                    nearestRejected.HalfExtents[2]);
-            else
-                Logger::Log::Warning(
-                    "No ReflectionProbe contributes: the active camera is outside every "
-                    "enabled probe's influence volume, so reflections fall back to the sky. "
-                    "Nearest is the ellipsoid probe on entity {}, missed by {:.2f} radially "
-                    "(camera local ({:.2f}, {:.2f}, {:.2f}) against half-extents ({:.2f}, "
-                    "{:.2f}, {:.2f})). Grow that probe's Transform.scale, or move the camera "
-                    "inside.",
-                    nearestRejected.EntityId, nearestRejected.OvershootWorld,
-                    nearestRejected.CameraLocal[0], nearestRejected.CameraLocal[1],
-                    nearestRejected.CameraLocal[2], nearestRejected.HalfExtents[0],
-                    nearestRejected.HalfExtents[1], nearestRejected.HalfExtents[2]);
-            m_LoggedNoProbeSelected = true;
-        }
-        ClearProbeSourceIfActive(rs->GetFeature<ImageBasedLightingFeature>(), world.GetWorldId());
-        return;
+        m_Probes.clear();
+        m_HasBuild = false;
     }
-    m_LoggedNoProbeSelected = false; // a probe contributes again — rearm the warning
+    else if (!SceneUnchangedSinceLastBuild(world))
+    {
+        std::vector<ProbeSceneObject> objects;
+        world.Query<ECS::Read<Components::MeshRenderer>, ECS::Read<Components::WorldTransform>>()
+            .Each([&](ECS::EntityHandle e, const Components::MeshRenderer& mesh, const Components::WorldTransform& xf) {
+                objects.push_back({e, xf, mesh});
+            });
+        std::sort(objects.begin(), objects.end(), EntityIdLess);
 
-    auto* device = rs->GetDevice();
-    if (!device)
-        return;
+        m_Probes.clear();
+        q.Each([&](ECS::EntityHandle e,
+                   const Components::ReflectionProbe& probe,
+                   const Components::WorldTransform& xf) {
+            const ProbeVolume volume = ExtractProbeVolume(xf);
+            if (!volume.Valid)
+                return;
+            SceneReflectionProbeEnvironmentDesc desc = BuildProbeDesc(world, e, probe, volume);
+            ComputeProbeSceneDigest(world, *rs, objects, desc);
+            m_Probes.push_back(std::move(desc));
+        });
+        m_BuiltWorldId = world.GetWorldId();
+        m_BuiltStructuralVersion = world.GetStructuralChangeVersion();
+        m_BuiltMaterialDigest = ComputeProbeMaterialDigest(*rs, m_Probes);
+        m_HasBuild = true;
+    }
 
+    // Registered even before a device exists: capture allocation happens in the
+    // IBL generation node, and an empty list clears only this world's probes.
     auto& feature = rs->EnsureFeature<ImageBasedLightingFeature>();
-    if (!feature.IsInitialized())
-        feature.Initialize(device);
-    if (!feature.IsInitialized())
-        return;
-
-    SceneReflectionProbeEnvironmentDesc desc{};
-    desc.Position[0] = best.Position[0];
-    desc.Position[1] = best.Position[1];
-    desc.Position[2] = best.Position[2];
-    desc.InfluenceRadius = std::max(0.0f, best.InfluenceRadius);
-    desc.BoxProjection = best.HasBox;
-    if (best.HasBox)
-    {
-        for (int i = 0; i < 3; ++i)
-        {
-            desc.BoxCenter[i] = best.BoxCenter[i];
-            desc.BoxHalfExtents[i] = best.BoxHalfExtents[i];
-            desc.BoxAxisX[i] = best.BoxAxisX[i];
-            desc.BoxAxisY[i] = best.BoxAxisY[i];
-            desc.BoxAxisZ[i] = best.BoxAxisZ[i];
-        }
-    }
-    desc.MaxDistance = std::max(0.0f, best.Probe.MaxDistance);
-    desc.CapturedLayers = best.Probe.CapturedLayers;
-    desc.WorldId = world.GetWorldId();
-    desc.SourceKey = best.SourceKey != 0 ? best.SourceKey : 1u;
-    desc.Intensity = std::max(0.0f, best.Probe.Intensity) * best.Weight;
-    desc.ExposureEV = best.Probe.ExposureEV;
-    desc.RotationRadians = best.Probe.RotationDegrees * kReflectionProbeDegToRad;
-    desc.LowerHemisphereDarkness = std::clamp(best.Probe.IblLowerHemisphereDarkness, 0.0f, 1.0f);
-    desc.CaptureEnvironment = best.Probe.CaptureEnvironment;
-    desc.CaptureResolution =
-        ImageBasedLightingFeature::NormalizeCaptureResolution(best.Probe.CaptureResolution);
-    desc.UpdateMode = ToSceneUpdateMode(best.Probe.UpdateMode);
-    desc.RealtimeUpdateInterval = std::max(0.0f, best.Probe.RealtimeUpdateInterval);
-
-    if (auto* sceneSource = dynamic_cast<SceneReflectionProbeEnvironmentSource*>(feature.GetEnvironmentSource()))
-    {
-        sceneSource->SetProbe(desc);
-    }
-    else
-    {
-        auto source = std::make_unique<SceneReflectionProbeEnvironmentSource>(*rs);
-        source->SetProbe(desc);
-        feature.SetEnvironmentSource(std::move(source));
-    }
+    feature.UpdateLocalProbes(*rs, world.GetWorldId(), m_Probes);
 }
 
 } } // namespace GameEngine::Engine::Renderer

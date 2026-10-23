@@ -1,6 +1,13 @@
 #include "Inspectors/BuiltInInspectorRegistration.h"
+#include "Rendering/Sorting/RenderSortingEditor.h"
+#include "Inspectors/Sprite2DComponentTraits.h"
 
+#include "Editor/Entities/AnimationComponentTraits.h"
+#include "Editor/Entities/EntityComponentTraits.h"
+#include "Editor/Entities/OceanComponentTraits.h"
+#include "Editor/Entities/RenderingComponentTraits.h"
 #include "Editor/Registries/EditorPluginRegistry.h"
+#include "Editor/Entities/PlanarReflectionComponentTraits.h"
 #include "Inspectors/AmbientLightInspector.h"
 #include "Inspectors/AmbientOcclusionEffectInspector.h"
 #include "Inspectors/AnimatorInspector.h"
@@ -11,6 +18,7 @@
 #include "Inspectors/BloomEffectInspector.h"
 #include "Inspectors/CameraInspector.h"
 #include "Inspectors/ChromaticAberrationEffectInspector.h"
+#include "Inspectors/DepthPixelationEffectInspector.h"
 #include "Inspectors/ColorFilterEffectInspector.h"
 #include "Inspectors/ColorGradeEffectInspector.h"
 #include "Inspectors/ContrastAdaptiveSharpenEffectInspector.h"
@@ -23,23 +31,28 @@
 #include "Inspectors/FastBlurEffectInspector.h"
 #include "Inspectors/FilmSimulationEffectInspector.h"
 #include "Inspectors/HeatDistortionEffectInspector.h"
+#include "Inspectors/RainSettingsEffectInspector.h"
 #include "Inspectors/HeightFogEffectInspector.h"
 #include "Inspectors/HumanoidRigInspector.h"
 #include "Inspectors/LensFlareSourceInspector.h"
 #include "Inspectors/LightInspector.h"
 #include "Inspectors/MaterialInspector.h"
 #include "Inspectors/MeasureInspector.h"
+#include "Inspectors/TileMapLayerInspector.h"
 #include "Inspectors/NavigationSourceComponentTraits.h"
 #include "Inspectors/NavigationSurfaceInspector.h"
 #include "Inspectors/MeshRendererInspector.h"
 #include "Inspectors/ModelInspector.h"
 #include "Inspectors/NativeSourceInspector.h"
 #include "Inspectors/OceanDepthCacheSourceInspector.h"
+#include "Inspectors/ReflectionProbeInspectorTools.h"
 #include "Inspectors/OceanWaveSpectrumInspector.h"
 #include "Inspectors/Particles/ParticleInspector.h"
 #include "Inspectors/PhysicsBodyInspector.h"
 #include "Inspectors/CharacterControllerInspector.h"
 #include "Inspectors/PhysicsColliderInspector.h"
+#include "Inspectors/MovingPlatformInspector.h"
+#include "Inspectors/PhysicsMaterialInspector.h"
 #include "Inspectors/PostProcessVolumeInspector.h"
 #include "Inspectors/RenderPipelineInspector.h"
 #include "Inspectors/TerrainMaterialLibraryInspector.h"
@@ -72,6 +85,15 @@ namespace GameEngine
 
 void RegisterBuiltInInspectors()
 {
+    // Editor traits of the built-in components with no inspector of their own; the
+    // inspectors below register their components' traits alongside the inspector.
+    Editor::RegisterEntityComponentTraits();
+    Editor::RegisterRenderingComponentTraits();
+    Editor::RegisterAnimationComponentTraits();
+    Editor::RegisterOceanComponentTraits();
+    Editor::RegisterPlanarReflectionComponentTraits();
+
+    Editor::RegisterRenderSortingEditor();
     RegisterTransformInspector();
     RegisterMeshRendererInspector();
     RegisterSkinnedMeshRendererInspector();
@@ -82,10 +104,12 @@ void RegisterBuiltInInspectors()
     RegisterLightInspector();
     RegisterLensFlareSourceInspector();
     RegisterMeasureInspector();
+    RegisterTileMapLayerInspector();
     RegisterSkyEnvironmentInspector();
     RegisterAmbientLightInspector();
     RegisterSkyboxInspector();
     RegisterOceanDepthCacheSourceInspector();
+    RegisterReflectionProbeInspector();
     RegisterOceanWaveSpectrumInspector();
     RegisterParticleInspector();
     RegisterPostProcessVolumeInspector();
@@ -94,6 +118,7 @@ void RegisterBuiltInInspectors()
     RegisterNavigationSourceComponentTraits();
     RegisterBloomEffectInspector();
     RegisterChromaticAberrationEffectInspector();
+    RegisterDepthPixelationEffectInspector();
     RegisterDepthOfFieldEffectInspector();
     RegisterFilmSimulationEffectInspector();
     RegisterAmbientOcclusionEffectInspector();
@@ -104,6 +129,7 @@ void RegisterBuiltInInspectors()
     RegisterCrtEffectInspector();
     RegisterFastBlurEffectInspector();
     RegisterHeatDistortionEffectInspector();
+    RegisterRainSettingsEffectInspector();
     RegisterVhsEffectInspector();
     RegisterHeightFogEffectInspector();
     RegisterColorFilterEffectInspector();
@@ -117,6 +143,8 @@ void RegisterBuiltInInspectors()
     RegisterPhysicsBodyInspector();
     RegisterCharacterControllerInspector();
     RegisterPhysicsColliderInspectors();
+    RegisterMovingPlatformInspector();
+    RegisterPhysicsMaterialInspector();
     RegisterTerrainInspector();
     RegisterTerrainModifierInspectors();
     RegisterSplineInspectors();
@@ -124,6 +152,7 @@ void RegisterBuiltInInspectors()
     RegisterSplineFenceInspector();
     RegisterSplineFenceSpanPieceInspector();
 
+    RegisterSprite2DComponentTraits();
     RegisterMaterialInspector();
     RegisterModelInspector();
     RegisterTextureInspector();

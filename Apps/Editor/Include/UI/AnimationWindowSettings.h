@@ -145,8 +145,21 @@ struct AnimationWindowSettings {
         return instance;
     }
 
+    // The member initialisers, unaffected by saved preferences: the values a
+    // fresh install starts from and a reset puts back.
+    static const AnimationWindowSettings& Defaults()
+    {
+        static const AnimationWindowSettings defaults{DefaultsTag{}};
+        return defaults;
+    }
+
 private:
+    struct DefaultsTag
+    {
+    };
+
     AnimationWindowSettings() { Load(); }
+    explicit AnimationWindowSettings(DefaultsTag) {}
 };
 
 } // namespace GameEngine

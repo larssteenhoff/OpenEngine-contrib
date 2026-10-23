@@ -47,13 +47,15 @@ struct FilePattern {
 /**
  * @brief Subscription handle for file watching
  *
- * Destroying or overwriting a valid handle unsubscribes. Once that returns,
- * the callback is not running and is never called again, so the callback may
- * use anything that outlives the handle. To give that guarantee, unsubscribing
- * waits for a call already running on another watcher thread. Therefore a
- * callback must not block on a thread that can destroy its handle, and two
- * callbacks must not unsubscribe each other. A callback may destroy its own
- * handle; that does not wait for its own call.
+ * Destroying or overwriting a valid handle unsubscribes. Unsubscribe returns
+ * once no call of this subscription is running, and the callback is never
+ * called again, so the callback may use anything that outlives the handle. It
+ * never waits for other subscriptions: a directory watcher left with no
+ * subscription is asked to stop and joined later, not joined here. Calling it
+ * from inside the callback does not wait for that call. Because it waits for
+ * this subscription's calls on other watcher threads, a callback must not
+ * block on a thread that can destroy its handle, and two callbacks must not
+ * unsubscribe each other.
  */
 class FileWatchSubscription {
 public:
@@ -220,10 +222,8 @@ private:
      *        a subscription onto a different directory's watcher).
      * @param outDeferredStops Absorbed watchers from descendant-consolidation
      *        are moved here. The caller passes them through
-     *        CollectWatchersToStop and stops what it returns after releasing
-     *        m_Mutex — stopping a watcher joins its thread,
-     *        which can block inside OnFileChanged waiting for m_Mutex and
-     *        deadlock if we stop under the lock.
+     *        CollectWatchersToStop, which parks them, and stops what it
+     *        returns after releasing m_Mutex.
      */
     DirectoryWatcher* GetOrCreateWatcher(const std::filesystem::path& directory,
                                          bool recursive,
@@ -231,14 +231,14 @@ private:
                                          std::vector<std::unique_ptr<DirectoryWatcher>>& outDeferredStops);
 
     /**
-     * @brief Decide who stops the watchers leaving the service. Call under m_Mutex.
+     * @brief Park the watchers leaving the service. Call under m_Mutex.
      *
-     * On return, @p leaving holds the watchers the caller must StopWatching
-     * after releasing m_Mutex. Inside a callback, on a watcher thread, none:
-     * that thread cannot join itself, and joining another watcher could wait
-     * on a thread that waits on this one. Those watchers are told to stop and
-     * parked in m_RetiredWatchers, and the next caller that is not on a
-     * watcher thread takes them.
+     * Each watcher in @p leaving is told to stop and parked in
+     * m_RetiredWatchers, never joined here: its thread may be running any
+     * subscription's callback, or be the calling thread. On return, @p leaving
+     * holds the parked watchers whose threads have returned; the caller
+     * calls StopWatching on them after releasing m_Mutex, which does not wait.
+     * StopWatching joins the rest.
      */
     void CollectWatchersToStop(std::vector<std::unique_ptr<DirectoryWatcher>>& leaving);
 
@@ -250,8 +250,8 @@ private:
     // Unsubscribe's wait. Used with m_Mutex.
     std::condition_variable m_CallbackFinished;
     std::unordered_map<std::string, std::unique_ptr<DirectoryWatcher>> m_Watchers;
-    // Removed from inside a callback and asked to stop, not yet joined. Guarded
-    // by m_Mutex; see CollectWatchersToStop.
+    // Removed from the service and asked to stop, not yet joined. Guarded by
+    // m_Mutex; see CollectWatchersToStop.
     std::vector<std::unique_ptr<DirectoryWatcher>> m_RetiredWatchers;
 
     SubscriptionId m_NextSubscriptionId = 1;

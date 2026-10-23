@@ -61,6 +61,12 @@ struct Float4
 // malformed reference instead of quietly clearing the field.
 bool IsGuidText(std::string_view s);
 
+// Trims scene-format whitespace from both ends of a line or token: space, tab, CR and LF. LF is
+// included because a value read from a CRLF file, or the last one before the terminator, arrives
+// with its line ending attached. Vertical tab and form feed are not scene whitespace; a token
+// that carries them is malformed and must fail to parse.
+std::string_view TrimSceneWhitespace(std::string_view text);
+
 // Why a decimal-integer token was refused. OutOfRange separates "this is not an integer" from
 // "this is an integer the destination cannot hold" — different things to tell the user.
 enum class IntegerTokenResult

@@ -106,6 +106,7 @@ class MonitorsPanel : public DockPanel {
     void PushBuiltInSamples();
     void UpdateHdrStatusLabel();
     void LoadAndAttachPanelStyle();
+    void AttachPanelStyleTo(UIElement& element);
 
     // UI roots
     UIElement* m_ListContainer = nullptr;

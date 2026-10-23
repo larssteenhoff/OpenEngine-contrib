@@ -46,7 +46,7 @@ export const tools: ToolDef[] = [
     category: "editor",
     description: "Trigger a game build from the Editor's Build panel for a single platform (e.g. \"Mac\", \"Windows\"). The build runs asynchronously on the editor UI thread; poll get_log (filter \"Build:\") to follow progress and find the produced artifact path.",
     schema: {
-      platform: z.string().describe("Target platform to build: Mac, Windows, Linux, Steam, Nintendo, Sony"),
+      platform: z.string().describe("Target platform to build: Windows, Steam, Linux, Mac, Android, iOS, Web"),
     },
   }),
 

@@ -7,7 +7,6 @@
 #include "UI/ContextMenuLabels.h"
 #include "UI/EditorIcons.h"
 #include "UI/Interaction/ContextMenuManipulator.h"
-#include "UI/Controls/Mount.h"
 #include "UI/StyleProperties.h"
 #include "UI/UIManager.h"
 #include "UI/Registration/ElementRegistration.h"
@@ -280,10 +279,7 @@ void SceneViewToolbar::ResolveWiredButtons()
             }
         }
 
-        for (const auto& child : el->GetChildren())
-            self(self, child.get());
-        if (el->Kind() == UIElementKind::Mount)
-            self(self, static_cast<Mount*>(el)->GetTarget());
+        el->ForEachLogicalChild([&](UIElement* child) { self(self, child); });
     };
     visit(visit, this);
 

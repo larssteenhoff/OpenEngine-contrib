@@ -48,11 +48,11 @@ void ResolveRecursive(UIElement* el, const VisualStyle* parentVisual)
     if (parentVisual)
         InheritProperties(rs.Visual, *parentVisual);
 
-    // Late-frame override safety net. BuildYogaRecursive now applies all dirty
+    // Late-frame override safety net. BuildYogaRecursive applies all dirty
     // overrides unconditionally (not gated by needCascade). This block catches
     // overrides set between the last BuildYogaRecursive and ResolveStyles
     // (e.g., during event dispatch or late callbacks that don't trigger a tree
-    // rebuild). Kept until proven no longer needed by runtime observation.
+    // rebuild).
     if (el->Overrides().IsVisualDirty() || el->Overrides().IsLayoutDirty())
     {
         ApplyOverridesToResolvedStyle(rs, el->Overrides());
@@ -70,11 +70,7 @@ void ResolveRecursive(UIElement* el, const VisualStyle* parentVisual)
 
     const VisualStyle* thisVisual = &rs.Visual;
 
-    for (auto& child : el->GetChildren())
-        ResolveRecursive(child.get(), thisVisual);
-
-    if (UIElement* tgt = el->GetMountTarget())
-        ResolveRecursive(tgt, thisVisual);
+    el->ForEachLogicalChild([thisVisual](UIElement* child) { ResolveRecursive(child, thisVisual); });
 }
 
 } // namespace

@@ -117,7 +117,7 @@ public:
     // publishes it once at device init. The service emits every stage at this
     // version, raised to any per-stage compile floor (mesh shaders require 1.6).
     // Defaults to Spirv_1_5 (loads on the widest range of drivers) until set.
-    enum class SpirvTarget { Spirv_1_5, Spirv_1_6 };
+    enum class SpirvTarget { Spirv_1_3, Spirv_1_5, Spirv_1_6 };
     static void SetMaxSupportedSpirv(SpirvTarget target);
     // The target feeds the program cache KEY, so anything that needs to compile at a
     // specific one (a test asserting a cooked cache addresses identically) has to be able

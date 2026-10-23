@@ -11,6 +11,7 @@
 #include "Rendering/Sky/SkyRenderer.h"
 #include "Rendering/Sky/SkySettings.h"
 #include "Rendering/Sky/SkyViewLutAltitude.h"
+#include "Types/Fnv1a.h"
 
 #include <nlohmann/json.hpp>
 #include <array>
@@ -239,12 +240,7 @@ static void FillSkyUBOFromSettings(const Rendering::SkySettings& settings, SkyUB
 // FNV-1a 64-bit. Stable across runs; sufficient quality for change detection.
 static void MixDigest(uint64_t& h, const void* data, size_t bytes)
 {
-    const uint8_t* p = static_cast<const uint8_t*>(data);
-    for (size_t i = 0; i < bytes; ++i)
-    {
-        h ^= p[i];
-        h *= 1099511628211ull;
-    }
+    h = Hashing::Fnv1a64(data, bytes, h);
 }
 
 // Digest of the settings the multiscatter and sky-view LUT bakes read. Used by the dirty gates to
@@ -269,7 +265,7 @@ static uint64_t ComputeSkyLutSettingsDigest(const Rendering::SkySettings& settin
     Rendering::AtmosphereParametersGPU atmo{};
     FillAtmosphereFromSettings(settings, atmo);
 
-    uint64_t h = 14695981039346656037ull;
+    uint64_t h = Hashing::kFnv1a64OffsetBasis;
     // Atmosphere block in its entirety.
     MixDigest(h, &atmo, sizeof(atmo));
     // Only the sun and moon SkyUBO fields the LUT shaders actually consume.

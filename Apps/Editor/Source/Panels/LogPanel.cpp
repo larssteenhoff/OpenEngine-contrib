@@ -1,5 +1,6 @@
 #include "Panels/LogPanel.h"
 
+#include "Panels/LogToolbarActions.h"
 #include "Logger/Logger.h"
 #include "Panels/BacktraceFrameView.h"
 #include "Panels/SettingsPanel.h"
@@ -76,7 +77,9 @@ void ReleaseCallbackSink()
 LogPanel::LogPanel()
     : DockPanel("Log")
 {
-    // Toolbar: two rows when narrow (same idea as SettingsPanel width/aspect checks + layout change).
+    RequestSubtreeStyleAssetPath("UI/panels/LogPanel.css", "editor");
+
+    // Actions move below the severity filters in narrow docks; search wraps when needed.
     {
         auto stack = std::make_unique<UIElement>();
         stack->AddClass("log-toolbar-stack");
@@ -95,6 +98,7 @@ LogPanel::LogPanel()
                                                    const char* levelChromeClass, bool initialOn,
                                                    void (LogView::*setter)(bool)) {
             const std::string levelText(label);
+            const std::string levelName = std::string(logLineColorClass).substr(sizeof("log-") - 1);
 
             auto btn = std::make_unique<Button>();
             btn->AddClass("small");
@@ -110,12 +114,14 @@ LogPanel::LogPanel()
 
             auto checkIcon = std::make_unique<UIElement>();
             checkIcon->AddClass("log-filter-toggle-check");
+            checkIcon->AddClass("log-filter-check-" + levelName);
             UI::Layout::SetBackgroundPath(*checkIcon, "Icons/checked.svg");
 
             auto textLbl = std::make_unique<Label>();
             textLbl->AddClass(logLineColorClass);
             textLbl->AddClass("button-text");
             textLbl->AddClass("log-filter-toggle-label");
+            textLbl->AddClass("log-filter-label-" + levelName);
             textLbl->SetText(levelText);
 
             btn->AddChild(std::move(checkIcon));
@@ -148,41 +154,10 @@ LogPanel::LogPanel()
         copyFiltersGap->AddClass("log-toolbar-copy-filters-gap");
         primary->AddChild(std::move(copyFiltersGap));
 
-        auto mainActionsRow = std::make_unique<UIElement>();
-        mainActionsRow->AddClass("log-toolbar-main-actions");
-        auto clearBtn = std::make_unique<Button>();
-        m_ClearButton = clearBtn.get();
-        clearBtn->AddClass("small");
-        clearBtn->AddClass("secondary");
-        clearBtn->AddClass("log-clear-button");
-        clearBtn->SetText("Clear");
-        clearBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { this->ClearLog(); });
-        mainActionsRow->AddChild(std::move(clearBtn));
-
-        auto pauseBtn = std::make_unique<Button>();
-        m_PauseButton = pauseBtn.get();
-        pauseBtn->AddClass("small");
-        pauseBtn->AddClass("secondary");
-        pauseBtn->AddClass("log-pause-button");
-        pauseBtn->SetText("Pause");
-        pauseBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent& e) {
-            Button& btn = static_cast<Button&>(*e.CurrentTarget);
-            if (!m_LogView)
-                return;
-            const bool nowPaused = !m_LogView->IsPaused();
-            m_LogView->SetPaused(nowPaused);
-            btn.SetText(nowPaused ? "Resume" : "Pause");
-        });
-        mainActionsRow->AddChild(std::move(pauseBtn));
-
-        auto copyBtn = std::make_unique<Button>();
-        m_CopyButton = copyBtn.get();
-        copyBtn->AddClass("small");
-        copyBtn->AddClass("secondary");
-        copyBtn->AddClass("log-copy-button");
-        copyBtn->SetText("Copy");
-        copyBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { this->CopyToClipboard(); });
-        mainActionsRow->AddChild(std::move(copyBtn));
+        auto mainActionsRow = std::make_unique<LogToolbarActions>(
+            [this]() { ClearLog(); },
+            [this]() { CopyToClipboard(); },
+            [this]() { return ToggleLogPaused(); });
 
         auto centerSlot = std::make_unique<UIElement>();
         centerSlot->AddClass("log-toolbar-center-slot");
@@ -201,6 +176,9 @@ LogPanel::LogPanel()
                 if (m_LogView)
                     m_LogView->SetSearchField(field);
             });
+        built.RootPtr->AddClass("log-toolbar-search");
+        built.FieldPtr->AddClass("log-toolbar-search-input");
+        built.IconPtr->AddClass("log-toolbar-search-icon");
         m_SearchBar = built.RootPtr;
         m_SearchField = built.FieldPtr;
         primary->AddChild(std::move(built.Root));
@@ -284,6 +262,15 @@ LogPanel::LogPanel()
         }
     }
     m_EarlyMessages.clear();
+}
+
+bool LogPanel::ToggleLogPaused()
+{
+    if (!m_LogView)
+        return false;
+    const bool paused = !m_LogView->IsPaused();
+    m_LogView->SetPaused(paused);
+    return paused;
 }
 
 LogPanel::~LogPanel()
@@ -435,8 +422,9 @@ void LogPanel::SyncLogToolbarLayoutMode()
     if (width <= 1.0f)
         return;
 
-    static constexpr float kCompactEnterWidthPx = 760.0f;
-    static constexpr float kCompactExitWidthPx = 840.0f;
+    // Wide layout needs 876px for filters, actions, search, padding, and gaps.
+    static constexpr float kCompactEnterWidthPx = 880.0f;
+    static constexpr float kCompactExitWidthPx = 960.0f;
     static constexpr int kLayoutStableFrames = 2;
 
     bool wantCompact = m_LogToolbarCompact;
@@ -485,6 +473,7 @@ void LogPanel::SyncLogToolbarLayoutMode()
                 m_LogToolbarPrimary->AddChild(std::move(search));
             return;
         }
+        search->AddClass("log-toolbar-search-compact");
         m_LogToolbarSecondary->AddChild(std::move(center));
         m_LogToolbarSecondary->AddChild(std::move(search));
         m_LogToolbarSecondary->RemoveClass("log-toolbar-secondary-hidden");
@@ -503,6 +492,7 @@ void LogPanel::SyncLogToolbarLayoutMode()
                 m_LogToolbarSecondary->AddChild(std::move(search));
             return;
         }
+        search->RemoveClass("log-toolbar-search-compact");
         m_LogToolbarPrimary->AddChild(std::move(center));
         m_LogToolbarPrimary->AddChild(std::move(search));
         m_LogToolbarSecondary->AddClass("log-toolbar-secondary-hidden");
@@ -630,22 +620,7 @@ void LogPanel::OpenSourceLocation(const std::string& file, int line)
         return;
 
     if (m_OnOpenSourceFile)
-    {
         m_OnOpenSourceFile(file, line);
-        return;
-    }
-
-    // Fallback: format as "file:line" and route through the legacy IDE open hook.
-    if (m_OnOpenInIDE)
-    {
-        std::string formatted = file;
-        if (line > 0)
-        {
-            formatted += ":";
-            formatted += std::to_string(line);
-        }
-        m_OnOpenInIDE(formatted);
-    }
 }
 
 void LogPanel::PopulateDetailPaneForIndex(size_t messageIndex)

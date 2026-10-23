@@ -68,6 +68,7 @@ private:
     void OnLogMessage(const Logger::LogMessage& message);
     void OnSearchTextChanged(const std::string& searchText);
     void CopyToClipboard();
+    bool ToggleLogPaused();
     void BuildDetailPane(UIElement* parent);
     void PopulateDetailPaneForIndex(size_t messageIndex);
     void HideDetailPane();
@@ -93,9 +94,6 @@ private:
     UIElement* m_LogCenterSlot = nullptr;
     UIElement* m_SearchBar = nullptr;
     TextField* m_SearchField = nullptr;
-    Button* m_ClearButton = nullptr;
-    Button* m_PauseButton = nullptr;
-    Button* m_CopyButton = nullptr;
     
     // Callback registration ID for unregistering on destruction
     Logger::uint64 m_CallbackId = 0;

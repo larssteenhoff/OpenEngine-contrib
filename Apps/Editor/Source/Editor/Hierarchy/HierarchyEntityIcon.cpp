@@ -3,7 +3,10 @@
 #include "AssetCore/Asset.h"
 #include "AssetCore/AssetTypes.h"
 #include "Assets/PolyhavenService.h"
+#include "Components/Animation/AnimatedSprite2D.h"
+#include "Components/Rendering/Sprite2D.h"
 #include "Components/Hierarchy.h"
+#include "Components/Transform.h"
 #include "Components/HierarchyQueries.h"
 #include "Components/Measure/MeasureComponent.h"
 #include "Components/PolyhavenPlaceholder.h"
@@ -65,16 +68,19 @@ inline bool MeshRendererReferencesModelAsset(const MeshRenderer& mr)
     return !mr.modelAssetGuid.IsNull();
 }
 
-// A "sprite" is a plane primitive whose material is a user/file-backed
-// MaterialAsset (not the engine's synthesized default primitive material).
-// Detection lets us show a distinct icon for textured quads created by the
-// texture-drop flow without introducing a new component.
-inline bool IsSpriteMeshRenderer(const MeshRenderer& mr)
+// Textured planes and legacy thin XY cubes can both carry sprite atlas regions.
+// Keep ordinary 3D cubes on their primitive icon path.
+inline bool IsSpriteMeshRenderer(const MeshRenderer& mr, ECS::World* world, ECS::EntityHandle handle)
 {
     using PG = Engine::Renderer::PrimitiveGenerator;
     const GUID meshGuid = ModelGuidFromMeshRenderer(mr);
     if (meshGuid != PG::PlaneGuid() && meshGuid != PG::PlaneSpriteUvGuid())
-        return false;
+    {
+        const auto* transform = world->GetComponent<Components::Transform>(handle);
+        if (meshGuid != PG::CubeGuid() || !transform) return false;
+        const auto scale = transform->GetScale();
+        if (scale.z > 0.1f * std::min(scale.x, scale.y)) return false;
+    }
     const GUID matGuid = MaterialGuidFromMeshRenderer(mr);
     if (matGuid.IsNull() || matGuid == PG::DefaultMaterialGuid())
         return false;
@@ -102,6 +108,10 @@ static void ApplyModelThumbSaturationOverride(UIElement& titleEl)
     if (ShouldColorModelThumb(titleEl))
         titleEl.Overrides().Set(Style::BackgroundImageSaturation, 1.0f);
 }
+
+// The Inspector header icon sits in a fixed 32x32 slot whose CSS centers every
+// other glyph in it; a letterboxed sprite follows suit.
+constexpr float kInspectorIconAlignPercent = 50.0f;
 
 static bool IsMeasureEndpointEntity(ECS::World& world, ECS::EntityHandle handle)
 {
@@ -165,11 +175,16 @@ std::filesystem::path TryResolveSpriteAlbedoTexturePath(ECS::World* world,
     if (!world || !assets || !handle.IsValid() || !world->IsValid(handle))
         return {};
 
+    const auto* sprite = world->GetComponent<Components::Sprite2D>(handle);
+    if(sprite && !sprite->Texture.IsNull()) {
+        AssetMetadata meta;
+        if(assets->GetRegistry().TryGetAssetMetadata(sprite->Texture.ToGuid(),meta)) return assets->ResolveAssetPath(meta.Path);
+    }
     const auto* mr = world->GetComponent<MeshRenderer>(handle);
-    if (!mr || !IsSpriteMeshRenderer(*mr))
+    if (!sprite && (!mr || !IsSpriteMeshRenderer(*mr, world, handle)))
         return {};
 
-    const GUID matGuid = MaterialGuidFromMeshRenderer(*mr);
+    const GUID matGuid = sprite ? sprite->Material.ToGuid() : MaterialGuidFromMeshRenderer(*mr);
     if (matGuid.IsNull())
         return {};
 
@@ -203,6 +218,65 @@ std::filesystem::path TryResolveSpriteAlbedoTexturePath(ECS::World* world,
     return assets->ResolveAssetPath(meta.Path);
 }
 
+std::array<float, 2> ResolveSpritePreviewKey(ECS::World* world, ECS::EntityHandle handle, AssetManager* assets)
+{
+    const auto* mr = world->GetComponent<MeshRenderer>(handle);
+    if (!mr) return {-1,0};
+    auto asset = assets->GetAsset(MaterialGuidFromMeshRenderer(*mr));
+    const auto* material = dynamic_cast<MaterialAsset*>(asset.get());
+    if (!material) return {-1,0};
+    const auto& properties = material->GetDocument().properties;
+    const auto it = properties.find("previewMagentaKey");
+    if (it != properties.end())
+        if (const auto* values = std::get_if<std::vector<float>>(&it->second); values && values->size()==2)
+            return {(*values)[0],(*values)[1]};
+    return {-1,0};
+}
+
+std::array<float, 4> ResolveSpritePreviewUV(ECS::World* world, ECS::EntityHandle handle, AssetManager* assets)
+{
+    std::array<float, 4> uv{0,0,1,1};
+    const auto* sprite=world->GetComponent<Components::Sprite2D>(handle);
+    if(sprite)uv={sprite->U0,sprite->V0,sprite->U1,sprite->V1};
+    const auto* mr = world->GetComponent<MeshRenderer>(handle);
+    if (!mr && !sprite) return uv;
+    auto asset = assets->GetAsset(sprite?sprite->Material.ToGuid():MaterialGuidFromMeshRenderer(*mr));
+    const auto* material = dynamic_cast<MaterialAsset*>(asset.get());
+    if (!material) { if(sprite && sprite->FlipX)std::swap(uv[0],uv[2]);if(sprite && sprite->FlipY)std::swap(uv[1],uv[3]);return uv; }
+    const auto& transforms = material->GetDocument().textureTransforms;
+    const auto it = transforms.find("albedoMap");
+    if (it != transforms.end())
+    {
+        const auto& t = it->second;
+        uv = {t[2]+t[0]*uv[0],t[6]+t[5]*uv[1],t[2]+t[0]*uv[2],t[6]+t[5]*uv[3]};
+    }
+    if(sprite && sprite->FlipX)std::swap(uv[0],uv[2]);
+    if(sprite && sprite->FlipY)std::swap(uv[1],uv[3]);
+    return uv;
+}
+
+SpriteFramesPreviewRequest TryResolveSpriteFramesPreview(ECS::World* world,
+                                                         ECS::EntityHandle handle,
+                                                         AssetManager* assets)
+{
+    SpriteFramesPreviewRequest request;
+    if (!world || !assets || !handle.IsValid() || !world->IsValid(handle))
+        return request;
+
+    const auto* sprite = world->GetComponent<Components::AnimatedSprite2D>(handle);
+    if (!sprite || sprite->SpriteFrames.IsNull())
+        return request;
+
+    AssetMetadata meta;
+    if (!assets->GetRegistry().TryGetAssetMetadata(sprite->SpriteFrames.ToGuid(), meta))
+        return request;
+
+    request.AssetPath = assets->ResolveAssetPath(meta.Path);
+    request.AnimationName = std::string(sprite->GetAnimationName());
+    request.FlipX = sprite->FlipX;
+    return request;
+}
+
 std::filesystem::path TryResolveInspectorIconAssetPath(ECS::World* world,
                                                        ECS::EntityHandle handle,
                                                        AssetManager* assets)
@@ -210,9 +284,19 @@ std::filesystem::path TryResolveInspectorIconAssetPath(ECS::World* world,
     if (!world || !assets || !handle.IsValid() || !world->IsValid(handle))
         return {};
 
+    if (const auto* sprite = world->GetComponent<Components::AnimatedSprite2D>(handle))
+    {
+        AssetMetadata meta;
+        if (!sprite->SpriteFrames.IsNull() &&
+            assets->GetRegistry().TryGetAssetMetadata(sprite->SpriteFrames.ToGuid(), meta))
+        {
+            return meta.Path;
+        }
+    }
+
     if (const auto* mr = world->GetComponent<MeshRenderer>(handle))
     {
-        if (IsSpriteMeshRenderer(*mr))
+        if (IsSpriteMeshRenderer(*mr, world, handle))
         {
             const GUID matGuid = MaterialGuidFromMeshRenderer(*mr);
             if (!matGuid.IsNull())
@@ -313,6 +397,7 @@ void ClearHierarchyEntityIconClasses(UIElement* row)
         "hierarchy-entity-shape-plane",
         "hierarchy-entity-model",
         "hierarchy-entity-sprite",
+        "hierarchy-entity-animated-sprite",
         "hierarchy-entity-physics",
         "hierarchy-entity-physics-settings",
         "hierarchy-entity-terrain",
@@ -337,11 +422,10 @@ void ClearHierarchyEntityIconClasses(UIElement* row)
     // above and cannot be — packages register them at runtime. Clearing them
     // from the same registry Apply reads means a row recycled from an entity
     // whose type came from a package does not keep that package's icon.
-    for (const auto& [typeId, traits] : Editor::EditorComponentTraitsRegistry::Get().Snapshot())
+    for (const auto& [typeId, rowClass] : Editor::EditorComponentTraitsRegistry::Get().HierarchyRowClasses())
     {
         (void)typeId;
-        if (!traits.HierarchyRowClass.empty())
-            row->RemoveClass(traits.HierarchyRowClass);
+        row->RemoveClass(rowClass);
     }
 }
 
@@ -395,6 +479,18 @@ void ApplyHierarchyEntityIconClasses(ECS::World* world, UIElement* row, ECS::Ent
         }
     }
 
+    // Before the mesh and physics checks: a 2D sprite is what the entity looks
+    // like, and a platformer character carries a PhysicsBody that would
+    // otherwise claim the row.
+    if (world->GetComponent<Components::Sprite2D>(handle) != nullptr) {
+        row->AddClass("hierarchy-entity-sprite");return;
+    }
+    if (world->GetComponent<Components::AnimatedSprite2D>(handle) != nullptr)
+    {
+        row->AddClass("hierarchy-entity-animated-sprite");
+        return;
+    }
+
     if (world->GetComponent<Components::ParticleEmitter3D>(handle) != nullptr)
     {
         row->AddClass("hierarchy-entity-particles");
@@ -415,7 +511,7 @@ void ApplyHierarchyEntityIconClasses(ECS::World* world, UIElement* row, ECS::Ent
         {
             if (g == PG::CubeGuid())
             {
-                row->AddClass("hierarchy-entity-shape-cube");
+                row->AddClass(IsSpriteMeshRenderer(*meshRenderer, world, handle) ? "hierarchy-entity-sprite" : "hierarchy-entity-shape-cube");
                 return;
             }
             if (g == PG::SphereGuid())
@@ -430,7 +526,7 @@ void ApplyHierarchyEntityIconClasses(ECS::World* world, UIElement* row, ECS::Ent
             }
             if (g == PG::PlaneSpriteUvGuid())
             {
-                if (IsSpriteMeshRenderer(*meshRenderer))
+                if (IsSpriteMeshRenderer(*meshRenderer, world, handle))
                     row->AddClass("hierarchy-entity-sprite");
                 else
                     row->AddClass("hierarchy-entity-shape-plane");
@@ -440,7 +536,7 @@ void ApplyHierarchyEntityIconClasses(ECS::World* world, UIElement* row, ECS::Ent
             {
                 if (!world->GetComponent<Components::PolyhavenPlaceholder>(handle))
                 {
-                    if (IsSpriteMeshRenderer(*meshRenderer))
+                    if (IsSpriteMeshRenderer(*meshRenderer, world, handle))
                         row->AddClass("hierarchy-entity-sprite");
                     else
                         row->AddClass("hierarchy-entity-shape-plane");
@@ -459,11 +555,11 @@ void ApplyHierarchyEntityIconClasses(ECS::World* world, UIElement* row, ECS::Ent
 
     // Plugin-owned components (editor packages) contribute row classes via
     // registered traits.
-    for (const auto& [typeId, traits] : Editor::EditorComponentTraitsRegistry::Get().Snapshot())
+    for (const auto& [typeId, rowClass] : Editor::EditorComponentTraitsRegistry::Get().HierarchyRowClasses())
     {
-        if (!traits.HierarchyRowClass.empty() && world->HasComponent(handle, typeId))
+        if (world->HasComponent(handle, typeId))
         {
-            row->AddClass(traits.HierarchyRowClass);
+            row->AddClass(rowClass);
             return;
         }
     }
@@ -603,6 +699,33 @@ void ApplyTitleModelThumbnail(UIElement& titleEl, const std::string& relOrEngine
     titleEl.MarkDirty(UIElement::VisualDirty);
 }
 
+void ApplySpriteFrameThumbnail(UIElement& iconEl, const std::string& thumbPath,
+                               float horizontalAlignPercent)
+{
+    if (thumbPath.empty())
+        return;
+
+    constexpr uint32_t kBackgroundTintNoDim = 0xFFFFFFFFu;
+    BackgroundImageSource source{};
+    source.Kind = BackgroundImageSource::SourceKind::Path;
+    source.Value = thumbPath;
+    // Contain, not an explicit square: a sprite frame is rarely square, and
+    // stretching it to the icon box is the one thing a preview must not do.
+    BackgroundSizeValue size{};
+    size.Mode = BackgroundSizeMode::Contain;
+    BackgroundPositionValue pos{horizontalAlignPercent, true, 50.0f, true};
+
+    iconEl.AddClass("hierarchy-entity-model-thumb");
+    iconEl.Overrides()
+        .Set(Style::BackgroundImage, source)
+        .Set(Style::BackgroundRepeatProp, BackgroundRepeat::NoRepeat)
+        .Set(Style::BackgroundSize, size)
+        .Set(Style::BackgroundPosition, pos)
+        .Set(Style::BackgroundTint, kBackgroundTintNoDim);
+    ApplyModelThumbSaturationOverride(iconEl);
+    iconEl.MarkDirty(UIElement::VisualDirty);
+}
+
 void ApplyInspectorEntityIcon(ECS::World* world,
                               const EditorContext* ctx,
                               UIElement& iconEl,
@@ -668,6 +791,75 @@ void ApplyInspectorEntityIcon(ECS::World* world,
         return;
     }
 
+    // Sprite sheets are useless as previews, so the thumbnail service crops the
+    // entity's current frame out of its sheet — the same request, cache and crop
+    // the Hierarchy rows use, so header and row always agree.
+    if (ctx->Assets && ctx->Thumbnails && postActionHost && uiManager)
+    {
+        const SpriteFramesPreviewRequest request =
+            TryResolveSpriteFramesPreview(world, handle, ctx->Assets);
+        if (!request.AssetPath.empty())
+        {
+            const uint64_t iconInstanceId = iconEl.GetInstanceId();
+            const std::string immediate = ctx->Thumbnails->GetOrRequestSpriteFrame(
+                request.AssetPath, request.AnimationName, request.FlipX,
+                [postActionHost, iconInstanceId, uiManager](const std::string& rel)
+                {
+                    if (rel.empty())
+                        return;
+                    postActionHost->PostAction(
+                        [iconInstanceId, uiManager, rel]()
+                        {
+                            if (!uiManager)
+                                return;
+                            UIElement* icon = uiManager->FindElementByInstanceId(iconInstanceId);
+                            if (!icon)
+                                return;
+                            ApplySpriteFrameThumbnail(*icon, rel, kInspectorIconAlignPercent);
+                        });
+                });
+            if (!immediate.empty())
+                ApplySpriteFrameThumbnail(iconEl, immediate, kInspectorIconAlignPercent);
+            return;
+        }
+    }
+
+
+
+    // Sprite sheets are useless as previews, so the thumbnail service crops the
+    // entity's current frame out of its sheet — the same request, cache and crop
+    // the Hierarchy rows use, so header and row always agree.
+    if (ctx->Assets && ctx->Thumbnails && postActionHost && uiManager)
+    {
+        const auto path = TryResolveSpriteAlbedoTexturePath(world, handle, ctx->Assets);
+        if (!path.empty())
+        {
+            const uint64_t iconInstanceId = iconEl.GetInstanceId();
+            const std::string immediate = ctx->Thumbnails->GetOrRequestAtlasRegion(
+                path, ResolveSpritePreviewUV(world, handle, ctx->Assets),
+                [postActionHost, iconInstanceId, uiManager](const std::string& rel)
+                {
+                    if (rel.empty())
+                        return;
+                    postActionHost->PostAction(
+                        [iconInstanceId, uiManager, rel]()
+                        {
+                            if (!uiManager)
+                                return;
+                            UIElement* icon = uiManager->FindElementByInstanceId(iconInstanceId);
+                            if (!icon)
+                                return;
+                            ApplySpriteFrameThumbnail(*icon, rel, kInspectorIconAlignPercent);
+                        });
+                }, ResolveSpritePreviewKey(world, handle, ctx->Assets));
+            if (!immediate.empty())
+                ApplySpriteFrameThumbnail(iconEl, immediate, kInspectorIconAlignPercent);
+            return;
+        }
+    }
+
+
+
     if (ctx->Assets && uiManager)
     {
         const std::filesystem::path spritePath =
@@ -727,20 +919,19 @@ void ApplyInspectorEntityIcon(ECS::World* world,
                 {
                     const int desiredSize =
                         static_cast<int>(std::clamp(modelThumbPx * 3.0f, 48.0f, 256.0f));
-                    const uint64_t titleInstanceId = iconEl.GetInstanceId();
+                    const auto weakIcon = UIElement::MakeWeakRef(&iconEl);
+                    const UI::UiPostHandle post = postActionHost->GetPostHandle();
 
                     std::string immediate = ctx->Thumbnails->GetOrRequest(
                         absPath,
                         desiredSize,
-                        [postActionHost, titleInstanceId, uiManager, modelThumbPx](const std::string& rel)
+                        [post, weakIcon, modelThumbPx](const std::string& rel)
                         {
                             if (rel.empty())
                                 return;
-                            postActionHost->PostAction([titleInstanceId, uiManager, rel, modelThumbPx]()
+                            post.Post([weakIcon, rel, modelThumbPx]()
                                                        {
-                                                           if (!uiManager)
-                                                               return;
-                                                           UIElement* te = uiManager->FindElementByInstanceId(titleInstanceId);
+                                                           UIElement* te = weakIcon.Get();
                                                            if (!te)
                                                                return;
                                                            ApplyTitleModelThumbnail(*te, rel, modelThumbPx); });

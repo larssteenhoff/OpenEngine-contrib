@@ -807,6 +807,7 @@ button.node-graph-inline-search-clear:hover,
 
 .node-graph-palette-node-drag-ghost {
 	pointer-events: none;
+	border-color: var(--ui_color_accent);
 	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
 	gap: 2px;
 }
@@ -1452,7 +1453,7 @@ button.node-graph-variables-add:active,
    specificity — so the :hover variants this used to spell out are unnecessary
    rather than merely collapsed. */
 .graph-node.ring-accent > .graph-node-ring {
-	border-color: #3A8FFF;
+	border-color: var(--ui_color_accent);
 }
 
 .graph-node.runtime-active {
@@ -1460,8 +1461,8 @@ button.node-graph-variables-add:active,
 }
 
 .graph-node.drop-target {
-	border-color: #3A8FFF;
-	box-shadow: 0 0 8px rgba(58, 143, 255, 0.5);
+	border-color: var(--ui_color_accent);
+	box-shadow: 0 0 8px var(--ui_color_accent_glow);
 }
 
 /* The node the last compile blamed: red border plus glow. */
@@ -1470,12 +1471,11 @@ button.node-graph-variables-add:active,
 	box-shadow: 0 0 8px rgba(240, 74, 74, 0.5);
 }
 
-/* Both states at once: selection (and search) keeps the blue border, the red
+/* Both states at once: selection (and search) keeps the accent border, the red
    glow keeps saying "error". Without this, has-error wins the border at equal
    specificity and selecting a broken node looks like nothing happened. */
-.graph-node.has-error.selected,
-.graph-node.has-error.search-match {
-	border-color: #3A8FFF;
+.graph-node.has-error.ring-accent {
+	border-color: var(--ui_color_accent);
 }
 
 .graph-node-body {
@@ -2012,8 +2012,8 @@ button.node-graph-variables-add:active,
 	background-color: #ffffff;
 	outline-width: 2px;
 	outline-style: solid;
-	outline-color: #3A8FFF;
-	box-shadow: 0 0 6px rgba(58, 143, 255, 0.65);
+	outline-color: var(--ui_color_accent);
+	box-shadow: 0 0 6px var(--ui_color_accent_glow);
 }
 
 .graph-port-input {

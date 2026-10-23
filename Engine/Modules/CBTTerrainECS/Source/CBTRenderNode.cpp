@@ -19,8 +19,8 @@
 #include "Rendering/Core/RenderGraph/RGFrame.h"
 
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
-#include <cstdlib> // getenv (GE_CBT_DESC_DEBUG)
 #include <utility>
 
 namespace GameEngine::CBTTerrainECS
@@ -38,7 +38,7 @@ void EmitCbtForwardDraw(Pipeline::ViewDeclare& d, CBTRenderFeature& feature)
     const void* graph = &d.Frame;
     const uint64_t rgFrame = d.Frame.FrameIndex();
 
-    static const bool kCbtViewDebug = std::getenv("GE_CBT_DESC_DEBUG") != nullptr;
+    static const bool kCbtViewDebug = Platform::EnvironmentSwitchEnabled("GE_CBT_DESC_DEBUG", false);
     if (kCbtViewDebug)
     {
         Logger::Log::Info("CBT.View id={} purpose={} rgFrame={} graph={} instance=0",
@@ -52,7 +52,7 @@ void EmitCbtForwardDraw(Pipeline::ViewDeclare& d, CBTRenderFeature& feature)
     // (GPU time / barriers). The device-lost is engine-side in frame N+1's consumption
     // of frame N's scatter/culling state (RenderDoc proved frame N healthy); this
     // narrows CBT's trigger for the engine-side fix.
-    static const bool kCbtNoDraw = std::getenv("GE_CBT_NO_DRAW") != nullptr;
+    static const bool kCbtNoDraw = Platform::EnvironmentSwitchEnabled("GE_CBT_NO_DRAW", false);
     if (kCbtNoDraw)
         return;
 
@@ -213,7 +213,7 @@ void CBTRenderNode::DeclareForView(Pipeline::ViewDeclare& d)
     // domain + root count; this re-affirms it periodically (stall-free — no GPU readback
     // in the render path; live-bisector counts are covered by CBTTerrainTests). Idle
     // runs (env unset) pay nothing.
-    static const bool kCBTPlanetDebug = std::getenv("GE_CBT_PLANET_DEBUG") != nullptr;
+    static const bool kCBTPlanetDebug = Platform::EnvironmentSwitchEnabled("GE_CBT_PLANET_DEBUG", false);
     if (kCBTPlanetDebug)
     {
         static uint32_t sPlanetLogThrottle = 0u;
@@ -334,7 +334,7 @@ void CBTRenderNode::DeclareForView(Pipeline::ViewDeclare& d)
         }
 
         // GE_CBT_VALIDATE: log the Validate kernel's error counters (CBTValidationReadback).
-        static const bool kCbtValidateDbg = std::getenv("GE_CBT_VALIDATE") != nullptr;
+        static const bool kCbtValidateDbg = Platform::EnvironmentSwitchEnabled("GE_CBT_VALIDATE", false);
         if (kCbtValidateDbg)
             feature.GetValidationReadback().Tick(d.Frame, device, feature.GetInstance());
 
@@ -349,7 +349,7 @@ void CBTRenderNode::DeclareForView(Pipeline::ViewDeclare& d)
         // line would never fire on an edit; a real edit that reaches the GPU update
         // fires it. Idle frames (empty rect) stay silent. Rect only — a per-frame
         // MODIFIED-count readback would block the declare on a GPU submission mid-graph.
-        static const bool kCbtEditDebug = std::getenv("GE_CBT_EDIT_DEBUG") != nullptr;
+        static const bool kCbtEditDebug = Platform::EnvironmentSwitchEnabled("GE_CBT_EDIT_DEBUG", false);
         if (kCbtEditDebug)
         {
             const CBTTerrain::CBTClassifyDesc& c = classify;

@@ -3,7 +3,7 @@
 #include "Input/InputSystem.h"
 #include "Input/KeyCodes.h"
 #include "Logger/Logger.h"
-#include "UI/Controls/Mount.h"
+#include "Platform/Environment.h"
 #include "UI/Interaction/DragDropManager.h"
 #include "UI/Interaction/TooltipOverlay.h"
 #include "UI/UiContext.h"
@@ -603,11 +603,7 @@ bool UIManager::OnKey(int key, int action, int mods)
 
     // Optional diagnostics: log each key event with where it landed and whether
     // anything consumed it. Enable with GE_UI_KEYEVENT_LOG=1.
-    static const bool s_KeyLog = []() -> bool
-    {
-        const char* e = std::getenv("GE_UI_KEYEVENT_LOG");
-        return (e && e[0] == '1');
-    }();
+    static const bool s_KeyLog = Platform::EnvironmentSwitchEnabled("GE_UI_KEYEVENT_LOG", false);
     static int s_KeyLogBudget = 128;
 
     m_Modifiers.ApplyKeyEvent(key, isRelease, mods);
@@ -773,9 +769,8 @@ bool UIManager::OnKey(int key, int action, int mods)
                     for (size_t i = ch.size(); i-- > 0;)
                         if (ch[i])
                             stack.push_back(ch[i].get());
-                    if (auto* m = dynamic_cast<Mount*>(el))
-                        if (UIElement* tgt = m->GetTarget())
-                            stack.push_back(tgt);
+                    if (UIElement* tgt = el->GetMountTarget())
+                        stack.push_back(tgt);
                 }
 
                 std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)

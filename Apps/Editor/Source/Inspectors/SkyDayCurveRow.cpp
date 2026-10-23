@@ -4,6 +4,7 @@
 #include "ECS/World.h"
 #include "EditorContextMenu/UIContextMenu.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
+#include "Inspectors/InspectorComponentSection.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Mathematics/Interpolation.h"
 #include "UI/Controls/CubicBezierField.h"
@@ -45,24 +46,6 @@ static bool IsSkyScalarCurveExpanded(const std::string& key)
 static void SetSkyScalarCurveExpanded(const std::string& key, bool expanded)
 {
     SkyScalarCurveExpandedStates()[key] = expanded;
-}
-
-static std::unordered_map<std::string, bool>& SkyScalarCurvePresetExpandedStates()
-{
-    static std::unordered_map<std::string, bool> states;
-    return states;
-}
-
-static bool IsSkyScalarCurvePresetExpanded(const std::string& key)
-{
-    const auto& states = SkyScalarCurvePresetExpandedStates();
-    const auto it = states.find(key);
-    return it != states.end() && it->second;
-}
-
-static void SetSkyScalarCurvePresetExpanded(const std::string& key, bool expanded)
-{
-    SkyScalarCurvePresetExpandedStates()[key] = expanded;
 }
 
 // A curve surface (the key graph or the Bezier editor) at its compact height, or filling the row's
@@ -244,7 +227,6 @@ CurveField* AddSkyDayCurveRow(
 
     auto extrasShared = std::make_shared<std::vector<ECS::EntityHandle>>(extras);
     auto expandedState = std::make_shared<bool>(IsSkyScalarCurveExpanded(changeName));
-    auto presetExpandedState = std::make_shared<bool>(IsSkyScalarCurvePresetExpanded(changeName));
     const bool initialBezierMode =
         hasBezier && (sky->*modeMember) == Components::SkyScalarCurveShapeMode::CubicBezier;
 
@@ -805,15 +787,10 @@ CurveField* AddSkyDayCurveRow(
     // [0,1]^2 so the same shape is reusable on any curve -- sky or ValueCurve).
     if (options.Presets)
     {
-        auto presetFoldout = std::make_unique<Foldout>();
-        presetFoldout->SetTitle("Presets");
-        presetFoldout->AddClass("rp-foldout");
+        Foldout* presetFoldout = InspectorUI::AddComponentSection(
+            options.PresetsFullWidth ? parent : fieldContainer, "SkyCurve/" + changeName + "/Presets", "Presets",
+            false);
         presetFoldout->AddClass("curve-preset-foldout");
-        presetFoldout->SetExpanded(*presetExpandedState);
-        presetFoldout->SetOnExpandedChanged([presetExpandedState, changeName](Foldout&, bool expanded) {
-            *presetExpandedState = expanded;
-            SetSkyScalarCurvePresetExpanded(changeName, expanded);
-        });
         UIElement* presetContent = presetFoldout->GetContentContainer();
 
         auto picker = std::make_unique<CurvePresetPicker>();
@@ -886,10 +863,6 @@ CurveField* AddSkyDayCurveRow(
                 pickerRaw->Refresh();
         });
         presetContent->AddChild(std::move(picker));
-        if (options.PresetsFullWidth)
-            parent->AddChild(std::move(presetFoldout));
-        else
-            fieldContainer->AddChild(std::move(presetFoldout));
     }
 
     auto applyExpandedState = [

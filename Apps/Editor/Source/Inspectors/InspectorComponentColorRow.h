@@ -50,7 +50,7 @@ void RefreshComponentColorRow(const ComponentColorBinding<TComponent>& binding)
     if (!component || !binding.Row.Swatch || !binding.Row.Value)
         return;
     const float* rgb = component->*binding.Color;
-    StyleColorSwatch(binding.Row.Swatch, ComponentColorArgb(binding));
+    SetColorSwatchColor(binding.Row.Swatch, ComponentColorArgb(binding));
     binding.Row.Value->SetText(FormatColorRgb(rgb[0], rgb[1], rgb[2]));
 }
 

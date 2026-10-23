@@ -13,6 +13,7 @@
 #include "Rendering/Core/Device.h"
 #include "Rendering/Geometry/VertexAttributeFlags.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <memory>
@@ -413,7 +414,7 @@ TEST_F(MeshGPURegistryTest, UnregisterSubmesh_RemovesRuntimeKey)
     EXPECT_EQ(m_registry.Find(handle), nullptr);
 }
 
-TEST_F(MeshGPURegistryTest, CreateMorphedMesh_AppliesDeltasAndBounds)
+TEST_F(MeshGPURegistryTest, ApplyMorphTargets_AppliesDeltas)
 {
     Mesh mesh = MakeTriangleMesh();
     MorphTarget target{};
@@ -430,16 +431,58 @@ TEST_F(MeshGPURegistryTest, CreateMorphedMesh_AppliesDeltasAndBounds)
     mesh.MorphTargets.push_back(std::move(target));
 
     const float weights[] = {0.5f};
-    Mesh morphed = CreateMorphedMesh(mesh, weights, 1);
+    Vector<Vertex> morphed;
+    ApplyMorphTargets(mesh, weights, 1, morphed);
 
-    EXPECT_TRUE(morphed.MorphTargets.empty());
-    EXPECT_NEAR(morphed.Vertices[0].Position[1], 2.0f, 1e-5f);
-    EXPECT_NEAR(morphed.Vertices[0].Normal[1], 0.4472136f, 1e-5f);
-    EXPECT_NEAR(morphed.Vertices[0].Normal[2], 0.8944272f, 1e-5f);
-    EXPECT_NEAR(morphed.Vertices[2].Position[2], mesh.Vertices[2].Position[2] + 0.5f, 1e-5f);
+    ASSERT_EQ(morphed.size(), mesh.Vertices.size());
+    EXPECT_NEAR(morphed[0].Position[1], 2.0f, 1e-5f);
+    EXPECT_NEAR(morphed[0].Normal[1], 0.4472136f, 1e-5f);
+    EXPECT_NEAR(morphed[0].Normal[2], 0.8944272f, 1e-5f);
+    EXPECT_NEAR(morphed[2].Position[2], mesh.Vertices[2].Position[2] + 0.5f, 1e-5f);
     for (int axis = 0; axis < 3; ++axis)
-        EXPECT_EQ(morphed.Vertices[1].Position[axis], mesh.Vertices[1].Position[axis]);
-    EXPECT_NEAR(morphed.MaxBounds[1], 2.0f, 1e-5f);
+        EXPECT_EQ(morphed[1].Position[axis], mesh.Vertices[1].Position[axis]);
+}
+
+// A rewrite keeps the handle and the index range, and never writes a vertex
+// range a frame in flight may still read: within one frame the spare ranges
+// run out, and the oldest comes back once the frames-in-flight window passes.
+TEST_F(MeshGPURegistryTest, RewriteSubmeshVertices_RotatesOnlyThroughRetiredRanges)
+{
+    Mesh mesh = MakeTriangleMesh();
+    const MeshGPUKey key{GUID::Generate(), 0};
+    const MeshGPUHandle handle = m_registry.RegisterSubmesh(key, mesh);
+    const MeshGPUEntry* entry = m_registry.Find(handle);
+    ASSERT_NE(entry, nullptr);
+    const uint32_t firstIndex = entry->firstIndex;
+
+    Vector<Vertex> moved = mesh.Vertices;
+    moved[0].Position[1] = 3.0f;
+
+    std::vector<uint32_t> drawnThisFrame{entry->vertexOffset};
+    size_t accepted = 0;
+    while (accepted < 16 && m_registry.RewriteSubmeshVertices(handle, mesh, moved))
+    {
+        ++accepted;
+        entry = m_registry.Find(handle);
+        ASSERT_NE(entry, nullptr);
+        EXPECT_EQ(std::count(drawnThisFrame.begin(), drawnThisFrame.end(), entry->vertexOffset), 0)
+            << "a vertex range drawn from this frame was rewritten";
+        drawnThisFrame.push_back(entry->vertexOffset);
+    }
+    EXPECT_GT(accepted, 0u);
+    EXPECT_LT(accepted, 16u) << "rewrites within one frame never ran out of ranges";
+    EXPECT_EQ(entry->firstIndex, firstIndex);
+    // Vertex 0 moved to y = 3, so the box spans y in [-1, 3].
+    EXPECT_NEAR(entry->bounds.halfExtents.y, 2.0f, 1e-5f);
+
+    m_registry.BeginFrame(IDevice::kMaxSupportedFramesInFlight);
+    EXPECT_TRUE(m_registry.RewriteSubmeshVertices(handle, mesh, moved))
+        << "a range retired a full frames-in-flight window ago must be writable";
+    EXPECT_EQ(m_registry.FindHandle(key), handle);
+
+    moved.push_back(moved[0]);
+    EXPECT_FALSE(m_registry.RewriteSubmeshVertices(handle, mesh, moved))
+        << "a rewrite must not change the vertex count";
 }
 
 // Multiple entities referencing the same model share the same GPU entry.

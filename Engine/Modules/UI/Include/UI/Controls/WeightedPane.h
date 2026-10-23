@@ -4,17 +4,14 @@
 
 namespace GameEngine {
 
-// A simple container element that exposes a programmatic flex-grow weight.
-// UIManager's Yoga builder recognizes this element and applies the weight
-// to the corresponding YG node so panes can share space by ratio.
+// A container whose flex-grow is a programmatic weight, so panes can share
+// space by ratio. The weight is a style override, so it reaches Yoga through
+// the normal style path and wins over any CSS flex-grow.
 class WeightedPane : public UIElement {
 public:
-    explicit WeightedPane(float weight = 1.0f)
-        : m_Weight(weight) {}
+    explicit WeightedPane(float weight = 1.0f);
 
-    UIElementKind Kind() const override { return UIElementKind::WeightedPane; }
-
-    void SetFlexWeight(float w) { m_Weight = (w < 0.0f) ? 0.0f : w; MarkDirty(LayoutDirty); }
+    void SetFlexWeight(float w);
     float GetFlexWeight() const { return m_Weight; }
 
 private:
@@ -22,4 +19,3 @@ private:
 };
 
 } // namespace GameEngine
-

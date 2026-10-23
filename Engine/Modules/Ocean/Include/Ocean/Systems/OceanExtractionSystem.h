@@ -7,6 +7,7 @@
 
 #include "AssetCore/GUID.h"
 #include "ECS/Systems.h"
+#include "Types/ScopedSubscription.h"
 #include "Types/Types.h"
 
 #include <array>
@@ -22,14 +23,18 @@ class RenderServices;
 namespace GameEngine::Components
 {
 struct OceanSurface;
+struct OceanWaveSpectrum;
 } // namespace GameEngine::Components
 
 namespace GameEngine::Ocean
 {
 
 class OceanFFTCollisionAsset;
+class OceanRenderFeature;
 class OceanPresetAsset;
 class OceanSettingsAsset;
+struct OceanExtractionFrame;
+enum class OceanSettingsKind : uint32;
 
 // Writes the surface's shallow clarity window into the per-frame params, clamped
 // to what the shader can evaluate (a zero distance would leave its smoothstep
@@ -51,6 +56,39 @@ public:
     void Update(ECS::World& world, float32 deltaTime) override;
 
 private:
+    void ResolveRenderer(ECS::World& world, OceanExtractionFrame& frame);
+    void ResolveSettingsAssets(OceanRenderFeature& feature, OceanExtractionFrame& frame);
+    const OceanSettingsAsset* ResolveSettingsAsset(const GUID& guid, OceanSettingsKind expectedKind,
+                                                   uint32 slot);
+    void SampleOceanClock(OceanRenderFeature& feature, OceanExtractionFrame& frame,
+                          float32 deltaTime);
+    void ConfigureCollisionProvider(OceanRenderFeature& feature, OceanExtractionFrame& frame);
+    void ExtractSurface(ECS::World& world, OceanRenderFeature& feature, OceanExtractionFrame& frame);
+    void GatherWaterBodies(ECS::World& world, OceanExtractionFrame& frame);
+    void GatherPolygonWaterBodies(ECS::World& world, OceanExtractionFrame& frame);
+    void PublishWaterMaterials(ECS::World& world, OceanRenderFeature& feature,
+                               const OceanExtractionFrame& frame);
+    void GatherWaveImpulses(ECS::World& world, OceanRenderFeature& feature,
+                            OceanExtractionFrame& frame, float32 deltaTime);
+    void PublishWaveSimulations(ECS::World& world, OceanRenderFeature& feature,
+                                OceanExtractionFrame& frame);
+    Components::OceanWaveSpectrum ResolveGlobalSpectrum(ECS::World& world,
+                                                        const OceanExtractionFrame& frame) const;
+    void PublishGlobalSpectrum(OceanRenderFeature& feature, OceanExtractionFrame& frame,
+                               const Components::OceanWaveSpectrum& spec);
+    // True when a spectrum-affecting input changed since the last frame, so H0 must be re-baked.
+    bool UpdateGlobalSpectrumCache(const Components::OceanWaveSpectrum& spec, float32 windSpeed,
+                                   float32 windDirDeg, float32 turbulence, float32 gravityMul,
+                                   uint32 disableMask);
+    void PublishLocalSpectra(OceanRenderFeature& feature, const OceanExtractionFrame& frame);
+    void PublishLocalSpectrum(OceanRenderFeature& feature, uint32 stream,
+                              const Components::OceanWaveSpectrum& localFftSpec, float32 oceanTime);
+    bool UpdateLocalSpectrumCache(uint32 stream, const Components::OceanWaveSpectrum& localFftSpec,
+                                  float32 localWindSpeed, float32 localWindDirDeg,
+                                  float32 localTurbulence, float32 localGravityMul,
+                                  uint32 localDisableMask);
+    void PublishWorldContent(OceanRenderFeature& feature, uint64 worldId, bool hasSurface);
+
     Engine::Renderer::RenderServices* m_RenderServices = nullptr;
     float32 m_Time = 0.0f;
 
@@ -102,6 +140,9 @@ private:
     OceanCustomTimeProvider m_CustomTimeProvider;
     OceanNetworkOffsetTimeProvider m_NetworkTimeProvider;
     OceanTimelineTimeProvider m_TimelineTimeProvider;
+    // Keeps this world's entry in the feature's content-digest table while the
+    // system (and so its world) lives.
+    ScopedSubscription m_WorldContentTracking;
 };
 
 } // namespace GameEngine::Ocean

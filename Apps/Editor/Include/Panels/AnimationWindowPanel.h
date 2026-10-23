@@ -9,6 +9,7 @@
 #include "Panels/TimeCompositeModel.h"
 #include "Panels/LaneClipModel.h"
 #include "UI/Controls/DockPanel.h"
+#include "UI/ElementInstanceLedger.h"
 #include "UI/Controls/TreeView.h"
 #include "UI/Interaction/Selection.h"
 #include "UI/UIEvents.h"
@@ -153,10 +154,74 @@ private:
     void BindFromAssetsDeferred();
     void LoadBindAttachLayoutAndStyle(UIManager* ui);
     void MarkBindFailed(std::string_view reason);
-    void RefreshElementPointers();
+    void SeedSessionFromSettings();
+    void BindLayoutElements();
+    void ResolveElementPointers();
+    void ConfigureElements();
+    UIElement* FindUnwired(const std::string& id);
     void ApplyAppearanceSettings();
+    void FindAndWireLayoutElements();
+    void FindPanelChromeElements();
+    void WirePropertiesTree();
+    void ConfigurePropertiesTreeRows();
+    void WirePropertiesTreeSelection();
+    void WirePropertiesTreeContextMenu();
+    void SyncPropertiesTreeWithDopeSheet();
+    void RouteChromeFocusToPanel();
+    void BindTimelineRulerAndRangeSlider();
+    void BindPlaybackRangeFields();
+    void BindTimelineMarkersAndLabels();
+    void SeekToSnappedTime(float t);
+    void BindDopeSheetView();
+    void BindCurvesGraphView();
+    void ApplyCurvesGraphSettings();
+    void WireCurvesGraphEditCallbacks();
+    bool IsChannelLocked(int channel) const;
+    void WireCurvesGraphKeyframeContextMenu();
+    void WireCurvesGraphRetimeAndDrawCallbacks();
+    void BindTimeCompositeView();
+    void WireTimeCompositeModelAndClipSelection();
+    void WireTimeCompositeClipMoveAndTrimEdits();
+    void WireTimeCompositeClipFadeEdits();
+    void WireTimeCompositeSeekAndTrackContextMenu();
+    void WireTimeCompositeTrackKeyEdits();
+    void WireTimeCompositeClipMarkers();
+    void WireTimeCompositeTrackReorderAndClipMoves();
+    void WireDopeSheetKeyframeTimeEdits();
+    void BindLaneClipEditorView();
+    void ApplyCurrentClipToViews();
+    void PanTimelineView(float deltaTimeSeconds);
+    void WireTimelineScrubAndPan();
+    void WireTimeCompositeMediaDrop();
+    void WireLaneClipEditorMarkers();
+    void CreatePanelModals();
+    void RouteViewFocusToPanel();
     void WireMarkersElementCallbacks();
     void WireAnimationControls();
+    void WireNewAndSaveButtons();
+    void WireAnimationMenuButton();
+    void WirePlaybackButtons();
+    void WireFrameStepButtons();
+    void WireClipAndViewSelectors();
+    void SetInterpolationOnSelectedKeys(AnimInterp interp);
+    void ApplyFrameRanges(float tMin, float tMax, float vMin, float vMax, bool applyTime, bool applyValue);
+    void WireFramingAndKeySelectionButtons();
+    void WireKeyframeButtons();
+    void SetEaseTangentsOnSelectedKeys(bool easeIn, bool easeOut);
+    void WireInterpolationAndEaseButtons();
+    void WireEulerFilterButton();
+    void WireCurveToolToggles();
+    void WireTangentAndViewRangeButtons();
+    void WireCurveDisplayModeButtons();
+    void WireStatsTimeField();
+    void WireStatsValueField();
+    void WireFpsField();
+    void WirePropertiesSearchField();
+    void WirePropertyFilterButtons();
+    void WireSnapAndKeytoolControls();
+    void WireGridAndClipboardButtons();
+    void WireOpenAndRevealButtons();
+    void ApplyControlTooltips();
     void UpdateTitle();
     void MarkDirty();
     void ClearDirty();
@@ -312,7 +377,13 @@ private:
     UIElement* m_PropertiesPane = nullptr;
     UIElement* m_PropertiesHeader = nullptr;
     UIElement* m_PropertiesFilterRow = nullptr;
-    TextField* m_PropertiesSearchField = nullptr;
+    // Weak: the destructor and the search callbacks outlive a reconcile that can
+    // destroy the field. Every other element pointer below is raw and re-resolved by
+    // ResolveElementPointers on each layout announcement.
+    WeakRef<TextField> m_PropertiesSearchField;
+    // The search row registered with EditorSearchBars. A registry key only, never
+    // dereferenced: it may name a row a reconcile has destroyed.
+    UIElement* m_RegisteredSearchRow = nullptr;
     Button* m_FilterAnimatedButton = nullptr;
     Button* m_FilterHierarchyButton = nullptr;
     Button* m_FilterChannelsOnlyButton = nullptr;
@@ -392,11 +463,14 @@ private:
     std::string m_PropertiesSearchQuery;
     enum class PropertyFilter { Hierarchy, Animated, ChannelsOnly, Flat };
     PropertyFilter m_PropertyFilter = PropertyFilter::Hierarchy;
-    bool m_ShowGrid = true;
-    bool m_SnapTime = false;
-    bool m_SnapValue = false;
-    float m_SnapTimeStep  = 0.0f; // 0.0 = snap to frame grid, >0 = custom time step
-    float m_SnapValueStep = 0.0f; // 0.0 = auto (match grid), >0 = custom value step
+    // Grid and snap state for this session: the constructor starts it at
+    // AnimationWindowSettings::Defaults(), binding the curves view applies the
+    // user's settings over it, and the toolbar toggles change it without saving.
+    bool m_ShowGrid;
+    bool m_SnapTime;
+    bool m_SnapValue;
+    float m_SnapTimeStep;  // 0.0 = snap to frame grid, >0 = custom time step
+    float m_SnapValueStep; // 0.0 = auto (match grid), >0 = custom value step
     bool m_KeytoolEnabled = false;
     struct ClipboardKeyframe
     {
@@ -517,13 +591,18 @@ private:
 
     void SetupToolbarDragDrop();
     void WireToolbarRightClickToggles();
+    void RestoreToolbarLayoutFromPrefs();
     void RestoreToolbarGapsFromPrefs();
     void CreateToolbarGap(UIElement* container, int insertIndex);
     void RemoveToolbarGap(class Button* gap);
     std::unique_ptr<Editor::ToolbarDragDrop> m_ToolbarDragDrop;
-    bool m_ToolbarDragDropOrderLoaded = false;
-    bool m_ToolbarRightClickWired = false;
     int m_NextToolbarGapSerial = 1;
+
+    // Element instances ConfigureElements has set up and WireAnimationControls has
+    // wired. A layout reconcile keeps unchanged elements, so a later pass acts only on
+    // the instances it created.
+    Editor::ElementInstanceLedger m_ConfiguredElements;
+    Editor::ElementInstanceLedger m_WiredElements;
 
     // Live updates from AnimationWindowSettings. Declared last so it unsubscribes
     // before any member its callback touches is destroyed.

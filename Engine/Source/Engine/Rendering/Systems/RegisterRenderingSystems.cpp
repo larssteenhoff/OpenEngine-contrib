@@ -24,6 +24,7 @@
 #include "ECSModules/Rendering/Systems/DDGIVolumeSystem.h"
 #include "Engine/Rendering/DDGIFieldRanges.h"
 #include "ECSModules/Rendering/Systems/ReflectionProbeSystem.h"
+#include "ECSModules/Rendering/Systems/PlanarReflectionSystem.h"
 
 #include "ECS/DisabledInHierarchySystem.h"
 #include "Scripting/NativePostSimulationSystem.h"
@@ -157,6 +158,7 @@ void AddRenderingSystemsToSchedule(ECS::SystemScheduleBuilder& schedule, RenderS
     // push. Chaining costs nothing: this is a pure CPU push into the IBL
     // feature that UploadEnvData reads later during record.
     schedule.Add<AmbientLightSystem>(kAmbientLight, SystemPhase::Camera, 4, {kReflectionProbe}, renderServices);
+    schedule.Add<PlanarReflectionSystem>("PlanarReflection", SystemPhase::Camera, 5, {kAmbientLight}, renderServices);
     // DDGI volume extraction: needs WorldTransform (post-hierarchy, so
     // {kCamera} suffices — the same dependency SkyEnvironmentSystem uses)
     // but touches no IBL feature state, so it carries no ordering edge to

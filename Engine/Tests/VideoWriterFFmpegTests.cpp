@@ -16,6 +16,7 @@
 
 #include "Video/VideoPlayer.h"
 #include "Video/VideoWriter.h"
+#include "TestTempDir.h"
 
 extern "C"
 {
@@ -67,9 +68,9 @@ constexpr float kFirstFrameTimeoutSeconds = 10.0f;
 
 std::filesystem::path MakeOutputPath(const char* extension)
 {
-    const ::testing::TestInfo* info = ::testing::UnitTest::GetInstance()->current_test_info();
-    const std::string name = std::string("ge_video_writer_test_") + info->name() + extension;
-    return std::filesystem::temp_directory_path() / name;
+    std::filesystem::path path = TestUtils::MakeUniqueTempDirectory("ge_video_writer_test");
+    path += extension;
+    return path;
 }
 
 VideoWriterOptions MakeVideoOnlyOptions(const std::filesystem::path& path)

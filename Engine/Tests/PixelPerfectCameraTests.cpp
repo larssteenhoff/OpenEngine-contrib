@@ -111,3 +111,118 @@ TEST(PixelPerfectCamera, DisabledPixelSnapPreservesProjectionAndZeroCompensation
     for (int element = 0; element < 16; ++element)
         EXPECT_FLOAT_EQ(actual->viewProj[element], expected.viewProj[element]);
 }
+
+namespace
+{
+Components::Camera PixelPerfectCamera(uint32 refWidth, uint32 refHeight)
+{
+    Components::Camera camera{};
+    camera.Perspective = false;
+    camera.PixelPerfect = true;
+    camera.PixelPerfectReferenceWidth = refWidth;
+    camera.PixelPerfectReferenceHeight = refHeight;
+    return camera;
+}
+}
+
+TEST(PixelPerfectCameraViewState, InactiveWithoutTheOptIn)
+{
+    // Zero regression for existing content: a camera that never opted in must not
+    // acquire an offscreen RT or an upscale pass.
+    Components::Camera plain{};
+    plain.Perspective = false;
+    EXPECT_FALSE(ComputePixelPerfectViewState(plain, 1920, 1080).Active);
+
+    Components::Camera perspective = PixelPerfectCamera(320, 180);
+    perspective.Perspective = true;
+    EXPECT_FALSE(ComputePixelPerfectViewState(perspective, 1920, 1080).Active);
+}
+
+TEST(PixelPerfectCameraViewState, PaddedExtentIsTheReferencePlusOneTexelPerSide)
+{
+    // The border is load-bearing, not decoration: it is what keeps a shifted
+    // sample window off clamp-to-edge.
+    const PixelPerfectViewState state = ComputePixelPerfectViewState(PixelPerfectCamera(320, 180), 1920, 1080);
+    ASSERT_TRUE(state.Active);
+    EXPECT_EQ(state.ReferenceWidth, 320u);
+    EXPECT_EQ(state.ReferenceHeight, 180u);
+    EXPECT_EQ(state.PaddedWidth, state.ReferenceWidth + 2u);
+    EXPECT_EQ(state.PaddedHeight, state.ReferenceHeight + 2u);
+}
+
+TEST(PixelPerfectCameraViewState, DisplayExtentIsTheViewportItWasComputedAgainst)
+{
+    // The pipeline reads the crossing's OUTPUT extent from here — the padded RT
+    // is the caller's target size, so the panel can only reach the pipeline
+    // through this state.
+    const PixelPerfectViewState state =
+        ComputePixelPerfectViewState(PixelPerfectCamera(320, 180), 1288, 728);
+    ASSERT_TRUE(state.Active);
+    EXPECT_EQ(state.DisplayWidth, 1288u);
+    EXPECT_EQ(state.DisplayHeight, 728u);
+
+    // Inactive state carries no extent, so a non-pixel-perfect view keeps its
+    // caller extent as the output basis.
+    Components::Camera plain{};
+    plain.Perspective = false;
+    const PixelPerfectViewState inactive = ComputePixelPerfectViewState(plain, 1288, 728);
+    EXPECT_FALSE(inactive.Active);
+    EXPECT_EQ(inactive.DisplayWidth, 0u);
+    EXPECT_EQ(inactive.DisplayHeight, 0u);
+}
+
+TEST(PixelPerfectCameraViewState, ZoomIsTheLargestIntegerThatFits)
+{
+    struct Case { uint32 screenW, screenH, expectedZoom; };
+    // 320x180 reference: 1920x1080 is exactly 6x; 1900x1070 must floor to 5x
+    // rather than filter, and a screen smaller than the reference clamps to 1x.
+    for (const Case& c : {Case{1920, 1080, 6u}, Case{1900, 1070, 5u}, Case{640, 360, 2u},
+                          Case{320, 180, 1u}, Case{200, 100, 1u}})
+    {
+        const PixelPerfectViewState state =
+            ComputePixelPerfectViewState(PixelPerfectCamera(320, 180), c.screenW, c.screenH);
+        ASSERT_TRUE(state.Active);
+        EXPECT_EQ(state.Zoom, c.expectedZoom) << c.screenW << "x" << c.screenH;
+    }
+}
+
+TEST(PixelPerfectCameraViewState, LetterboxKeepsExactlyTheReferenceWindow)
+{
+    // Default policy: show the reference resolution and black-bar the surplus.
+    Components::Camera camera = PixelPerfectCamera(320, 180);
+    camera.PixelPerfectExpand = false;
+    const PixelPerfectViewState state = ComputePixelPerfectViewState(camera, 1900, 1070);
+    ASSERT_TRUE(state.Active);
+    EXPECT_EQ(state.ReferenceWidth, 320u);
+    EXPECT_EQ(state.ReferenceHeight, 180u);
+}
+
+TEST(PixelPerfectCameraViewState, ExpandGrowsTheWindowToCoverTheScreen)
+{
+    // Expand reveals more world instead of bars, but the zoom is unchanged, so a
+    // sprite stays the same size on screen in either crop mode.
+    Components::Camera letterboxed = PixelPerfectCamera(320, 180);
+    Components::Camera expanded = letterboxed;
+    expanded.PixelPerfectExpand = true;
+
+    const PixelPerfectViewState boxed = ComputePixelPerfectViewState(letterboxed, 1900, 1070);
+    const PixelPerfectViewState grown = ComputePixelPerfectViewState(expanded, 1900, 1070);
+    ASSERT_TRUE(grown.Active);
+    EXPECT_EQ(grown.Zoom, boxed.Zoom);
+    EXPECT_GE(grown.ReferenceWidth, boxed.ReferenceWidth);
+    EXPECT_GE(grown.ReferenceHeight, boxed.ReferenceHeight);
+    // ceil(screen / zoom) covers the screen, so nothing is left unpainted.
+    EXPECT_GE(grown.ReferenceWidth * grown.Zoom, 1900u);
+    EXPECT_GE(grown.ReferenceHeight * grown.Zoom, 1070u);
+    EXPECT_EQ(grown.PaddedWidth, grown.ReferenceWidth + 2u);
+}
+
+TEST(PixelPerfectCameraViewState, ExpandNeverShrinksBelowTheReference)
+{
+    Components::Camera camera = PixelPerfectCamera(320, 180);
+    camera.PixelPerfectExpand = true;
+    const PixelPerfectViewState state = ComputePixelPerfectViewState(camera, 200, 100);
+    ASSERT_TRUE(state.Active);
+    EXPECT_GE(state.ReferenceWidth, 320u);
+    EXPECT_GE(state.ReferenceHeight, 180u);
+}

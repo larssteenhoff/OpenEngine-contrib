@@ -96,6 +96,7 @@ layout(set = 0, binding = 8, std140) uniform ShadowData
     vec4 ge_terrainShadowGrid2;
     vec4 ge_terrainShadowGrid3;
     uvec4 ge_terrainShadowSource;
+    vec4 ge_shadowReferenceDepth; // source-camera depth plane for mirror receivers
 };
 
 layout(set = 0, binding = 9) uniform sampler2DArrayShadow ge_shadowMapArray;
@@ -1112,6 +1113,11 @@ float GE_SampleShadow(vec3 posWS, vec3 normalWS, float linearDepth, vec3 lightDi
     if (numCascades <= 0)
         return 1.0;
 
+    if (dot(ge_shadowReferenceDepth.xyz, ge_shadowReferenceDepth.xyz) > 0.5)
+    {
+        linearDepth = dot(ge_shadowReferenceDepth, vec4(posWS, 1.0));
+        if (linearDepth < 0.0) return 1.0;
+    }
     // The PCSS kernel's radius bound, which the terrain's penumbra shares.
     float maxPenumbraWorld = ge_shadowPcss.z > 0.0 ? ge_shadowPcss.z : kPcssMaxPenumbraWorldAuto;
 

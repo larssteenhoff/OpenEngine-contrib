@@ -17,6 +17,7 @@
 #include "TerrainECS/Systems/RegisterTerrainSystems.h"
 #include "TerrainGrass/RegisterTerrainGrass.h"
 #include "EngineLogCapture.h"
+#include "TestTempDir.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -120,6 +121,12 @@ double EvalBufferSize(const RenderPipelineBlueprint& bp, const std::string& name
 } // namespace
 
 // ── Ref resolution ──────────────────────────────────────────────────────────
+
+TEST(RenderPipelineCompiler, RuntimeRegistryIncludesDepthPixelation)
+{
+    const auto registry = BuildRegistry();
+    ASSERT_NE(registry.Find("DepthPixelation"), nullptr);
+}
 
 TEST(RenderPipelineCompiler, TypoedResourceRefIsErrorWithSuggestion)
 {
@@ -254,9 +261,7 @@ TEST(RenderPipelineCompiler, MissingShaderPkgFileIsError)
     // absolute branch (no throw), so this exercises the "resolver configured,
     // pkg not found -> Error" path without mutating the global resolver.
     const std::filesystem::path missing =
-        std::filesystem::temp_directory_path() / "ge_s2_no_such_pkg.shaderpkg";
-    std::error_code ec;
-    std::filesystem::remove(missing, ec);
+        TestUtils::MakeUniqueTempDirectory("ge_s2_no_such_pkg") / "ge_s2_no_such_pkg.shaderpkg";
     std::string json = R"json({
       "schemaVersion": 2,
       "passes": [ { "id": "FX", "type": "FullscreenShader", "shaderPkg": ")json";
@@ -318,8 +323,8 @@ TEST(RenderPipelineCompiler, BogusPushConstantAndBindingAreWarnings)
     set0.Bindings.push_back(binding);
     meta.Sets.push_back(set0);
 
-    const std::filesystem::path pkgPath =
-        std::filesystem::temp_directory_path() / "ge_s2_reflect_test.shaderpkg";
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("ge_s2_reflect_test")};
+    const std::filesystem::path pkgPath = directory.Path() / "ge_s2_reflect_test.shaderpkg";
     std::unordered_map<std::string, std::vector<uint8_t>> stages;
     stages["vs"] = {1, 2, 3, 4};
     stages["fs"] = {5, 6, 7, 8};
@@ -382,8 +387,8 @@ TEST(RenderPipelineCompiler, AStalePackageVersionNamesTheRebuild)
     // carries the loader's rebuild action: a package addressed by absolute path is
     // not one of the engine build's, so the action is the source cook tool.
     using namespace GameEngine::Rendering;
-    const std::filesystem::path pkgPath =
-        std::filesystem::temp_directory_path() / "ge_stale_version_test.shaderpkg";
+    const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("ge_stale_version_test")};
+    const std::filesystem::path pkgPath = directory.Path() / "ge_stale_version_test.shaderpkg";
     std::string saveErr;
     ASSERT_TRUE(SaveShaderPkg(pkgPath, ShaderMeta{}, {{"fs", {1, 2, 3, 4}}}, std::nullopt, &saveErr)) << saveErr;
     {
@@ -568,11 +573,7 @@ TEST(RenderPipelineCompiler, RegisteredResourceFieldsValidateModuleNodeTypes)
         << IssuesToString(unresolved);
 }
 
-// ── Q4 shadow-node key rename: "ShadowMap" canonical, "CascadedShadowMap" alias ──
-//
-// The two keys must compile to the same blueprint (same accepted passes, same
-// self-published ShadowData ref resolving cleanly, zero Errors); the ONLY
-// difference is the legacy key earns a deprecation Warning nudging migration.
+// ── Shadow-node type key: "ShadowMap"; the retired "CascadedShadowMap" key is unknown ──
 
 namespace
 {
@@ -601,30 +602,13 @@ TEST(RenderPipelineCompiler, CanonicalShadowMapKeyCompilesCleanly)
     EXPECT_EQ(bp.passes[0].type, "ShadowMap");
 }
 
-TEST(RenderPipelineCompiler, LegacyCascadedShadowMapKeyParsesIdenticallyButWarns)
+// The retired "CascadedShadowMap" key is no longer an alias of "ShadowMap": a blueprint that
+// still names it is refused like any other unknown pass type (the fix: rename it to "ShadowMap").
+TEST(RenderPipelineCompiler, RetiredCascadedShadowMapKeyIsAnUnknownPassType)
 {
-    const auto canonical = CompileText(ShadowNodeDoc("ShadowMap"));
-    const auto legacy = CompileText(ShadowNodeDoc("CascadedShadowMap"));
-
-    // Alias parses + compiles like the canonical key: same accepted passes, no
-    // "unknown pass type" and no unresolvable-ref Errors from the self-published
-    // ShadowData buffer.
-    EXPECT_EQ(CountSeverity(legacy, PipelineIssueSeverity::Error), 0) << IssuesToString(legacy);
-    ASSERT_EQ(legacy.passes.size(), canonical.passes.size()) << IssuesToString(legacy);
-    EXPECT_EQ(legacy.passes[0].type, "CascadedShadowMap");
-    EXPECT_EQ(legacy.passes[1].type, canonical.passes[1].type);
-
-    // The one and only difference is the deprecation nudge.
-    EXPECT_TRUE(HasIssue(legacy, PipelineIssueSeverity::Warning,
-                         "legacy node type key 'CascadedShadowMap'"))
-        << IssuesToString(legacy);
-    EXPECT_TRUE(HasIssue(legacy, PipelineIssueSeverity::Warning, "rename to 'ShadowMap'"))
-        << IssuesToString(legacy);
-    EXPECT_EQ(legacy.issues.size(), canonical.issues.size() + 1)
-        << "alias should differ from canonical only by the deprecation warning"
-        << IssuesToString(legacy);
-    EXPECT_FALSE(HasIssue(canonical, PipelineIssueSeverity::Warning, "legacy node type key"))
-        << IssuesToString(canonical);
+    const auto bp = CompileText(ShadowNodeDoc("CascadedShadowMap"));
+    EXPECT_TRUE(HasIssue(bp, PipelineIssueSeverity::Error, "unknown pass type 'CascadedShadowMap'"))
+        << IssuesToString(bp);
 }
 
 // ── S2.2 constants block ──────────────────────────────────────────────────────
@@ -851,7 +835,6 @@ TEST(RenderPipelineCompilerFleet, AllRepoBlueprintsCompileWithoutErrors)
     int fileCount = 0;
     int errorFiles = 0;
     int totalWarnings = 0;
-    int legacyKeyWarnings = 0;
     int duplicatePublishWarnings = 0;
 
     for (const auto& r : roots)
@@ -900,8 +883,6 @@ TEST(RenderPipelineCompilerFleet, AllRepoBlueprintsCompileWithoutErrors)
             {
                 if (iss.severity != PipelineIssueSeverity::Warning)
                     continue;
-                if (iss.message.find("legacy node type key") != std::string::npos)
-                    ++legacyKeyWarnings;
                 if (iss.message.find("is published by") != std::string::npos)
                     ++duplicatePublishWarnings;
             }
@@ -924,15 +905,10 @@ TEST(RenderPipelineCompilerFleet, AllRepoBlueprintsCompileWithoutErrors)
     }
 
     std::cout << "[fleet] compiled " << fileCount << " blueprint(s); " << errorFiles
-              << " with Errors; " << totalWarnings << " total warning(s); " << legacyKeyWarnings
-              << " legacy-key warning(s); " << duplicatePublishWarnings
+              << " with Errors; " << totalWarnings << " total warning(s); " << duplicatePublishWarnings
               << " duplicate-publish warning(s)\n";
     EXPECT_GT(fileCount, 0) << "no .rendergraph files found under " << root.generic_string();
     EXPECT_EQ(errorFiles, 0);
-    // Q4: every in-repo blueprint must be on the new "ShadowMap" key — no blueprint
-    // may still trip the "CascadedShadowMap" legacy-alias deprecation warning.
-    EXPECT_EQ(legacyKeyWarnings, 0)
-        << legacyKeyWarnings << " blueprint(s) still use the legacy 'CascadedShadowMap' type key";
     // Q8: the fleet's duplicate-publish warnings were all disabled-pass or
     // ping-pong false positives, now narrowed out at the validator. A nonzero
     // count here means a blueprint has a genuine undeclared-name collision to fix.
@@ -1491,3 +1467,34 @@ TEST(RenderPipelineCompiler, AnOutputFromAWaitingPassLeavesNothingToDraw)
     EXPECT_NE(IssueFor(bp, PipelineIssueCode::PendingScriptOutput, "Fog"), nullptr) << IssuesToString(bp);
 }
 
+
+TEST(RenderPipelineCompiler, RuntimeRegistryCreatesPixelPerfectUpscale)
+{
+    const auto registry = BuildRegistry();
+    const auto* info = registry.Find("PixelPerfectUpscale");
+    ASSERT_NE(info, nullptr);
+    EXPECT_TRUE(info->perView);
+    const auto node = info->factory();
+    ASSERT_NE(node, nullptr);
+    EXPECT_STREQ(node->GetTypeName(), "PixelPerfectUpscale");
+}
+
+// Game UI composited before post-processing lands ahead of the first node that filters the view
+// color. Depth pixelation discards that color, so it is not such a node.
+TEST(RenderPipelineCompiler, OnlyViewColorFiltersTakeTheGameUIBeforePostEffects)
+{
+    const auto registry = BuildRegistry();
+    for (const auto& [type, filters] : std::initializer_list<std::pair<const char*, bool>>{
+             {"FullscreenShader", true},
+             {"TemporalFullscreenShader", true},
+             {"DepthPixelation", false},
+             {"ShadowMap", false},
+             {"PixelPerfectUpscale", false}})
+    {
+        const auto* info = registry.Find(type);
+        ASSERT_NE(info, nullptr) << type;
+        const auto node = info->factory();
+        ASSERT_NE(node, nullptr) << type;
+        EXPECT_EQ(node->IsViewColorPostEffect(), filters) << type;
+    }
+}

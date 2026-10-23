@@ -22,6 +22,7 @@ class AgentConversationRow;
 class AgentModelPopover;
 class AgentSessionPicker;
 class MarkupTokenPicker;
+class PromptFileTray;
 class Button;
 class Dropdown;
 class Label;
@@ -136,6 +137,8 @@ private:
     AgentModelPopover* m_ModelPopover = nullptr;
     std::unique_ptr<AgentSessionPicker> m_SessionPicker;
     std::unique_ptr<MarkupTokenPicker> m_MarkupPicker;
+    // The files picked or dropped for the next prompt, shown in the strip above the splitter.
+    std::unique_ptr<PromptFileTray> m_FileTray;
     // The first row of a conversation that continues a chosen session; hidden otherwise.
     Label* m_ContinuedRow = nullptr;
     // The session m_ContinuedRow describes and the text it shows; both empty while
@@ -150,8 +153,10 @@ private:
     UIElement* m_HistoryList = nullptr;
     Label* m_HistoryEmpty = nullptr;
     UIElement* m_InputPane = nullptr;
+    // A PromptFileDropZone: files dropped on it join m_FileTray.
     UIElement* m_InputRow = nullptr;
     UIElement* m_InputControls = nullptr;
+    Button* m_AttachButton = nullptr;
     // The pane is too narrow for a kMinPromptFieldPx field beside the visible controls,
     // so the controls sit on a line of their own under the field.
     bool m_InputStacked = false;

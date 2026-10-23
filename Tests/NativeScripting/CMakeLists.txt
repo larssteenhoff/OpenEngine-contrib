@@ -206,6 +206,7 @@ add_executable(NativeScriptManagerTests
     NativeAotProjectTests.cpp
     # Which targets each editor host builds, and the refusal naming the fix per host.
     BuildHostTests.cpp
+    MobileExportRunnerTests.cpp
     # Linux runtime template checks: the x64 ELF Player and the one list of game files
     # a template export leaves behind.
     LinuxRuntimeTemplateTests.cpp
@@ -228,6 +229,7 @@ endif()
 # test needs their headers (Vector3/Quaternion/ColorLinear field types via MathReflectionTraits).
 target_link_libraries(NativeScriptManagerTests PRIVATE
     Engine Mathematics Types GTest::gtest GTest::gtest_main)
+target_include_directories(NativeScriptManagerTests PRIVATE ${CMAKE_SOURCE_DIR}/Tests) # TestTempDir.h
 target_include_directories(NativeScriptManagerTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Include
     # GltfTestFiles.h: in-memory glTF clips for AnimatorEventsAbiTests.

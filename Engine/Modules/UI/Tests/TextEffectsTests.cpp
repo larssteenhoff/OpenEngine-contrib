@@ -505,10 +505,13 @@ void ExpectGlowLeavesFullyCoveredFillUnchanged(const std::string& text, const st
     uint8_t fullCoverage = 0;
     for (size_t i = 0; i < size; i += 4)
         fullCoverage = std::max(fullCoverage, plain.Pixels[i + kGreen]);
+    // Full coverage is the brightest fill level exactly: under a translucent
+    // fill one level short of it is ~99% coverage, where the glow rightly
+    // shows through the uncovered percent.
     size_t covered = 0, changed = 0;
     for (size_t i = 0; i < size; i += 4)
     {
-        if (plain.Pixels[i + kGreen] + 1 < fullCoverage)
+        if (plain.Pixels[i + kGreen] < fullCoverage)
             continue;
         ++covered;
         for (int channel = kRed; channel <= kBlue; ++channel)

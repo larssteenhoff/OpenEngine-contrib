@@ -196,6 +196,8 @@ struct AgentConversationController::TurnInFlight
     Conversation::TurnId Turn = 0;
     std::shared_ptr<IAgentProvider> Provider;
     std::vector<ConversationMessage> History;
+    /// The images of the user's message, copied so the request's span outlives later messages.
+    std::vector<PromptFile> Images;
     AgentTurnRequest Request;
     CancelToken Cancel;
     /// The editor's MCP server the request attaches, when it does.
@@ -360,14 +362,14 @@ void AgentConversationController::AttachTools(TurnInFlight& turn)
     gate.StartTurn(m_GateSession, turn.Turn);
 }
 
-bool AgentConversationController::Send(std::string text, SentMarkups markups, std::string model,
-                                       std::string effort)
+bool AgentConversationController::Send(std::string text, SentMarkups markups, std::vector<PromptFile> files,
+                                       std::string model, std::string effort)
 {
     if (text.size() > Conversation::kMaxMessageBytes)
         return false;
     const Conversation::TurnId turn =
-        m_Conversation.AddTurn(std::move(text), std::move(markups), m_ProviderId, std::move(model),
-                               std::move(effort), std::chrono::system_clock::now());
+        m_Conversation.AddTurn(std::move(text), std::move(markups), std::move(files), m_ProviderId,
+                               std::move(model), std::move(effort), std::chrono::system_clock::now());
     m_Queue.push_back(turn);
     return true;
 }
@@ -383,7 +385,8 @@ void AgentConversationController::Retry(size_t messageIndex)
         return;
     // AddTurn takes copies, made before it grows the messages these refer to.
     const Conversation::TurnId turn = m_Conversation.AddTurn(messages[messageIndex - 1].Text,
-                                                             messages[messageIndex - 1].Markups, m_ProviderId,
+                                                             messages[messageIndex - 1].Markups,
+                                                             messages[messageIndex - 1].Files, m_ProviderId,
                                                              reply.Model, reply.Effort,
                                                              std::chrono::system_clock::now());
     m_Queue.push_back(turn);
@@ -528,6 +531,10 @@ void AgentConversationController::StartNextTurn()
     inFlight->Request.SystemPrompt = kSystemPrompt;
     inFlight->Request.History = inFlight->History;
     inFlight->Request.UserText = user->SentText();
+    for (const PromptFile& file : user->Files)
+        if (file.Kind == PromptFileKind::Image)
+            inFlight->Images.push_back(file);
+    inFlight->Request.Images = inFlight->Images;
     inFlight->Request.Model = reply->Model;
     inFlight->Request.Effort = reply->Effort;
     if (inFlight->Provider->Capabilities().OwnsTranscript)

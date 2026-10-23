@@ -13,6 +13,7 @@
 #include "Panels/TimeCompositeTimelineBridge.h"
 #include "Panels/LaneClipEditorView.h"
 
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "Assets/AssetCreation.h"
 #include "AssetCore/GUID.h"
@@ -46,6 +47,7 @@
 #include "UndoRedo/UndoRedoService.h"
 #include "UI/Controls/Button.h"
 #include "UI/Controls/Checkbox.h"
+#include "UI/Controls/CollapsibleInfoCard.h"
 #include "UI/Controls/Dropdown.h"
 #include "UI/Controls/FloatField.h"
 #include "UI/Controls/IntField.h"
@@ -1260,8 +1262,9 @@ UIElement* AddSidebarCard(UIElement* parent)
     return cardPtr;
 }
 
-// Small clickable color square for the sequencer sidebar. argb==0 renders as a checker-stub
-// (subtle outlined square) so the user can still click it to assign an initial color.
+// Clickable colour chip for the sequencer sidebar: the shared colour chip, so
+// its size and border come from CSS. An unset colour (argb 0) shows the default
+// row tint, and the chip still opens the picker to assign one.
 UIElement* AddSidebarColorSwatch(UIElement* parent,
                                  uint32_t argb,
                                  std::function<void()> onClick)
@@ -1269,25 +1272,10 @@ UIElement* AddSidebarColorSwatch(UIElement* parent,
     if (!parent)
         return nullptr;
 
-    auto swatch = std::make_unique<UIElement>();
+    const uint32_t fill = (argb == 0u) ? kDefaultSequencerRowColorArgb : (0xFF000000u | (argb & 0x00FFFFFFu));
+    auto swatch = InspectorUI::MakeColorSwatch(fill);
     UIElement* swatchPtr = swatch.get();
     swatchPtr->AddClass("animationwindow-sequencer-color-swatch");
-
-    constexpr float kSwatchSize = 20.0f;
-    constexpr uint32_t kEmptySwatchFill = kDefaultSequencerRowColorArgb;
-    constexpr uint32_t kSwatchBorder    = 0xFF555555U;
-    const uint32_t fill = (argb == 0u) ? kEmptySwatchFill : (0xFF000000u | (argb & 0x00FFFFFFu));
-    swatchPtr->Overrides()
-        .Set(Style::Width,  StyleLength::Px(kSwatchSize))
-        .Set(Style::Height, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinWidth, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinHeight, StyleLength::Px(kSwatchSize))
-        .Set(Style::FlexShrink, 0.0f)
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{3.0f, 3.0f, 3.0f, 3.0f})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{kSwatchBorder, kSwatchBorder, kSwatchBorder, kSwatchBorder})
-        .Set(Style::BackgroundColor, fill)
-        .Set(Style::Cursor, CursorStyle::Pointer);
     swatchPtr->RegisterEventHandler(kEventMouseDown, [onClick = std::move(onClick)](UIEvent& e)
     {
         if (e.Button != 0)
@@ -2924,6 +2912,11 @@ AnimationWindowPanel::AnimationWindowPanel()
 
 AnimationWindowPanel::AnimationWindowPanel(PanelKind kind)
     : DockPanel(GetAnimationPanelTitle(kind))
+    , m_ShowGrid(AnimationWindowSettings::Defaults().ShowGrid)
+    , m_SnapTime(AnimationWindowSettings::Defaults().SnapTime)
+    , m_SnapValue(AnimationWindowSettings::Defaults().SnapValue)
+    , m_SnapTimeStep(AnimationWindowSettings::Defaults().SnapTimeStep)
+    , m_SnapValueStep(AnimationWindowSettings::Defaults().SnapValueStep)
 {
     m_PanelKind = kind;
     m_ActiveView = GetDefaultActiveView();
@@ -2937,6 +2930,16 @@ AnimationWindowPanel::AnimationWindowPanel(PanelKind kind)
     SetFocusable(true); // So Space can play/pause when panel has focus
     SetId(GetAnimationPanelId(m_PanelKind));  // Stable id so focus/key events resolve to this panel (matches dock registration)
     UpdateTitle();
+
+    // A .uxml reconcile can destroy and re-create elements this panel holds. The bind's
+    // own reconcile arrives before m_BindApplied is set, and the bind completion binds
+    // the elements itself, so only later reconciles re-bind here.
+    RegisterEventHandler(kEventLayoutReconciled,
+                         [this](UIEvent&)
+                         {
+                             if (m_BindApplied)
+                                 BindLayoutElements();
+                         });
 }
 
 std::string_view AnimationWindowPanel::DeclaredTabIconClass() const
@@ -2963,8 +2966,7 @@ AnimationWindowPanel::~AnimationWindowPanel()
     if (m_PanelStyleLoadHandle)
         m_PanelStyleLoadHandle->Cancel();
 
-    if (m_PropertiesSearchField && m_PropertiesSearchField->GetParent())
-        EditorSearchBars::UnregisterFocusTarget(m_PropertiesSearchField->GetParent());
+    EditorSearchBars::UnregisterFocusTarget(m_RegisteredSearchRow);
     ModelThumbnailHandler::ClearExternalAnimationPreview();
 }
 
@@ -3638,15 +3640,11 @@ void AnimationWindowPanel::BindFromAssetsDeferred()
     // callback below, so every FindById here resolves to null and every wiring guard
     // falls through. The second call, from that callback, is the one that wires.
     //
-    // Clicks are additive handler-table subscriptions, so if a synchronous bind fast
-    // path is ever added here (GameViewPanel has that shape: a cached GetAsset that
-    // binds outright), BOTH calls would wire the same button instances and one click
-    // would fire twice. Enforcement is that the bind is reachable only through
-    // PostAction/async completion -- keep it that way, or make the second call
-    // conditional on the first having wired nothing.
+    // Clicks are additive handler-table subscriptions. m_WiredElements wires each
+    // element instance once, so a later pass over the same instances adds nothing;
+    // keep the bind reachable only through PostAction/async completion all the same.
     LoadBindAttachLayoutAndStyle(ui);
-    RefreshElementPointers();
-    WireAnimationControls();
+    BindLayoutElements();
 }
 
 void AnimationWindowPanel::MarkBindFailed(std::string_view reason)
@@ -3734,40 +3732,66 @@ void AnimationWindowPanel::LoadBindAttachLayoutAndStyle(UIManager* ui)
 
                                               m_BindApplied = true;
                                               m_BindPending = false;
-                                              RefreshElementPointers();
-                                              WireAnimationControls();
+                                              SeedSessionFromSettings();
+                                              BindLayoutElements();
                                           });
                      },
                      AssetLoadPriority::High));
 }
 
-void AnimationWindowPanel::RefreshElementPointers()
+// Once per panel, when its layout first binds. The grid, snap and fps values are
+// saved defaults that seed a session; from here on the toolbar owns them, so neither
+// a settings change nor a layout reconcile resets what the user set in this window.
+void AnimationWindowPanel::SeedSessionFromSettings()
+{
+    const AnimationWindowSettings& animSettings = AnimationWindowSettings::Get();
+    m_ShowGrid = animSettings.ShowGrid;
+    m_SnapTime = animSettings.SnapTime;
+    m_SnapValue = animSettings.SnapValue;
+    m_SnapTimeStep = animSettings.SnapTimeStep;
+    m_SnapValueStep = animSettings.SnapValueStep;
+    m_TimelineState.fps = animSettings.DefaultFps;
+    m_SettingsChangedSubscription = AnimationWindowSettings::Get().Changed.Subscribe([this]()
+    {
+        ApplyAppearanceSettings();
+        if (m_PropertiesTree)
+            m_PropertiesTree->RefreshFromProvider();
+    });
+}
+
+void AnimationWindowPanel::BindLayoutElements()
+{
+    ResolveElementPointers();
+    RestoreToolbarLayoutFromPrefs();
+    ConfigureElements();
+    WireAnimationControls();
+    m_ConfiguredElements.EndPass();
+    m_WiredElements.EndPass();
+}
+
+// Every element the panel keeps a pointer to, looked up again on each pass: a layout
+// reconcile can destroy any of them, and a missing element resolves to null.
+void AnimationWindowPanel::ResolveElementPointers()
 {
     m_Toolbar = FindById("AnimationWindowToolbar"_sid);
-    if (UIElement* ind = FindById("AnimationWindowUnsavedIndicator"_sid))
-        m_UnsavedIndicator = dynamic_cast<Label*>(ind);
+    m_UnsavedIndicator = dynamic_cast<Label*>(FindById("AnimationWindowUnsavedIndicator"_sid));
     m_ContentArea = FindById("AnimationWindowContentArea"_sid);
     m_PropertiesPane = FindById("AnimationWindowPropertiesPane"_sid);
     m_PropertiesHeader = FindById("AnimationWindowPropertiesHeader"_sid);
-    if (UIElement* searchEl = FindById("AnimationWindowPropertiesSearch"_sid))
-        m_PropertiesSearchField = dynamic_cast<TextField*>(searchEl);
-    if (UIElement* btn = FindById("AnimationWindowFilterAnimated"_sid))
-        m_FilterAnimatedButton = dynamic_cast<Button*>(btn);
-    if (UIElement* btn = FindById("AnimationWindowFilterHierarchy"_sid))
-        m_FilterHierarchyButton = dynamic_cast<Button*>(btn);
-    if (UIElement* btn = FindById("AnimationWindowFilterChannelsOnly"_sid))
-        m_FilterChannelsOnlyButton = dynamic_cast<Button*>(btn);
-    if (UIElement* btn = FindById("AnimationWindowFilterFlat"_sid))
-        m_FilterFlatButton = dynamic_cast<Button*>(btn);
+    m_PropertiesSearchField = MakeWeakRef(dynamic_cast<TextField*>(FindById("AnimationWindowPropertiesSearch"_sid)));
+    m_FilterAnimatedButton = dynamic_cast<Button*>(FindById("AnimationWindowFilterAnimated"_sid));
+    m_FilterHierarchyButton = dynamic_cast<Button*>(FindById("AnimationWindowFilterHierarchy"_sid));
+    m_FilterChannelsOnlyButton = dynamic_cast<Button*>(FindById("AnimationWindowFilterChannelsOnly"_sid));
+    m_FilterFlatButton = dynamic_cast<Button*>(FindById("AnimationWindowFilterFlat"_sid));
     m_PropertiesFilterRow = FindById("AnimationWindowPropertiesFilterRow"_sid);
     m_SequencerSidebar = FindById("AnimationWindowSequencerSidebar"_sid);
     m_StatsBar = FindById("AnimationWindowStatsBar"_sid);
     if (!m_StatsBar && m_Toolbar) m_StatsBar = m_Toolbar->FindById("AnimationWindowStatsBar"_sid);
-    if (UIElement* tf = FindById("AnimationWindowStatsTime"_sid))
-        m_StatsTimeField = dynamic_cast<TextField*>(tf);
-    if (UIElement* tf = FindById("AnimationWindowStatsValue"_sid))
-        m_StatsValueField = dynamic_cast<TextField*>(tf);
-    // Find the T: and V: labels for drag support
+    m_StatsTimeField = dynamic_cast<TextField*>(FindById("AnimationWindowStatsTime"_sid));
+    m_StatsValueField = dynamic_cast<TextField*>(FindById("AnimationWindowStatsValue"_sid));
+    // The T: and V: drag labels carry no id; find them by text.
+    m_StatsTimeLabel = nullptr;
+    m_StatsValueLabel = nullptr;
     if (m_StatsBar)
     {
         for (auto& child : m_StatsBar->GetChildren())
@@ -3786,35 +3810,76 @@ void AnimationWindowPanel::RefreshElementPointers()
     m_OptionsSimplifyPanel= FindById("AnimationWindowOptionsSimplify"_sid);
     m_OptionsSmoothPanel  = FindById("AnimationWindowOptionsSmooth"_sid);
     m_OptionsLatticePanel = FindById("AnimationWindowOptionsLattice"_sid);
-    if (UIElement* el = FindById("AnimationWindowLatticePointCount"_sid))      m_LatticePointCountField = dynamic_cast<IntField*>(el);
-    if (UIElement* el = FindById("AnimationWindowLatticePointCountLabel"_sid)) m_LatticePointCountLabel = dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowLatticeBasis"_sid))           m_LatticeBasisDropdown   = dynamic_cast<Dropdown*>(el);
-    if (UIElement* el = FindById("AnimationWindowNoiseFreqMin"_sid))      m_NoiseFreqMinField     = dynamic_cast<IntField*>(el);
-    if (UIElement* el = FindById("AnimationWindowNoiseFreqMax"_sid))      m_NoiseFreqMaxField     = dynamic_cast<IntField*>(el);
-    if (UIElement* el = FindById("AnimationWindowNoiseMagnitude"_sid))    m_NoiseMagnitudeField   = dynamic_cast<FloatField*>(el);
-    if (UIElement* el = FindById("AnimationWindowSimplifyMethod"_sid))    m_SimplifyMethodDropdown= dynamic_cast<Dropdown*>(el);
-    if (UIElement* el = FindById("AnimationWindowSimplifyTimeTol"_sid))   m_SimplifyTimeTolField  = dynamic_cast<FloatField*>(el);
-    if (UIElement* el = FindById("AnimationWindowSimplifyValueTol"_sid)) m_SimplifyValueTolField = dynamic_cast<FloatField*>(el);
-    if (UIElement* el = FindById("AnimationWindowSmoothFilterWidth"_sid))m_SmoothFilterWidthField= dynamic_cast<IntField*>(el);
-    if (UIElement* el = FindById("AnimationWindowSmoothSampleCount"_sid))m_SmoothSampleCountField= dynamic_cast<IntField*>(el);
-    if (UIElement* el = FindById("AnimationWindowSmoothTitle"_sid))      m_SmoothTitleLabel      = dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowNoiseFreqMinLabel"_sid))      m_NoiseFreqMinLabel      = dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowNoiseFreqMaxLabel"_sid))      m_NoiseFreqMaxLabel      = dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowNoiseMagnitudeLabel"_sid))    m_NoiseMagnitudeLabel    = dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowSimplifyTimeTolLabel"_sid))   m_SimplifyTimeTolLabel   = dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowSimplifyValueTolLabel"_sid)) m_SimplifyValueTolLabel = dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowSmoothFilterWidthLabel"_sid))m_SmoothFilterWidthLabel= dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowSmoothSampleCountLabel"_sid))m_SmoothSampleCountLabel= dynamic_cast<Label*>(el);
-    if (UIElement* el = FindById("AnimationWindowNoiseConfirm"_sid))     m_NoiseConfirmBtn       = dynamic_cast<Button*>(el);
-    if (UIElement* el = FindById("AnimationWindowSimplifyConfirm"_sid))  m_SimplifyConfirmBtn    = dynamic_cast<Button*>(el);
-    if (UIElement* el = FindById("AnimationWindowSmoothConfirm"_sid))    m_SmoothConfirmBtn      = dynamic_cast<Button*>(el);
+    m_LatticePointCountField = dynamic_cast<IntField*>(FindById("AnimationWindowLatticePointCount"_sid));
+    m_LatticePointCountLabel = dynamic_cast<Label*>(FindById("AnimationWindowLatticePointCountLabel"_sid));
+    m_LatticeBasisDropdown   = dynamic_cast<Dropdown*>(FindById("AnimationWindowLatticeBasis"_sid));
+    m_NoiseFreqMinField      = dynamic_cast<IntField*>(FindById("AnimationWindowNoiseFreqMin"_sid));
+    m_NoiseFreqMaxField      = dynamic_cast<IntField*>(FindById("AnimationWindowNoiseFreqMax"_sid));
+    m_NoiseMagnitudeField    = dynamic_cast<FloatField*>(FindById("AnimationWindowNoiseMagnitude"_sid));
+    m_SimplifyMethodDropdown = dynamic_cast<Dropdown*>(FindById("AnimationWindowSimplifyMethod"_sid));
+    m_SimplifyTimeTolField   = dynamic_cast<FloatField*>(FindById("AnimationWindowSimplifyTimeTol"_sid));
+    m_SimplifyValueTolField  = dynamic_cast<FloatField*>(FindById("AnimationWindowSimplifyValueTol"_sid));
+    m_SmoothFilterWidthField = dynamic_cast<IntField*>(FindById("AnimationWindowSmoothFilterWidth"_sid));
+    m_SmoothSampleCountField = dynamic_cast<IntField*>(FindById("AnimationWindowSmoothSampleCount"_sid));
+    m_SmoothTitleLabel       = dynamic_cast<Label*>(FindById("AnimationWindowSmoothTitle"_sid));
+    m_NoiseFreqMinLabel      = dynamic_cast<Label*>(FindById("AnimationWindowNoiseFreqMinLabel"_sid));
+    m_NoiseFreqMaxLabel      = dynamic_cast<Label*>(FindById("AnimationWindowNoiseFreqMaxLabel"_sid));
+    m_NoiseMagnitudeLabel    = dynamic_cast<Label*>(FindById("AnimationWindowNoiseMagnitudeLabel"_sid));
+    m_SimplifyTimeTolLabel   = dynamic_cast<Label*>(FindById("AnimationWindowSimplifyTimeTolLabel"_sid));
+    m_SimplifyValueTolLabel  = dynamic_cast<Label*>(FindById("AnimationWindowSimplifyValueTolLabel"_sid));
+    m_SmoothFilterWidthLabel = dynamic_cast<Label*>(FindById("AnimationWindowSmoothFilterWidthLabel"_sid));
+    m_SmoothSampleCountLabel = dynamic_cast<Label*>(FindById("AnimationWindowSmoothSampleCountLabel"_sid));
+    m_NoiseConfirmBtn        = dynamic_cast<Button*>(FindById("AnimationWindowNoiseConfirm"_sid));
+    m_SimplifyConfirmBtn     = dynamic_cast<Button*>(FindById("AnimationWindowSimplifyConfirm"_sid));
+    m_SmoothConfirmBtn       = dynamic_cast<Button*>(FindById("AnimationWindowSmoothConfirm"_sid));
 
     m_TimelineLeftBar = FindById("AnimationWindowTimelineLeftBar"_sid);
     m_TimelineBar = FindById("AnimationWindowTimelineRightBar"_sid);
     m_TimeLabelsBar = FindById("AnimationWindowTimeLabelsBar"_sid);
-    UIElement* treeEl = FindById("AnimationWindowPropertiesTree"_sid);
-    m_PropertiesTree = treeEl ? dynamic_cast<TreeView*>(treeEl) : nullptr;
-    if (m_PropertiesTree)
+    m_PropertiesTree = dynamic_cast<TreeView*>(FindById("AnimationWindowPropertiesTree"_sid));
+    m_TimelineBarElement = dynamic_cast<TimelineBarElement*>(FindById("AnimationWindowTimelineRuler"_sid));
+    m_TimeRangeSlider = dynamic_cast<TimeRangeSliderElement*>(FindById("AnimationWindowTimeRangeSlider"_sid));
+    m_RangeStartField = dynamic_cast<IntField*>(FindById("AnimationWindowRangeStart"_sid));
+    m_RangeEndField   = dynamic_cast<IntField*>(FindById("AnimationWindowRangeEnd"_sid));
+    m_MarkersElement = dynamic_cast<TimelineMarkersElement*>(FindById("AnimationWindowTimelineMarkers"_sid));
+    m_TimeLabelsElement = dynamic_cast<TimelineTimeLabelsElement*>(FindById("AnimationWindowTimelineTimeLabels"_sid));
+    m_FrameLabelsElement = dynamic_cast<TimelineFrameLabelsElement*>(FindById("AnimationWindowTimelineFrameLabels"_sid));
+    m_CurrentFrameLabel = dynamic_cast<Label*>(FindById("AnimationWindowCurrentFrame"_sid));
+    m_DopeSheetView = dynamic_cast<DopeSheetView*>(FindById("AnimationWindowDopeSheetPlaceholder"_sid));
+    m_CurvesGraphView = dynamic_cast<CurvesGraphView*>(FindById("AnimationWindowCurvesPlaceholder"_sid));
+    m_TimeCompositeView = dynamic_cast<TimeCompositeView*>(FindById("AnimationWindowTimeCompositePlaceholder"_sid));
+    m_LaneClipEditorView = dynamic_cast<LaneClipEditorView*>(FindById("AnimationWindowClipEditorPlaceholder"_sid));
+
+    m_PreviewToggleBtn = dynamic_cast<Button*>(FindById("AnimationWindowPreviewToggle"_sid));
+    m_ClipDropdown = dynamic_cast<Dropdown*>(FindById("AnimationWindowClipDropdown"_sid));
+    m_ViewDropdown = dynamic_cast<Dropdown*>(FindById("AnimationWindowViewDropdown"_sid));
+    m_ViewButtons = FindById("AnimationWindowViewButtons"_sid);
+    m_DopeSheetViewButton = dynamic_cast<Button*>(FindById("AnimationWindowDopeSheetView"_sid));
+    m_CurvesViewButton = dynamic_cast<Button*>(FindById("AnimationWindowCurvesView"_sid));
+}
+
+// Sets up each element instance an earlier pass has not: a reconcile keeps unchanged
+// elements with their callbacks, and the refreshers below would reset their selection
+// and scroll. State that only mirrors panel members is re-applied on every pass.
+void AnimationWindowPanel::ConfigureElements()
+{
+    const bool configureTree = m_ConfiguredElements.IsNew(m_PropertiesTree);
+    const bool configureRangeSlider = m_ConfiguredElements.IsNew(m_TimeRangeSlider);
+    const bool configureRangeStart = m_ConfiguredElements.IsNew(m_RangeStartField);
+    const bool configureRangeEnd = m_ConfiguredElements.IsNew(m_RangeEndField);
+    const bool configureMarkers = m_ConfiguredElements.IsNew(m_MarkersElement);
+    const bool configureRuler = m_ConfiguredElements.IsNew(m_TimelineBarElement);
+    const bool configureTimeLabels = m_ConfiguredElements.IsNew(m_TimeLabelsElement);
+    const bool configureFrameLabels = m_ConfiguredElements.IsNew(m_FrameLabelsElement);
+    const bool configureDopeSheet = m_ConfiguredElements.IsNew(m_DopeSheetView);
+    const bool configureCurves = m_ConfiguredElements.IsNew(m_CurvesGraphView);
+    const bool configureTimeComposite = m_ConfiguredElements.IsNew(m_TimeCompositeView);
+    const bool configureLaneEditor = m_ConfiguredElements.IsNew(m_LaneClipEditorView);
+    const bool configureSidebar = m_ConfiguredElements.IsNew(m_SequencerSidebar);
+    const bool anyViewNew = configureTree || configureDopeSheet || configureCurves || configureTimeComposite ||
+                            configureLaneEditor || configureSidebar;
+
+    if (configureTree)
     {
         if (!m_PropertiesTreeSelection)
             m_PropertiesTreeSelection = std::make_unique<AnimatablePropertiesSelection>();
@@ -4136,11 +4201,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         m_TimelineLeftBar->SetFocusProxy(this);
     if (m_Toolbar)
         m_Toolbar->SetFocusProxy(this);
-    UIElement* rulerEl = FindById("AnimationWindowTimelineRuler"_sid);
-    m_TimelineBarElement = rulerEl ? dynamic_cast<TimelineBarElement*>(rulerEl) : nullptr;
-    UIElement* rangeSliderEl = FindById("AnimationWindowTimeRangeSlider"_sid);
-    m_TimeRangeSlider = rangeSliderEl ? dynamic_cast<TimeRangeSliderElement*>(rangeSliderEl) : nullptr;
-    if (m_TimeRangeSlider)
+    if (configureRangeSlider)
     {
         m_TimeRangeSlider->SetOnRangeChanged([this](float newStart, float newEnd)
         {
@@ -4161,9 +4222,7 @@ void AnimationWindowPanel::RefreshElementPointers()
             UpdateCurrentFrameLabel();
         });
     }
-    m_RangeStartField = dynamic_cast<IntField*>(FindById("AnimationWindowRangeStart"_sid));
-    m_RangeEndField   = dynamic_cast<IntField*>(FindById("AnimationWindowRangeEnd"_sid));
-    if (m_RangeStartField)
+    if (configureRangeStart)
     {
         m_RangeStartField->SetValue(static_cast<int>(std::round(m_TimelineState.rangeStart * m_TimelineState.fps)));
         auto applyRangeStartFrame = [this](const int& frame)
@@ -4182,7 +4241,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         m_RangeStartField->SetOnValueChanging(applyRangeStartFrame);
         m_RangeStartField->SetOnValueChanged(applyRangeStartFrame);
     }
-    if (m_RangeEndField)
+    if (configureRangeEnd)
     {
         m_RangeEndField->SetValue(static_cast<int>(std::round(m_TimelineState.rangeEnd * m_TimelineState.fps)));
         auto applyRangeEndFrame = [this](const int& frame)
@@ -4204,19 +4263,12 @@ void AnimationWindowPanel::RefreshElementPointers()
         m_RangeEndField->SetOnValueChanging(applyRangeEndFrame);
         m_RangeEndField->SetOnValueChanged(applyRangeEndFrame);
     }
-    UIElement* markersEl = FindById("AnimationWindowTimelineMarkers"_sid);
-    m_MarkersElement = markersEl ? dynamic_cast<TimelineMarkersElement*>(markersEl) : nullptr;
-    if (m_MarkersElement)
+    if (configureMarkers)
     {
         m_MarkersElement->SetTimeRange(m_TimelineState.viewStart, m_TimelineState.viewEnd);
         m_MarkersElement->SetMarkerTimes(m_MarkerTimes);
         WireMarkersElementCallbacks();
     }
-    UIElement* timeLabelsEl = FindById("AnimationWindowTimelineTimeLabels"_sid);
-    m_TimeLabelsElement = timeLabelsEl ? dynamic_cast<TimelineTimeLabelsElement*>(timeLabelsEl) : nullptr;
-    UIElement* frameLabelsEl = FindById("AnimationWindowTimelineFrameLabels"_sid);
-    m_FrameLabelsElement = frameLabelsEl ? dynamic_cast<TimelineFrameLabelsElement*>(frameLabelsEl) : nullptr;
-    m_CurrentFrameLabel = dynamic_cast<Label*>(FindById("AnimationWindowCurrentFrame"_sid));
     UpdateTimelineRulerAndLabels();
     UpdateCurrentFrameLabel();
 
@@ -4228,9 +4280,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         UpdateCurrentFrameLabel();
     };
 
-    UIElement* dopeEl = FindById("AnimationWindowDopeSheetPlaceholder"_sid);
-    m_DopeSheetView = dopeEl ? dynamic_cast<DopeSheetView*>(dopeEl) : nullptr;
-    if (m_DopeSheetView)
+    if (configureDopeSheet)
     {
         m_DopeSheetView->SetTimeRange(m_TimelineState.viewStart, m_TimelineState.viewEnd);
         if (m_PropertiesTree) m_DopeSheetView->SetRowHeight(m_PropertiesTree->GetRowHeight());
@@ -4299,31 +4349,11 @@ void AnimationWindowPanel::RefreshElementPointers()
         BuildDopeSheetTrackRows();
     }
 
-    UIElement* curvesEl = FindById("AnimationWindowCurvesPlaceholder"_sid);
-    m_CurvesGraphView = curvesEl ? dynamic_cast<CurvesGraphView*>(curvesEl) : nullptr;
-    if (m_CurvesGraphView)
+    if (configureCurves)
     {
-        // Seed the session's grid, snap and fps from the saved defaults. From here on
-        // the toolbar owns them: a later settings change restyles the view but never
-        // resets what the user toggled in this window.
-        {
-            const AnimationWindowSettings& animSettings = AnimationWindowSettings::Get();
-            m_ShowGrid = animSettings.ShowGrid;
-            m_SnapTime = animSettings.SnapTime;
-            m_SnapValue = animSettings.SnapValue;
-            m_SnapTimeStep = animSettings.SnapTimeStep;
-            m_SnapValueStep = animSettings.SnapValueStep;
-            m_TimelineState.fps = animSettings.DefaultFps;
-            m_CurvesGraphView->SetFps(m_TimelineState.fps);
-            m_CurvesGraphView->SetKeyInsertionEnabled(m_KeytoolEnabled);
-        }
+        m_CurvesGraphView->SetFps(m_TimelineState.fps);
+        m_CurvesGraphView->SetKeyInsertionEnabled(m_KeytoolEnabled);
         ApplyAppearanceSettings();
-        m_SettingsChangedSubscription = AnimationWindowSettings::Get().Changed.Subscribe([this]()
-        {
-            ApplyAppearanceSettings();
-            if (m_PropertiesTree)
-                m_PropertiesTree->RefreshFromProvider();
-        });
         m_CurvesGraphView->SetTimeRange(m_TimelineState.viewStart, m_TimelineState.viewEnd);
         m_CurvesGraphView->SetShowGrid(m_ShowGrid);
         m_CurvesGraphView->SetSnapTime(m_SnapTime);
@@ -4658,9 +4688,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         });
     }
 
-    UIElement* timeCompEl = FindById("AnimationWindowTimeCompositePlaceholder"_sid);
-    m_TimeCompositeView = timeCompEl ? dynamic_cast<TimeCompositeView*>(timeCompEl) : nullptr;
-    if (m_TimeCompositeView)
+    if (configureTimeComposite)
     {
         m_TimeCompositeView->SetTimeRange(m_TimelineState.viewStart, m_TimelineState.viewEnd);
         if (!m_CompositeModel)
@@ -5565,7 +5593,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         });
     }
 
-    if (m_DopeSheetView)
+    if (configureDopeSheet)
     {
         m_DopeSheetView->SetOnKeyframeTimeChanged([this](int channel, float currentTime, float newTime)
                                                  {
@@ -5580,9 +5608,7 @@ void AnimationWindowPanel::RefreshElementPointers()
                                                  });
     }
 
-    UIElement* laneEl = FindById("AnimationWindowClipEditorPlaceholder"_sid);
-    m_LaneClipEditorView = laneEl ? dynamic_cast<LaneClipEditorView*>(laneEl) : nullptr;
-    if (m_LaneClipEditorView)
+    if (configureLaneEditor)
     {
         m_LaneClipEditorView->SetTimeRange(m_TimelineState.viewStart, m_TimelineState.viewEnd);
         m_LaneClipEditorView->SetOnSeekToTime(seekToTime);
@@ -5685,12 +5711,15 @@ void AnimationWindowPanel::RefreshElementPointers()
         });
     }
 
-    if (m_CurrentClip && (!m_CurvesGraphView || m_CurvesGraphView->GetClip() != m_CurrentClip))
-        SetCurrentClip(m_CurrentClip);
-    else if (m_CurrentClip)
-        RefreshChannelSelection();
+    if (anyViewNew)
+    {
+        if (m_CurrentClip && (!m_CurvesGraphView || m_CurvesGraphView->GetClip() != m_CurrentClip))
+            SetCurrentClip(m_CurrentClip);
+        else if (m_CurrentClip)
+            RefreshChannelSelection();
 
-    RefreshLeftPane();
+        RefreshLeftPane();
+    }
 
     auto onTimeChange = [this](float t)
     {
@@ -5757,7 +5786,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         }
     };
 
-    if (m_TimelineBarElement)
+    if (configureRuler)
     {
         m_TimelineBarElement->SetOnTimeChange(onTimeChange);
         m_TimelineBarElement->SetOnZoom(onZoom);
@@ -5765,7 +5794,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         m_TimelineBarElement->SetOnScrubBegin(onScrubBegin);
         m_TimelineBarElement->SetOnScrubEnd(onScrubEnd);
     }
-    if (m_TimeLabelsElement)
+    if (configureTimeLabels)
     {
         m_TimeLabelsElement->SetOnTimeChange(onTimeChange);
         m_TimeLabelsElement->SetOnZoom(onZoom);
@@ -5773,7 +5802,7 @@ void AnimationWindowPanel::RefreshElementPointers()
         m_TimeLabelsElement->SetOnScrubBegin(onScrubBegin);
         m_TimeLabelsElement->SetOnScrubEnd(onScrubEnd);
     }
-    if (m_FrameLabelsElement)
+    if (configureFrameLabels)
     {
         m_FrameLabelsElement->SetOnTimeChange(onTimeChange);
         m_FrameLabelsElement->SetOnZoom(onZoom);
@@ -5781,13 +5810,13 @@ void AnimationWindowPanel::RefreshElementPointers()
         m_FrameLabelsElement->SetOnScrubBegin(onScrubBegin);
         m_FrameLabelsElement->SetOnScrubEnd(onScrubEnd);
     }
-    if (m_TimeRangeSlider)
+    if (configureRangeSlider)
         m_TimeRangeSlider->SetOnPan(onPan);
-    if (m_CurvesGraphView)
+    if (configureCurves)
         m_CurvesGraphView->SetOnPan(onPan);
-    if (m_DopeSheetView)
+    if (configureDopeSheet)
         m_DopeSheetView->SetOnPan(onPan);
-    if (m_TimeCompositeView)
+    if (configureTimeComposite)
     {
         m_TimeCompositeView->SetOnPan(onPan);
         m_TimeCompositeView->SetOnMediaDropped([this](size_t trackHint, float timeOffset,
@@ -5938,7 +5967,7 @@ void AnimationWindowPanel::RefreshElementPointers()
                 false);
         });
     }
-    if (m_LaneClipEditorView)
+    if (configureLaneEditor)
     {
         m_LaneClipEditorView->SetOnPan(onPan);
         m_LaneClipEditorView->SetOnLaneMarkerAdded([this](size_t laneIdx, float time)
@@ -6023,7 +6052,8 @@ void AnimationWindowPanel::RefreshElementPointers()
     SetActiveView(m_ActiveView);
     UpdatePlayButtonState();
     UpdateTitle();
-    RefreshChannelSelection();
+    if (anyViewNew)
+        RefreshChannelSelection();
 
     SetupToolbarDragDrop();
     WireToolbarRightClickToggles();
@@ -6166,50 +6196,15 @@ void AnimationWindowPanel::ShowContextMenuKeepingFocus(INativeContextMenu* menu,
     PostSafeAction([this]() { RestoreTimelineKeyboardFocus(); });
 }
 
-void AnimationWindowPanel::SetupToolbarDragDrop()
-{
-    UIManager* ui = GetOwnerManager();
-    if (!ui || !m_Toolbar)
-        return;
-    UIElement* root = ui->GetRootElement();
-    if (!root)
-        return;
-
-    static const std::vector<Editor::ToolbarDragDrop::ContainerConfig> kConfig = {
-        {"anim-toolbar-edit",            "ui.animwindow.toolbar.edit.order"},
-        {"anim-toolbar-view",            "ui.animwindow.toolbar.view.order"},
-        {"anim-toolbar-frame",           "ui.animwindow.toolbar.frame.order"},
-        {"anim-toolbar-snap",            "ui.animwindow.toolbar.snap.order"},
-        {"anim-toolbar-curve",           "ui.animwindow.toolbar.curve.order"},
-        {"anim-toolbar-ease",            "ui.animwindow.toolbar.ease.order"},
-        {"anim-toolbar-tools",           "ui.animwindow.toolbar.tools.order"},
-        {"animationwindow-toolbar-right","ui.animwindow.toolbar.right.order"},
-    };
-
-    if (!m_ToolbarDragDrop)
-        m_ToolbarDragDrop = std::make_unique<Editor::ToolbarDragDrop>();
-
-    if (!m_ToolbarDragDropOrderLoaded)
-        RestoreToolbarGapsFromPrefs();
-
-    // Re-runnable: ToolbarDragDrop guards against duplicate registration via
-    // the "toolbar-dragdrop-initialized" class on each button.
-    m_ToolbarDragDrop->Setup(root, kConfig, m_Toolbar);
-
-    if (!m_ToolbarDragDropOrderLoaded)
-    {
-        m_ToolbarDragDrop->LoadButtonOrder(m_Toolbar, kConfig);
-        m_ToolbarDragDropOrderLoaded = true;
-    }
-}
-
 namespace
 {
 constexpr const char* kAnimToolbarGapIdPrefix = "anim-gap-";
 
-const std::vector<std::pair<std::string, std::string>>& AnimToolbarContainerOrderKeys()
+// The toolbar groups whose buttons can be dragged and gapped, each with the preference
+// key that persists its button order.
+const std::vector<Editor::ToolbarDragDrop::ContainerConfig>& AnimToolbarContainers()
 {
-    static const std::vector<std::pair<std::string, std::string>> kKeys = {
+    static const std::vector<Editor::ToolbarDragDrop::ContainerConfig> kContainers = {
         {"anim-toolbar-edit",             "ui.animwindow.toolbar.edit.order"},
         {"anim-toolbar-view",             "ui.animwindow.toolbar.view.order"},
         {"anim-toolbar-frame",            "ui.animwindow.toolbar.frame.order"},
@@ -6219,7 +6214,7 @@ const std::vector<std::pair<std::string, std::string>>& AnimToolbarContainerOrde
         {"anim-toolbar-tools",            "ui.animwindow.toolbar.tools.order"},
         {"animationwindow-toolbar-right", "ui.animwindow.toolbar.right.order"},
     };
-    return kKeys;
+    return kContainers;
 }
 
 UIElement* FindAnimToolbarContainerByClass(UIElement* root, const std::string& className)
@@ -6315,6 +6310,35 @@ float EvalKeyframeCurveValue(const std::vector<AnimKeyframe>& keys,
 }
 } // namespace
 
+void AnimationWindowPanel::SetupToolbarDragDrop()
+{
+    UIManager* ui = GetOwnerManager();
+    if (!ui || !m_Toolbar || !m_ToolbarDragDrop)
+        return;
+    UIElement* root = ui->GetRootElement();
+    if (!root)
+        return;
+
+    // Re-runnable: ToolbarDragDrop guards against duplicate registration via
+    // the "toolbar-dragdrop-initialized" class on each button.
+    m_ToolbarDragDrop->Setup(root, AnimToolbarContainers(), m_Toolbar);
+}
+
+void AnimationWindowPanel::RestoreToolbarLayoutFromPrefs()
+{
+    if (!m_Toolbar)
+        return;
+    if (!m_ToolbarDragDrop)
+        m_ToolbarDragDrop = std::make_unique<Editor::ToolbarDragDrop>();
+
+    // Every bind pass, because a layout reconcile rebuilds even the containers it keeps
+    // in their UXML order, runtime gaps last. Both steps leave a container already in its
+    // saved state as it is. BindLayoutElements is the only caller, and CreateToolbarGap
+    // and RemoveToolbarGap save before they return, so this always reads their result.
+    RestoreToolbarGapsFromPrefs();
+    m_ToolbarDragDrop->LoadButtonOrder(m_Toolbar, AnimToolbarContainers());
+}
+
 void AnimationWindowPanel::RestoreToolbarGapsFromPrefs()
 {
     if (!m_Toolbar) return;
@@ -6324,13 +6348,13 @@ void AnimationWindowPanel::RestoreToolbarGapsFromPrefs()
     (void)prefs.Load(&err);
 
     int maxSerial = 0;
-    for (const auto& [cssClass, key] : AnimToolbarContainerOrderKeys())
+    for (const auto& config : AnimToolbarContainers())
     {
-        UIElement* container = FindAnimToolbarContainerByClass(m_Toolbar, cssClass);
+        UIElement* container = FindAnimToolbarContainerByClass(m_Toolbar, config.cssClass);
         if (!container) continue;
 
         const auto& json = prefs.Json();
-        auto it = json.find(key);
+        auto it = json.find(config.settingsKey);
         if (it == json.end() || !it->is_array()) continue;
 
         for (const auto& item : *it)
@@ -6380,11 +6404,11 @@ void AnimationWindowPanel::CreateToolbarGap(UIElement* container, int insertInde
     // Re-register drag-drop so the new gap participates in reordering.
     SetupToolbarDragDrop();
 
-    for (const auto& [cssClass, key] : AnimToolbarContainerOrderKeys())
+    for (const auto& config : AnimToolbarContainers())
     {
-        if (container->HasClass(cssClass))
+        if (container->HasClass(config.cssClass))
         {
-            SaveAnimToolbarContainerOrder(container, key);
+            SaveAnimToolbarContainerOrder(container, config.settingsKey);
             break;
         }
     }
@@ -6397,9 +6421,9 @@ void AnimationWindowPanel::RemoveToolbarGap(Button* gap)
     if (!parent) return;
 
     std::string saveKey;
-    for (const auto& [cssClass, key] : AnimToolbarContainerOrderKeys())
+    for (const auto& config : AnimToolbarContainers())
     {
-        if (parent->HasClass(cssClass)) { saveKey = key; break; }
+        if (parent->HasClass(config.cssClass)) { saveKey = config.settingsKey; break; }
     }
 
     parent->RemoveChild(gap);
@@ -6513,13 +6537,16 @@ void ApplyAnimToolbarHiddenClass(UIElement* el, bool hidden)
 
 void AnimationWindowPanel::WireToolbarRightClickToggles()
 {
-    if (m_ToolbarRightClickWired || !m_Toolbar)
+    if (!m_Toolbar)
         return;
 
-    // Apply persisted visibility before wiring (so hidden buttons start hidden).
+    // Apply persisted visibility on every pass, so a button a reconcile replaced
+    // starts hidden too, then wire the toolbar instance once.
     for (const auto& entry : kAnimToolbarToggles)
         ApplyAnimToolbarHiddenClass(m_Toolbar->FindById(HashStringId(entry.id)),
                                     IsAnimToolbarButtonHiddenInPrefs(entry.id));
+    if (!m_WiredElements.IsNew(m_Toolbar))
+        return;
 
     UIElement* toolbar = m_Toolbar;
     Platform::Window* window = m_Window;
@@ -6613,12 +6640,7 @@ void AnimationWindowPanel::WireToolbarRightClickToggles()
             if (cmd == kCmdResetLayout)
             {
                 if (m_ToolbarDragDrop)
-                {
-                    std::vector<Editor::ToolbarDragDrop::ContainerConfig> cfg;
-                    for (const auto& [cssClass, key] : AnimToolbarContainerOrderKeys())
-                        cfg.push_back({cssClass, key});
-                    m_ToolbarDragDrop->ResetButtonOrder(toolbar, cfg);
-                }
+                    m_ToolbarDragDrop->ResetButtonOrder(toolbar, AnimToolbarContainers());
                 return;
             }
             if (cmd >= kCmdThickness1 && cmd <= kCmdThickness4)
@@ -6634,9 +6656,9 @@ void AnimationWindowPanel::WireToolbarRightClickToggles()
                 // drag the gap to its desired final position.
                 UIElement* best = nullptr;
                 float bestDist = std::numeric_limits<float>::infinity();
-                for (const auto& [cssClass, key] : AnimToolbarContainerOrderKeys())
+                for (const auto& config : AnimToolbarContainers())
                 {
-                    UIElement* c = FindAnimToolbarContainerByClass(toolbar, cssClass);
+                    UIElement* c = FindAnimToolbarContainerByClass(toolbar, config.cssClass);
                     if (!c) continue;
                     const float cx = c->GetLayoutX();
                     const float cw = c->GetLayoutWidth();
@@ -6657,8 +6679,6 @@ void AnimationWindowPanel::WireToolbarRightClickToggles()
         menu->Show(window, static_cast<int>(e.X), static_cast<int>(e.Y));
         e.Stop();
     });
-
-    m_ToolbarRightClickWired = true;
 }
 
 void AnimationWindowPanel::WireMarkersElementCallbacks()
@@ -6696,9 +6716,15 @@ void AnimationWindowPanel::WireMarkersElementCallbacks()
     });
 }
 
+UIElement* AnimationWindowPanel::FindUnwired(const std::string& id)
+{
+    UIElement* const element = FindById(HashStringId(id));
+    return m_WiredElements.IsNew(element) ? element : nullptr;
+}
+
 void AnimationWindowPanel::WireAnimationControls()
 {
-    if (auto* newBtn = dynamic_cast<Button*>(FindById("AnimationWindowNewAnimation"_sid)))
+    if (auto* newBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowNewAnimation")))
     {
         newBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
                           {
@@ -6738,7 +6764,7 @@ void AnimationWindowPanel::WireAnimationControls()
                               CreateNewAnimationAtPath(savePath);
                           });
     }
-    if (auto* saveBtn = dynamic_cast<Button*>(FindById("AnimationWindowSave"_sid)))
+    if (auto* saveBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSave")))
     {
         saveBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
                             {
@@ -6797,7 +6823,7 @@ void AnimationWindowPanel::WireAnimationControls()
                                 (void)SaveCurrentClip();
                           });
     }
-    if (auto* animMenuBtn = dynamic_cast<Button*>(FindById("AnimationWindowAnimationMenu"_sid)))
+    if (auto* animMenuBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowAnimationMenu")))
     {
         animMenuBtn->SetText(GetPanelBaseTitle());
         animMenuBtn->RegisterEventHandler(kEventButtonClick, [this, animMenuBtn](UIEvent&)
@@ -6944,7 +6970,7 @@ void AnimationWindowPanel::WireAnimationControls()
             ShowContextMenuKeepingFocus(m_AnimationMenuContextMenu.get(), static_cast<int>(x), static_cast<int>(y));
         });
     }
-    if (auto* playBtn = dynamic_cast<Button*>(FindById("AnimationWindowPlay"_sid)))
+    if (auto* playBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowPlay")))
     {
         playBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
                             {
@@ -6966,7 +6992,7 @@ void AnimationWindowPanel::WireAnimationControls()
                                 UpdatePlayBackwardButtonState();
                             });
     }
-    if (auto* playBackBtn = dynamic_cast<Button*>(FindById("AnimationWindowPlayBackward"_sid)))
+    if (auto* playBackBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowPlayBackward")))
     {
         playBackBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
                                 {
@@ -6988,7 +7014,7 @@ void AnimationWindowPanel::WireAnimationControls()
                                     UpdatePlayBackwardButtonState();
                                 });
     }
-    if (auto* stopBtn = dynamic_cast<Button*>(FindById("AnimationWindowStop"_sid)))
+    if (auto* stopBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowStop")))
     {
         stopBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
                             {
@@ -7014,7 +7040,7 @@ void AnimationWindowPanel::WireAnimationControls()
                                     m_LaneClipEditorView->SetTimeRange(m_TimelineState.viewStart, m_TimelineState.viewEnd);
                             });
     }
-    if (auto* pauseBtn = dynamic_cast<Button*>(FindById("AnimationWindowPause"_sid)))
+    if (auto* pauseBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowPause")))
     {
         pauseBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
                              {
@@ -7026,7 +7052,7 @@ void AnimationWindowPanel::WireAnimationControls()
                                  UpdatePlayBackwardButtonState();
                              });
     }
-    if (auto* loopBtn = dynamic_cast<Button*>(FindById("AnimationWindowLoop"_sid)))
+    if (auto* loopBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowLoop")))
     {
         loopBtn->SetText(""); // icon-only, same as play/stop/pause
         loopBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
@@ -7036,7 +7062,7 @@ void AnimationWindowPanel::WireAnimationControls()
                             });
         UpdateLoopButtonState();
     }
-    if (auto* syncPlayheadBtn = dynamic_cast<Button*>(FindById("AnimationWindowSyncPlayhead"_sid)))
+    if (auto* syncPlayheadBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSyncPlayhead")))
     {
         syncPlayheadBtn->SetText("");
         syncPlayheadBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
@@ -7046,7 +7072,7 @@ void AnimationWindowPanel::WireAnimationControls()
                                    });
         UpdateSyncPlayheadButtonState();
     }
-    if (auto* recordBtn = dynamic_cast<Button*>(FindById("AnimationWindowRecord"_sid)))
+    if (auto* recordBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowRecord")))
     {
         recordBtn->SetText("");
         recordBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
@@ -7069,29 +7095,27 @@ void AnimationWindowPanel::WireAnimationControls()
         if (m_Recording)
             InsertKeyAtCurrentTime();
     };
-    if (auto* goStartBtn = dynamic_cast<Button*>(FindById("AnimationWindowGoToStart"_sid)))
+    if (auto* goStartBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowGoToStart")))
         goStartBtn->RegisterEventHandler(kEventButtonClick, [jumpToTimelineTime, this](UIEvent&) { jumpToTimelineTime(m_TimelineState.rangeStart); });
-    if (auto* goEndBtn = dynamic_cast<Button*>(FindById("AnimationWindowGoToEnd"_sid)))
+    if (auto* goEndBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowGoToEnd")))
         goEndBtn->RegisterEventHandler(kEventButtonClick, [jumpToTimelineTime, this](UIEvent&) { jumpToTimelineTime(m_TimelineState.rangeEnd); });
     auto stepTimelineFrame = [jumpToTimelineTime, this](int direction)
     {
         const float fps = std::max(m_TimelineState.fps, 1.0f);
         jumpToTimelineTime(m_TimelineState.currentTime + static_cast<float>(direction) / fps);
     };
-    if (auto* prevFrameBtn = dynamic_cast<Button*>(FindById("AnimationWindowPreviousFrame"_sid)))
+    if (auto* prevFrameBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowPreviousFrame")))
         prevFrameBtn->RegisterEventHandler(kEventButtonClick, [stepTimelineFrame](UIEvent&) { stepTimelineFrame(-1); });
-    if (auto* nextFrameBtn = dynamic_cast<Button*>(FindById("AnimationWindowNextFrame"_sid)))
+    if (auto* nextFrameBtn = dynamic_cast<Button*>(FindUnwired("AnimationWindowNextFrame")))
         nextFrameBtn->RegisterEventHandler(kEventButtonClick, [stepTimelineFrame](UIEvent&) { stepTimelineFrame(1); });
 
-    m_PreviewToggleBtn = dynamic_cast<Button*>(FindById("AnimationWindowPreviewToggle"_sid));
-    if (m_PreviewToggleBtn)
+    if (m_WiredElements.IsNew(m_PreviewToggleBtn))
     {
         if (m_PreviewEnabled) m_PreviewToggleBtn->AddClass("active");
         m_PreviewToggleBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { SetPreviewEnabled(!m_PreviewEnabled); });
     }
 
-    m_ClipDropdown = dynamic_cast<Dropdown*>(FindById("AnimationWindowClipDropdown"_sid));
-    if (m_ClipDropdown)
+    if (m_WiredElements.IsNew(m_ClipDropdown))
     {
         m_ClipDropdown->SetOptions({{"", "No Clip"}}, 0);
         m_ClipDropdown->SetOnValueChanged([this](const std::string& value)
@@ -7141,8 +7165,7 @@ void AnimationWindowPanel::WireAnimationControls()
         });
         RefreshClipDropdown();
     }
-    m_ViewDropdown = dynamic_cast<Dropdown*>(FindById("AnimationWindowViewDropdown"_sid));
-    if (m_ViewDropdown)
+    if (m_WiredElements.IsNew(m_ViewDropdown))
     {
         m_ViewDropdown->AddClass("hidden");
         m_ViewDropdown->SetOnValueChanged([this](const std::string& value)
@@ -7153,9 +7176,6 @@ void AnimationWindowPanel::WireAnimationControls()
             else if (value == "clip_editor")SetActiveView(ActiveView::ClipEditor);
         });
     }
-    m_ViewButtons = FindById("AnimationWindowViewButtons"_sid);
-    m_DopeSheetViewButton = dynamic_cast<Button*>(FindById("AnimationWindowDopeSheetView"_sid));
-    m_CurvesViewButton = dynamic_cast<Button*>(FindById("AnimationWindowCurvesView"_sid));
     if (m_ViewButtons)
     {
         if (m_PanelKind == PanelKind::Animation)
@@ -7163,9 +7183,9 @@ void AnimationWindowPanel::WireAnimationControls()
         else
             m_ViewButtons->AddClass("hidden");
     }
-    if (m_DopeSheetViewButton)
+    if (m_WiredElements.IsNew(m_DopeSheetViewButton))
         m_DopeSheetViewButton->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { SetActiveView(ActiveView::DopeSheet); });
-    if (m_CurvesViewButton)
+    if (m_WiredElements.IsNew(m_CurvesViewButton))
         m_CurvesViewButton->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { SetActiveView(ActiveView::Curves); });
     SetActiveView(m_ActiveView);
     UpdateInterpolationButtonState();
@@ -7416,7 +7436,7 @@ void AnimationWindowPanel::WireAnimationControls()
     };
 
     // Frame All: fit all visible-channel keyframes into view (both axes).
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowFrameAll"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowFrameAll")))
         btn->RegisterEventHandler(kEventButtonClick, [this, accumKey, applyFrameRanges](UIEvent&)
         {
             if (!m_CurrentClip || m_VisibleChannels.empty()) { FrameAll(); return; }
@@ -7437,7 +7457,7 @@ void AnimationWindowPanel::WireAnimationControls()
         });
 
     // Frame Selected: fit selected keyframes in both axes; fall back to Frame All.
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowFrameSelectedCurves"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowFrameSelectedCurves")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
             if (!FrameSelectionBounds())
@@ -7448,7 +7468,7 @@ void AnimationWindowPanel::WireAnimationControls()
     // Fit Height toggle: a one-press now both fits the value range AND
     // latches into auto-fit mode so subsequent edits / playback keep the
     // curve framed. Toggling off leaves the current range untouched.
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowFitHeight"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowFitHeight")))
         btn->RegisterEventHandler(kEventButtonClick, [this, accumKey, applyFrameRanges](UIEvent& e)
         {
             UIElement& self = *e.CurrentTarget;
@@ -7472,14 +7492,14 @@ void AnimationWindowPanel::WireAnimationControls()
             applyFrameRanges(0, 0, vMin, vMax, false, true);
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowSelectAllKeys"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSelectAllKeys")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
             if (m_CurvesGraphView)
                 m_CurvesGraphView->SelectAllVisibleKeys();
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowDeselectKeys"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowDeselectKeys")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
             if (m_CurvesGraphView)
@@ -7490,20 +7510,20 @@ void AnimationWindowPanel::WireAnimationControls()
             UpdateInterpolationButtonState();
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowPreviousKeyframe"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowPreviousKeyframe")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { GoToPreviousKey(); });
 
     // Add Keyframe button - inserts a keyframe at current time on selected channel
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowAddKeyframe"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowAddKeyframe")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
             InsertKeyAtCurrentTime();
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowDuplicateKeyframe"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowDuplicateKeyframe")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { DuplicateSelectedKey(); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowDeleteKeyframe"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowDeleteKeyframe")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
             if (m_ActiveView == ActiveView::TimeComposite)
@@ -7512,11 +7532,11 @@ void AnimationWindowPanel::WireAnimationControls()
                 DeleteSelectedKey();
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowNextKeyframe"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowNextKeyframe")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { GoToNextKey(); });
 
     // Add Marker button - adds a timeline marker at current time
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowAddMarker"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowAddMarker")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
             (void)ExecutePanelEditWithUndo("Add Animation Marker",
@@ -7532,19 +7552,19 @@ void AnimationWindowPanel::WireAnimationControls()
                                            false);
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCurveLinear"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCurveLinear")))
         btn->RegisterEventHandler(kEventButtonClick, [setChannelInterp](UIEvent&) { setChannelInterp(AnimInterp::Linear); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCurveStepped"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCurveStepped")))
         btn->RegisterEventHandler(kEventButtonClick, [setChannelInterp](UIEvent&) { setChannelInterp(AnimInterp::Step); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCurveSpline"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCurveSpline")))
         btn->RegisterEventHandler(kEventButtonClick, [setChannelInterp](UIEvent&) { setChannelInterp(AnimInterp::CubicSpline); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowSmoothLowpass"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSmoothLowpass")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { EnterCurveOptionsMode(CurveOptionsMode::SmoothLowpass); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowSmoothPeak"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSmoothPeak")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { EnterCurveOptionsMode(CurveOptionsMode::SmoothPeak); });
 
     auto applyEaseTangents = [this](bool easeIn, bool easeOut)
@@ -7585,22 +7605,22 @@ void AnimationWindowPanel::WireAnimationControls()
             });
     };
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowEaseIn"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowEaseIn")))
         btn->RegisterEventHandler(kEventButtonClick, [applyEaseTangents](UIEvent&) { applyEaseTangents(true, false); });
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowEaseEase"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowEaseEase")))
         btn->RegisterEventHandler(kEventButtonClick, [applyEaseTangents](UIEvent&) { applyEaseTangents(true, true); });
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowEaseOut"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowEaseOut")))
         btn->RegisterEventHandler(kEventButtonClick, [applyEaseTangents](UIEvent&) { applyEaseTangents(false, true); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCurveSimplify"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCurveSimplify")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { EnterCurveOptionsMode(CurveOptionsMode::Simplify); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowAddNoise"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowAddNoise")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { EnterCurveOptionsMode(CurveOptionsMode::Noise); });
 
     WireCurveOptions();
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowEulerFilter"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowEulerFilter")))
     {
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
@@ -7649,17 +7669,8 @@ void AnimationWindowPanel::WireAnimationControls()
         });
     }
 
-    auto stubBtn = [this](const char* id, const char* label)
-    {
-        auto* btn = dynamic_cast<Button*>(FindById(HashStringId(id)));
-        if (!btn) return;
-        btn->RegisterEventHandler(kEventButtonClick, [label](UIEvent&)
-        {
-            Logger::Log::Info("AnimationWindow: {} not yet implemented", label);
-        });
-    };
     // Retime tool toggle.
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCurveDraw"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCurveDraw")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent& e)
         {
             UIElement& self = *e.CurrentTarget;
@@ -7672,7 +7683,7 @@ void AnimationWindowPanel::WireAnimationControls()
         });
 
     // Draw-curve (freehand) tool toggle.
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowDrawCurve"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowDrawCurve")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent& e)
         {
             UIElement& self = *e.CurrentTarget;
@@ -7685,7 +7696,7 @@ void AnimationWindowPanel::WireAnimationControls()
         });
 
     // Lattice deform toggle.
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowLattice"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowLattice")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent& e)
         {
             UIElement& self = *e.CurrentTarget;
@@ -7703,22 +7714,22 @@ void AnimationWindowPanel::WireAnimationControls()
             if (auto* dr = dynamic_cast<Button*>(FindById("AnimationWindowDrawCurve"_sid))) dr->RemoveClass("active");
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowBreakTangents"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowBreakTangents")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { BreakTangents(); });
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowUnifyTangents"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowUnifyTangents")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { UnifyTangents(); });
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowFramePlaybackRange"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowFramePlaybackRange")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { FramePlaybackRange(); });
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCenterPlayhead"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCenterPlayhead")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { CenterViewOnCurrentTime(); });
-    if (auto* zoomSlider = dynamic_cast<Slider*>(FindById("AnimationWindowTimelineZoomSlider"_sid)))
+    if (auto* zoomSlider = dynamic_cast<Slider*>(FindUnwired("AnimationWindowTimelineZoomSlider")))
     {
         zoomSlider->SetValueWithoutNotify(ComputeTimelineZoomSliderValue());
         zoomSlider->SetOnValueChanging([this](float value) { ApplyTimelineZoomSliderValue(value, false); });
         zoomSlider->SetOnValueChanged([this](float value) { ApplyTimelineZoomSliderValue(value, true); });
     }
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCurvesStacked"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCurvesStacked")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent& e)
         {
             UIElement& self = *e.CurrentTarget;
@@ -7730,7 +7741,7 @@ void AnimationWindowPanel::WireAnimationControls()
                 nb->RemoveClass("active");
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCurvesNormalized"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCurvesNormalized")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent& e)
         {
             UIElement& self = *e.CurrentTarget;
@@ -7742,10 +7753,10 @@ void AnimationWindowPanel::WireAnimationControls()
                 sb->RemoveClass("active");
         });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowBufferSnapshot"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowBufferSnapshot")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { if (m_CurvesGraphView) m_CurvesGraphView->TakeBufferSnapshot(); });
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowSwapBuffer"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSwapBuffer")))
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
             if (!m_CurvesGraphView || !m_CurrentClipAsset || !m_CurvesGraphView->HasBufferSnapshot())
@@ -7821,7 +7832,7 @@ void AnimationWindowPanel::WireAnimationControls()
             // Don't call RefreshChannelSelection here - it will call SetSelectedCurve which resets selection
         });
         // Drag support on the T: label
-        if (m_StatsTimeLabel)
+        if (m_WiredElements.IsNew(m_StatsTimeLabel))
         {
             m_StatsTimeLabel->RegisterEventHandler(kEventMouseDown, [this](UIEvent& e)
             {
@@ -7926,7 +7937,7 @@ void AnimationWindowPanel::WireAnimationControls()
             RefreshChannelSelection();
         });
         // Drag support on the V: label
-        if (m_StatsValueLabel)
+        if (m_WiredElements.IsNew(m_StatsValueLabel))
         {
             m_StatsValueLabel->RegisterEventHandler(kEventMouseDown, [this](UIEvent& e)
             {
@@ -8000,7 +8011,7 @@ void AnimationWindowPanel::WireAnimationControls()
         }
     }
 
-    if (auto* fpsField = dynamic_cast<FloatField*>(FindById("AnimationWindowFpsField"_sid)))
+    if (auto* fpsField = dynamic_cast<FloatField*>(FindUnwired("AnimationWindowFpsField")))
     {
         fpsField->SetValue(m_TimelineState.fps);
         fpsField->SetOnValueChanged([this](const float& v)
@@ -8012,44 +8023,55 @@ void AnimationWindowPanel::WireAnimationControls()
                                    });
     }
 
-    if (m_PropertiesSearchField)
+    if (TextField* searchField = m_PropertiesSearchField.Get())
     {
-        auto* searchRow = m_PropertiesSearchField->GetParent();
-        EditorSearchBars::RegisterFocusTarget(searchRow);
+        UIElement* searchRow = searchField->GetParent();
+        if (searchRow != m_RegisteredSearchRow)
+        {
+            EditorSearchBars::UnregisterFocusTarget(m_RegisteredSearchRow);
+            EditorSearchBars::RegisterFocusTarget(searchRow);
+            m_RegisteredSearchRow = searchRow;
+        }
         auto* searchClear = dynamic_cast<Button*>(FindById("AnimationWindowPropertiesSearchClear"_sid));
         if (searchClear)
         {
             searchClear->SetFocusable(false);
             searchClear->SetTooltip("Clear search");
         }
-        auto updateSearchVisualState = [searchRow, searchClear](const std::string& value)
+        // Held weakly: the field keeps this callback across a reconcile that may
+        // replace the row or the clear button.
+        auto updateSearchVisualState =
+            [row = MakeWeakRef(searchRow), clear = MakeWeakRef(searchClear)](const std::string& value)
         {
-            if (!searchRow || !searchClear)
+            UIElement* const rowElement = row.Get();
+            Button* const clearButton = clear.Get();
+            if (!rowElement || !clearButton)
                 return;
             if (value.empty())
             {
-                searchRow->RemoveClass("has-query");
-                searchClear->AddClass("hidden");
+                rowElement->RemoveClass("has-query");
+                clearButton->AddClass("hidden");
             }
             else
             {
-                searchRow->AddClass("has-query");
-                searchClear->RemoveClass("hidden");
+                rowElement->AddClass("has-query");
+                clearButton->RemoveClass("hidden");
             }
         };
-        m_PropertiesSearchField->SetOnValueChanging([this, updateSearchVisualState](const std::string& v)
+        searchField->SetOnValueChanging([this, updateSearchVisualState](const std::string& v)
         {
             m_PropertiesSearchQuery = v;
             updateSearchVisualState(v);
             RefreshPropertyTree();
         });
-        if (searchClear)
+        if (m_WiredElements.IsNew(searchClear))
         {
             searchClear->RegisterEventHandler(kEventButtonClick, [this, updateSearchVisualState](UIEvent&)
             {
-                if (!m_PropertiesSearchField || m_PropertiesSearchField->GetValue().empty())
+                TextField* const field = m_PropertiesSearchField.Get();
+                if (!field || field->GetValue().empty())
                     return;
-                m_PropertiesSearchField->SetValue("");
+                field->SetValue("");
                 m_PropertiesSearchQuery.clear();
                 updateSearchVisualState("");
                 RefreshPropertyTree();
@@ -8069,7 +8091,7 @@ void AnimationWindowPanel::WireAnimationControls()
         set(m_FilterFlatButton,        m_PropertyFilter == PropertyFilter::Flat);
     };
     syncFilterButtons();
-    if (m_FilterAnimatedButton)
+    if (m_WiredElements.IsNew(m_FilterAnimatedButton))
     {
         m_FilterAnimatedButton->RegisterEventHandler(kEventButtonClick, [this, syncFilterButtons](UIEvent&)
         {
@@ -8078,7 +8100,7 @@ void AnimationWindowPanel::WireAnimationControls()
             RefreshPropertyTree();
         });
     }
-    if (m_FilterHierarchyButton)
+    if (m_WiredElements.IsNew(m_FilterHierarchyButton))
     {
         m_FilterHierarchyButton->RegisterEventHandler(kEventButtonClick, [this, syncFilterButtons](UIEvent&)
         {
@@ -8087,7 +8109,7 @@ void AnimationWindowPanel::WireAnimationControls()
             RefreshPropertyTree();
         });
     }
-    if (m_FilterChannelsOnlyButton)
+    if (m_WiredElements.IsNew(m_FilterChannelsOnlyButton))
     {
         m_FilterChannelsOnlyButton->RegisterEventHandler(kEventButtonClick, [this, syncFilterButtons](UIEvent&)
         {
@@ -8096,7 +8118,7 @@ void AnimationWindowPanel::WireAnimationControls()
             RefreshPropertyTree();
         });
     }
-    if (m_FilterFlatButton)
+    if (m_WiredElements.IsNew(m_FilterFlatButton))
     {
         m_FilterFlatButton->RegisterEventHandler(kEventButtonClick, [this, syncFilterButtons](UIEvent&)
         {
@@ -8106,20 +8128,8 @@ void AnimationWindowPanel::WireAnimationControls()
         });
     }
 
-    auto wireToggle = [this](const char* id, bool AnimationWindowPanel::* member)
-    {
-        auto* btn = dynamic_cast<Button*>(FindById(HashStringId(id)));
-        if (!btn) return;
-        if (this->*member) btn->AddClass("pressed");
-        btn->RegisterEventHandler(kEventButtonClick, [this, btn, member](UIEvent&)
-        {
-            this->*member = !(this->*member);
-            if (this->*member) btn->AddClass("pressed");
-            else btn->RemoveClass("pressed");
-        });
-    };
     // Wire snap toggles to also propagate to CurvesGraphView
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowSnapTime"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSnapTime")))
     {
         if (m_SnapTime) btn->AddClass("pressed"); else btn->RemoveClass("pressed");
         btn->RegisterEventHandler(kEventButtonClick, [this, btn](UIEvent&)
@@ -8129,7 +8139,7 @@ void AnimationWindowPanel::WireAnimationControls()
             if (m_CurvesGraphView) m_CurvesGraphView->SetSnapTime(m_SnapTime);
         });
     }
-    if (auto* snapMode = dynamic_cast<Dropdown*>(FindById("AnimationWindowSnapModeDropdown"_sid)))
+    if (auto* snapMode = dynamic_cast<Dropdown*>(FindUnwired("AnimationWindowSnapModeDropdown")))
     {
         snapMode->SetOptions({{"FPS", "FPS"}, {"Seconds", "Seconds"}}, m_SnapTimeStep > 0.0f ? 1 : 0);
         snapMode->SetOnValueChanged([this](const std::string& value)
@@ -8148,7 +8158,7 @@ void AnimationWindowPanel::WireAnimationControls()
                 m_CurvesGraphView->SetSnapTimeStep(m_SnapTimeStep);
         });
     }
-    if (auto* snapTimeStepField = dynamic_cast<FloatField*>(FindById("AnimationWindowSnapTimeStep"_sid)))
+    if (auto* snapTimeStepField = dynamic_cast<FloatField*>(FindUnwired("AnimationWindowSnapTimeStep")))
     {
         snapTimeStepField->SetValue(m_SnapTimeStep);
         snapTimeStepField->SetOnValueChanged([this](const float& v)
@@ -8157,7 +8167,7 @@ void AnimationWindowPanel::WireAnimationControls()
             if (m_CurvesGraphView) m_CurvesGraphView->SetSnapTimeStep(m_SnapTimeStep);
         });
     }
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowSnapValue"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowSnapValue")))
     {
         if (m_SnapValue) btn->AddClass("pressed"); else btn->RemoveClass("pressed");
         btn->RegisterEventHandler(kEventButtonClick, [this, btn](UIEvent&)
@@ -8167,7 +8177,7 @@ void AnimationWindowPanel::WireAnimationControls()
             if (m_CurvesGraphView) m_CurvesGraphView->SetSnapValue(m_SnapValue);
         });
     }
-    if (auto* snapStepField = dynamic_cast<FloatField*>(FindById("AnimationWindowSnapValueStep"_sid)))
+    if (auto* snapStepField = dynamic_cast<FloatField*>(FindUnwired("AnimationWindowSnapValueStep")))
     {
         snapStepField->SetValue(m_SnapValueStep);
         snapStepField->SetOnValueChanged([this](const float& v)
@@ -8176,7 +8186,7 @@ void AnimationWindowPanel::WireAnimationControls()
             if (m_CurvesGraphView) m_CurvesGraphView->SetSnapValueStep(m_SnapValueStep);
         });
     }
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowToggleKeytool"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowToggleKeytool")))
     {
         if (m_KeytoolEnabled) btn->AddClass("pressed"); else btn->RemoveClass("pressed");
         btn->RegisterEventHandler(kEventButtonClick, [this, btn](UIEvent&)
@@ -8186,7 +8196,7 @@ void AnimationWindowPanel::WireAnimationControls()
             if (m_CurvesGraphView) m_CurvesGraphView->SetKeyInsertionEnabled(m_KeytoolEnabled);
         });
     }
-    if (auto* tangentMode = dynamic_cast<Dropdown*>(FindById("AnimationWindowDefaultTangentDropdown"_sid)))
+    if (auto* tangentMode = dynamic_cast<Dropdown*>(FindUnwired("AnimationWindowDefaultTangentDropdown")))
     {
         tangentMode->SetOptions({
             {"Auto", "Auto"},
@@ -8208,7 +8218,7 @@ void AnimationWindowPanel::WireAnimationControls()
         });
     }
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowShowGrid"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowShowGrid")))
     {
         if (m_ShowGrid) btn->AddClass("icon-active"); else btn->RemoveClass("icon-active");
         btn->RegisterEventHandler(kEventButtonClick, [this, btn](UIEvent&)
@@ -8219,7 +8229,7 @@ void AnimationWindowPanel::WireAnimationControls()
         });
     }
 
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowCopy"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowCopy")))
     {
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
@@ -8260,7 +8270,7 @@ void AnimationWindowPanel::WireAnimationControls()
             }
         });
     }
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowPaste"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowPaste")))
     {
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
@@ -8284,7 +8294,7 @@ void AnimationWindowPanel::WireAnimationControls()
                 });
         });
     }
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowOpenAnimation"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowOpenAnimation")))
     {
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
@@ -8323,7 +8333,7 @@ void AnimationWindowPanel::WireAnimationControls()
             (void)OpenAnimation(selected, 0u);
         });
     }
-    if (auto* btn = dynamic_cast<Button*>(FindById("AnimationWindowFolderOpen"_sid)))
+    if (auto* btn = dynamic_cast<Button*>(FindUnwired("AnimationWindowFolderOpen")))
     {
         btn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&)
         {
@@ -9762,13 +9772,9 @@ void AnimationWindowPanel::ShowAnimationTransitionsInspector()
         title->Overrides().Set(Style::Color, 0xFFFFFFFF).Set(Style::FontSize, StyleLength::Px(13.0f)).Set(Style::FontWeight, 600);
         parent->AddChild(std::move(title));
 
-        auto body = std::make_unique<Label>();
-        body->SetText("AnimationController assets are parsed but states and transitions are not evaluated yet. Clip and Timeline playback on the Animator still work.");
-        body->Overrides()
-            .Set(Style::Color, 0xFFD6D6D6)
-            .Set(Style::FontSize, StyleLength::Px(12.0f))
-            .Set(Style::WhiteSpaceProp, WhiteSpace::Normal);
-        parent->AddChild(std::move(body));
+        parent->AddChild(std::make_unique<EditorUI::CollapsibleInfoCard>(
+            "AnimationController assets are parsed but states and transitions are not evaluated yet. "
+            "Clip and Timeline playback on the Animator still work."));
 
         auto create = std::make_unique<Button>();
         create->SetText("Create Controller");
@@ -12452,9 +12458,9 @@ void AnimationWindowPanel::WireCurveOptions()
         m_SmoothSampleCountField->SetOnValueChanged(onSmoothSampleCount);
     }
 
-    if (m_NoiseConfirmBtn)    m_NoiseConfirmBtn   ->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { ExitCurveOptionsMode(true); });
-    if (m_SimplifyConfirmBtn) m_SimplifyConfirmBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { ExitCurveOptionsMode(true); });
-    if (m_SmoothConfirmBtn)   m_SmoothConfirmBtn  ->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { ExitCurveOptionsMode(true); });
+    if (m_WiredElements.IsNew(m_NoiseConfirmBtn))    m_NoiseConfirmBtn   ->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { ExitCurveOptionsMode(true); });
+    if (m_WiredElements.IsNew(m_SimplifyConfirmBtn)) m_SimplifyConfirmBtn->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { ExitCurveOptionsMode(true); });
+    if (m_WiredElements.IsNew(m_SmoothConfirmBtn))   m_SmoothConfirmBtn  ->RegisterEventHandler(kEventButtonClick, [this](UIEvent&) { ExitCurveOptionsMode(true); });
 
     // Drag-to-scrub on both the dedicated drag labels and the field input
     // boxes themselves (Godot/Blender style). Sensitivity is in value-units
@@ -12468,15 +12474,20 @@ void AnimationWindowPanel::WireCurveOptions()
     constexpr float kFloatMin = 0.0f;
     constexpr float kFloatMax = 1.0e6f;
 
+    // Drag handlers are additive, so each label and field instance is wired once.
     auto wireIntPair = [&](Label* label, IntField* field, float sens, std::function<void(const int&)> cb)
     {
-        WireFieldDragScrub<IntField, int>(label, field, sens, kIntMin, kIntMax, cb);
-        WireFieldDragScrub<IntField, int>(field, field, sens, kIntMin, kIntMax, cb);
+        if (m_WiredElements.IsNew(label))
+            WireFieldDragScrub<IntField, int>(label, field, sens, kIntMin, kIntMax, cb);
+        if (m_WiredElements.IsNew(field))
+            WireFieldDragScrub<IntField, int>(field, field, sens, kIntMin, kIntMax, cb);
     };
     auto wireFloatPair = [&](Label* label, FloatField* field, float sens, std::function<void(const float&)> cb)
     {
-        WireFieldDragScrub<FloatField, float>(label, field, sens, kFloatMin, kFloatMax, cb);
-        WireFieldDragScrub<FloatField, float>(field, field, sens, kFloatMin, kFloatMax, cb);
+        if (m_WiredElements.IsNew(label))
+            WireFieldDragScrub<FloatField, float>(label, field, sens, kFloatMin, kFloatMax, cb);
+        if (m_WiredElements.IsNew(field))
+            WireFieldDragScrub<FloatField, float>(field, field, sens, kFloatMin, kFloatMax, cb);
     };
 
     wireIntPair  (m_NoiseFreqMinLabel,         m_NoiseFreqMinField,      kIntFreqSens,  onNoiseFreqMin);

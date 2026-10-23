@@ -43,6 +43,7 @@ set(ECS_HEADERS
     Include/ECS/ChangeFilter.h
     Include/ECS/ComponentConcepts.h
     Include/ECS/QueryAccessProbe.h
+    Include/ECS/Writable.h
     Include/ECS/AutoRegistration.h
     Include/ECS/ECSTemplates.h
     Include/ECS/Systems.h
@@ -61,6 +62,9 @@ target_compile_features(ECS PUBLIC cxx_std_20)
 # ECS depends on Types/Types.h via the Types module; avoid direct Engine includes.
 target_include_directories(ECS PUBLIC Include)
 target_include_directories(ECS PRIVATE Source)
+# Platform's header-only environment switch. ECS/ChangeFilter.h reads
+# GE_ECS_CHANGE_FILTER inline, so the path is public; include path only.
+target_include_directories(ECS PUBLIC ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include)
 
 # Dependencies
 # ECS module dependencies (target-based; avoid hardcoded include paths)

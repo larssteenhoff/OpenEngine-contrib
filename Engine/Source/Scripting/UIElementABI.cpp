@@ -272,8 +272,7 @@ GE_API GE_Result GE_CDECL GE_UIElement_IsAlive(uint64_t instanceId, int32_t* out
 
 // The element's registered tag id — the identity a binding maps to its own wrapper type
 // (Button -> Ui.Button, and so on). It is the tag's StringId, cached at registration and
-// already what CSS type-selector matching uses, NOT the one-byte UIElementKind tag, which
-// has three values and exists only to skip a dynamic_cast on two hot paths.
+// already what CSS type-selector matching uses.
 //
 // *outTagId is 0 for a live element that carries no creation stamp AND whose exact C++ type
 // was never registered with a tag (an editor-local subclass, an element built by hand). That

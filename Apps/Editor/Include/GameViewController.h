@@ -14,10 +14,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <limits>
 #include <optional>
 
 namespace GameEngine
 {
+namespace Engine::Renderer::Pipeline { class RenderPipelineInstance; }
 namespace ECS
 {
 class World;
@@ -182,6 +184,9 @@ class GameViewController
     // Game View is WYSIWYG vs the Player. Warmed during editor setup so opening the
     // Game View does not pay the UI/font initialization cost on its first frame.
     std::unique_ptr<GameUIHost> m_GameUI;
+    Engine::Renderer::Pipeline::RenderPipelineInstance* m_GameUiPostProcessPipeline = nullptr;
+    std::shared_ptr<uint8_t> m_GameUiPostProcessLifetime = std::make_shared<uint8_t>(0);
+    uint64_t m_GameUiCompositedFrameIndex = std::numeric_limits<uint64_t>::max();
     // The project's authored UI scale policy, re-applied every composite.
     Editor::ProjectUIScaleBinding m_GameUiScale;
     uint32_t m_GameUiWidth = 0;
@@ -194,6 +199,7 @@ class GameViewController
 
     std::optional<DeclaredCamera> m_DeclaredCamera;
     bool m_HadCameraThisFrame = false;
+    bool m_IncludeGameUiInPostProcessing = true;
     bool m_WaitingForExtractionRG = false;
     Editor::ViewPresentationSnapshot m_PresentationSnapshot;
     uint32_t m_PresentationWarmupFramesRemaining = 4;

@@ -427,9 +427,7 @@ void RenderGraphPanel::BuildUI()
     BuildValidationSection();
 
     // Body: [ pass list pane | splitter | detail pane ]. Panes are
-    // WeightedPanes so drag updates route through the UIManager_Layout
-    // fast path (direct YGNodeStyleSetFlexGrow after ApplyStyle), which
-    // keeps the split drag smooth instead of going through inline overrides.
+    // WeightedPanes so the splitter drag drives their flex-grow weights.
     auto body = std::make_unique<UIElement>();
     body->AddClass("render-graph-body");
     m_BodyElement = body.get();

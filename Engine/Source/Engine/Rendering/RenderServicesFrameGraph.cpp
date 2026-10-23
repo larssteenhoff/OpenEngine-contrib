@@ -152,8 +152,12 @@ RenderServices::PipelineOutputRG RenderServices::GetPipelineOutputRG(
         return result;
     // Frame-identity guard: a blackboard declared against another frame (or
     // a stale incarnation of this one) holds dead frame-local ids.
-    if (!instance->FrameResourcesFor(&frame))
+    const auto* resources = instance->FrameResourcesFor(&frame);
+    if (!resources)
         return result;
+    const auto viewInfo = resources->Views.find(viewId);
+    if (viewInfo != resources->Views.end())
+        result.PixelPerfectCrossing = viewInfo->second.PixelPerfectCrossing;
     result.Out = instance->GetOutputRG(viewId, "FinalColor");
     if (result.Out.IsValid())
         result.Physical = frame.PhysicalTexture(result.Out);
@@ -260,6 +264,7 @@ void RenderServices::BeginWorldDrawFrame()
     m_WorldBeginFrameIndex = frameIdx;
     m_WorldDrawListsBuiltFrameIndex = 0xFFFFFFFFFFFFFFFFull;
     m_WorldSubmissionCountThisFrame.store(0, std::memory_order_relaxed);
+    m_WorldWeatherWind.clear();
     // Rebuilt from this frame's submissions; a world that stops submitting
     // deforming content must stop forcing its caches to recompute.
     m_AnimatedVertexModifierWorlds.clear();

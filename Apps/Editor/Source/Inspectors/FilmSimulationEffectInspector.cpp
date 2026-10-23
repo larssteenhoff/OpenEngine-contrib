@@ -4,7 +4,9 @@
 
 #include "Components/Rendering/PostProcessEffects/FilmSimulationEffect.h"
 #include "Editor/Entities/EditorECSHelpers.h"
+#include "Inspectors/InspectorColorSwatchRow.h"
 #include "Inspectors/InspectorComponentRowHelpers.h"
+#include "Inspectors/InspectorComponentSection.h"
 #include "Inspectors/InspectorDragHelpers.h"
 #include "UI/Controls/Foldout.h"
 #include "UI/StyleProperties.h"
@@ -27,8 +29,6 @@ namespace
 using Film = Components::FilmSimulationEffect;
 
 constexpr float kMaxHalationTintIntensity = 4.0f;
-constexpr float kSwatchSize = 20.0f;
-constexpr uint32_t kSwatchBorderColor = 0xFF555555u;
 
 void TintToPickerState(const float* tint, uint32_t& outArgb, float& outIntensity)
 {
@@ -53,30 +53,6 @@ void PickerStateToTint(uint32_t argb, float intensity, float* outTint)
     outTint[2] = (static_cast<float>(argb & 0xFFu) / 255.0f) * resolvedIntensity;
 }
 
-std::string FormatTint(const float* tint)
-{
-    char buffer[48];
-    std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", tint[0], tint[1], tint[2]);
-    return buffer;
-}
-
-void StyleTintSwatch(UIElement* swatch, uint32_t argb)
-{
-    if (!swatch)
-        return;
-    swatch->Overrides()
-        .Set(Style::Width, StyleLength::Px(kSwatchSize))
-        .Set(Style::Height, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinWidth, StyleLength::Px(kSwatchSize))
-        .Set(Style::MinHeight, StyleLength::Px(kSwatchSize))
-        .Set(Style::BorderRadius, CornerRadiiTLTRBRBL{3.0f, 3.0f, 3.0f, 3.0f})
-        .Set(Style::BorderWidth, Box4{1.0f, 1.0f, 1.0f, 1.0f})
-        .Set(Style::BorderColor, BorderColorsTRBL{
-                                     kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor, kSwatchBorderColor})
-        .Set(Style::BackgroundColor, argb)
-        .Set(Style::Cursor, CursorStyle::Pointer);
-}
-
 void AddHalationTintRow(const InspectorContext& ctx, UIElement* parent, const Film* effect)
 {
     ECS::World* world = ctx.World;
@@ -85,31 +61,16 @@ void AddHalationTintRow(const InspectorContext& ctx, UIElement* parent, const Fi
     Editor::UndoRedoService* undo = ctx.Undo;
     OpenColorPickerWindowFn openPicker = ctx.OpenColorPickerWindow;
 
-    UIElement* row = InspectorUI::AddRow(parent);
-    Label* tintLabel = InspectorUI::AddLabel(row, "Halation Tint", "HDR color of the film-base scatter");
-    if (tintLabel)
-        tintLabel->AddClass("inspector-label-no-drag");
-    UIElement* fieldContainer = InspectorUI::AddFieldContainer(row);
-    fieldContainer->Overrides()
-        .Set(Style::FlexDir, FlexDirection::Row)
-        .Set(Style::AlignItems, AlignItems::Center)
-        .Set(Style::Gap, StyleLength::Px(6.0f));
-
     uint32_t argb = 0;
     float intensity = 1.0f;
     TintToPickerState(effect->HalationTint, argb, intensity);
 
-    auto swatch = std::make_unique<UIElement>();
-    UIElement* swatchRaw = swatch.get();
-    StyleTintSwatch(swatchRaw, argb);
-    fieldContainer->AddChild(std::move(swatch));
-
-    auto valueLabel = std::make_unique<Label>();
-    valueLabel->AddClass("inspector-text");
-    valueLabel->SetText(FormatTint(effect->HalationTint));
-    valueLabel->Overrides().Set(Style::Cursor, CursorStyle::Pointer);
-    Label* valueLabelRaw = valueLabel.get();
-    fieldContainer->AddChild(std::move(valueLabel));
+    const InspectorUI::ColorSwatchRow swatchRow = InspectorUI::AddColorSwatchRow(
+        parent, "Halation Tint", "HDR color of the film-base scatter",
+        argb,
+        InspectorUI::FormatColorRgb(effect->HalationTint[0], effect->HalationTint[1], effect->HalationTint[2]));
+    UIElement* swatchRaw = swatchRow.Swatch;
+    Label* valueLabelRaw = swatchRow.Value;
 
     // The picker's callbacks outlive an inspector rebuild: resolve the row through weak
     // refs instead of holding the freed widgets.
@@ -124,8 +85,8 @@ void AddHalationTintRow(const InspectorContext& ctx, UIElement* parent, const Fi
         uint32_t nextArgb = 0;
         float nextIntensity = 1.0f;
         TintToPickerState(film->HalationTint, nextArgb, nextIntensity);
-        StyleTintSwatch(swatch, nextArgb);
-        valueLabel->SetText(FormatTint(film->HalationTint));
+        InspectorUI::SetColorSwatchColor(swatch, nextArgb);
+        valueLabel->SetText(InspectorUI::FormatColorRgb(film->HalationTint[0], film->HalationTint[1], film->HalationTint[2]));
     };
 
     auto clickHandler = [world, entity, notifications, undo, openPicker, updateUI](UIEvent& event)
@@ -291,10 +252,8 @@ UIElement* AddFilmSection(const InspectorContext& ctx,
                           const char* tooltip,
                           Setter setter)
 {
-    auto foldout = std::make_unique<Foldout>();
-    foldout->SetTitle(title);
-    foldout->AddClass("rp-foldout");
-    foldout->SetExpanded(expanded);
+    Foldout* foldout = InspectorUI::AddComponentSection(
+        ctx.Parent, std::string("FilmSimulation/") + title, title, expanded);
     UIElement* content = foldout->GetContentContainer();
 
     if (UIElement* header = foldout->GetHeader())
@@ -323,7 +282,6 @@ UIElement* AddFilmSection(const InspectorContext& ctx,
         header->InsertChild(0, std::move(dot));
     }
 
-    ctx.Parent->AddChild(std::move(foldout));
     return content;
 }
 } // namespace

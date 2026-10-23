@@ -1,4 +1,5 @@
 #include "Platform/Display.h"
+#include "Platform/Environment.h"
 #include "Platform/Window.h"
 #include "Logger/Logger.h"
 #include <GLFW/glfw3.h>
@@ -230,7 +231,7 @@ void ApplyMacEdrCapabilities(MonitorInfo& info, float currentEdr, float potentia
 // enumerated monitor, regardless of how it was discovered.
 void ApplyForcedHdrAndDiagnostics(MonitorInfo& info)
 {
-    if (HasEnv("GE_FORCE_HDR_DISPLAY"))
+    if (EnvironmentSwitchEnabled("GE_FORCE_HDR_DISPLAY", false))
     {
         info.hdrAvailable = true;
         info.hdrActive = true;
@@ -329,7 +330,7 @@ std::vector<MonitorInfo> EnumerateMonitorsFromGlfw()
 #endif
 
         // GLFW does not expose HDR/EDID metadata. Backends fill precise support from swapchain APIs.
-        info.supportsScRGB = HasEnv("GE_FORCE_SCRGB_HDR");
+        info.supportsScRGB = EnvironmentSwitchEnabled("GE_FORCE_SCRGB_HDR", false);
 
 #if defined(__APPLE__)
         // macOS exposes no SDR-white-in-nits API, only EDR headroom multipliers via
@@ -375,7 +376,7 @@ std::vector<MonitorInfo> EnumerateMonitorsFromNSScreen()
         info.workWidth = s.workWidth;
         info.workHeight = s.workHeight;
         info.refreshRate = s.refreshRate;
-        info.supportsScRGB = HasEnv("GE_FORCE_SCRGB_HDR");
+        info.supportsScRGB = EnvironmentSwitchEnabled("GE_FORCE_SCRGB_HDR", false);
         ApplyMacEdrCapabilities(info, s.currentEdr, s.potentialEdr);
         ApplyForcedHdrAndDiagnostics(info);
         result.push_back(std::move(info));

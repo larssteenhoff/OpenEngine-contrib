@@ -1,6 +1,7 @@
 #include "ScriptEditor/SourceLocationOpener.h"
 
 #include "Editor/Settings/ScriptEditorSettings.h"
+#include "EditorPanelIds.h"
 #include "EditorPanelManager.h"
 #include "ExternalScriptEditorLauncher.h"
 #include "Panels/ScriptEditorPanel.h"
@@ -45,7 +46,7 @@ bool SourceLocationOpener::OpenInScriptEditor(const SourceLocation& location) co
     if (!m_ScriptEditor)
         return false;
 
-    m_PanelManager->ShowOrActivateScriptEditorPanel(m_Window);
+    m_PanelManager->ShowOrActivatePanel(m_Window, EditorPanelIds::ScriptEditor);
     m_ScriptEditor->OpenScript(location.Path);
     if (location.Line > 0)
         m_ScriptEditor->ScrollToLine(location.Line, {}, location.Column);

@@ -36,6 +36,9 @@ target_include_directories(Scripting
 	PRIVATE
 	    Source
 	    ${CMAKE_BINARY_DIR}/generated
+	    # Platform's header-only environment switch (the compile-server, hot-reload
+	    # and Editor IPC switches read through it); include path only.
+	    ${CMAKE_SOURCE_DIR}/Engine/Modules/Platform/Include
 	)
 
 # CompileServerClient prunes stale host pid files with Platform::IsProcessRunning:

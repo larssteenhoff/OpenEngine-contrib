@@ -56,9 +56,9 @@ std::size_t RunFreshQuery(World& world)
 {
     std::size_t visited = 0;
     world.Query<Read<Position>, Write<Velocity>>().Each(
-        [&visited](EntityHandle, const Position& position, Velocity& velocity)
+        [&visited](EntityHandle, const Position& position, Writable<Velocity> velocity)
         {
-            velocity.x += position.x * 0.0f;
+            velocity.Mutable().x += position.x * 0.0f;
             ++visited;
         });
     return visited;
@@ -112,7 +112,7 @@ TEST(QueryAllocationTests, RetainedQueryAllocatesNothingWithoutStructuralChange)
 
     Query<Read<Position>, Write<Velocity>> query(&world);
     std::size_t visited = 0;
-    const auto visit = [&visited](EntityHandle, const Position&, Velocity&) { ++visited; };
+    const auto visit = [&visited](EntityHandle, const Position&, Writable<Velocity>) { ++visited; };
 
     query.Each(visit);
     ASSERT_EQ(visited, static_cast<std::size_t>(kArchetypeCount));
@@ -387,9 +387,9 @@ TEST(QueryAllocationTests, ParallelAllocatesNothingAfterWarmup)
     const auto fork = [&]
     {
         query.Parallel(
-            [&visited](EntityHandle, const Position& position, Velocity& velocity)
+            [&visited](EntityHandle, const Position& position, Writable<Velocity> velocity)
             {
-                velocity.x += position.x;
+                velocity.Mutable().x += position.x;
                 visited.fetch_add(1, std::memory_order_relaxed);
             },
             kForkMinBatchSize);

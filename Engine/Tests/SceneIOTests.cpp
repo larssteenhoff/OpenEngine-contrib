@@ -1,3 +1,5 @@
+#include "PhysicsECS/Components/MovingPlatform.h"
+#include "PhysicsECS/Components/PhysicsCollider.h"
 #include "Particles/ParticleStackAuthoring.h"
 #include <gtest/gtest.h>
 
@@ -14,6 +16,7 @@
 
 #include "Components/Audio/AudioEmitter.h"
 #include "Components/Hierarchy.h"
+#include "Components/Rendering/RenderSorting.h"
 #include "Components/Name.h"
 #include "Components/Animation/AnimatedNodeRef.h"
 #include "Components/Animation/ValueCurve.h"
@@ -34,6 +37,7 @@
 #include "Components/Rendering/PostProcessEffects/VolumetricClouds.h"
 #include "Components/Rendering/PostProcessEffects/BloomEffect.h"
 #include "Components/Rendering/PostProcessEffects/ChromaticAberrationEffect.h"
+#include "Components/Rendering/PostProcessEffects/DepthPixelationEffect.h"
 #include "Components/Rendering/PostProcessEffects/ColorFilterEffect.h"
 #include "Components/Rendering/PostProcessEffects/ColorGradeEffect.h"
 #include "Components/Rendering/PostProcessEffects/ContrastAdaptiveSharpenEffect.h"
@@ -45,6 +49,8 @@
 #include "Components/Rendering/PostProcessEffects/FastBlurEffect.h"
 #include "Components/Rendering/PostProcessEffects/FilmSimulationEffect.h"
 #include "Components/Rendering/PostProcessEffects/HeatDistortionEffect.h"
+#include "Components/Rendering/PostProcessEffects/RainSettingsEffect.h"
+#include "Components/Rendering/WindVolume.h"
 #include "Components/Rendering/PostProcessEffects/HeightFogEffect.h"
 #include "Components/Rendering/PostProcessEffects/ScreenSpaceReflectionsEffect.h"
 #include "Components/Rendering/PostProcessEffects/VolumetricFogEffect.h"
@@ -55,7 +61,9 @@
 #include "Components/Rendering/SkyEnvironment.h"
 #include "Components/Rendering/WorldSectorCoord.h"
 #include "Components/RuntimeOnlyEntity.h"
+#include "Components/SceneBlueprintInstance.h"
 #include "Components/SceneEntityTag.h"
+#include "Components/SceneSubsceneInstance.h"
 #include "Components/Spline/SplineExtrude.h"
 #include "Components/Spline/SplineFence.h"
 #include "Components/Spline/SplineWall.h"
@@ -98,6 +106,7 @@
 #include <utility>
 #include <vector>
 #include "StagedTestPaths.h"
+#include "TestTempDir.h"
 
 using namespace GameEngine;
 
@@ -480,12 +489,17 @@ class FakeAssetResolver final : public Scene::ISceneAssetResolver
     bool m_MintRequiresFileOnDisk = false;
 };
 
+// The scene files of this test process, removed at exit: a concurrent ctest process running the
+// same tests writes its own.
+static const std::filesystem::path& SceneTestDirectory()
+{
+    static const TestUtils::ScopedTempDir directory{TestUtils::MakeUniqueTempDirectory("GameEngine_SceneIOTests")};
+    return directory.Path();
+}
+
 static std::filesystem::path MakeTempPath(const char* filename)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    return (dir / filename).lexically_normal();
+    return (SceneTestDirectory() / filename).lexically_normal();
 }
 
 // Staged fixture mirror root (StageTestAssets); never climbs into the source tree.
@@ -2350,6 +2364,7 @@ TEST(SceneIO, SaveThenLoad_RoundTripCameraExposure)
     c.ApertureRotation = 27.5f;
     c.AnamorphicSqueeze = 2.0f;
     c.FocusDebugMode = 1;
+    c.IncludeUIInPostProcessing = false;
     c.FocusDebugAlpha = 0.7f;
     c.ShutterTime = 0.004f;
     c.Iso = 400.0f;
@@ -2371,9 +2386,15 @@ TEST(SceneIO, SaveThenLoad_RoundTripCameraExposure)
     EXPECT_FLOAT_EQ(c2->ApertureRotation, 27.5f);
     EXPECT_FLOAT_EQ(c2->AnamorphicSqueeze, 2.0f);
     EXPECT_EQ(c2->FocusDebugMode, 1);
+    EXPECT_FALSE(c2->IncludeUIInPostProcessing);
     EXPECT_FLOAT_EQ(c2->FocusDebugAlpha, 0.7f);
     EXPECT_FLOAT_EQ(c2->ShutterTime, 0.004f);
     EXPECT_FLOAT_EQ(c2->Iso, 400.0f);
+}
+
+TEST(SceneIO, CameraIncludesGameUiInPostProcessingByDefault)
+{
+    EXPECT_TRUE(Components::Camera{}.IncludeUIInPostProcessing);
 }
 
 TEST(SceneIO, Load_CameraSensorPresetAlsoSetsSensorHeight)
@@ -3694,9 +3715,8 @@ std::string MakeAuthoredCubeLutScene(const char* lutPath)
 // GUID for it via the resolver and the component comes back bound.
 TEST(SceneIO, LoadCubeLutEffect_AuthoredRelativePath_ResolvesAgainstAssetRoot)
 {
-    const auto root = std::filesystem::temp_directory_path() / "ge_cubelut_authored";
+    const auto root = TestUtils::MakeUniqueTempDirectory("ge_cubelut_authored");
     std::error_code ec;
-    std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
     const auto scenePath = root / "main.scene";
     const auto lutAbs = (root / "demo_smh_lut.cube").lexically_normal();
@@ -3740,9 +3760,8 @@ TEST(SceneIO, LoadCubeLutEffect_AuthoredRelativePath_ResolvesAgainstAssetRoot)
 // censused, and everything else in the file loads.
 TEST(SceneIO, LoadCubeLutEffect_AuthoredPathMissing_DegradesWithResolveError)
 {
-    const auto root = std::filesystem::temp_directory_path() / "ge_cubelut_missing";
+    const auto root = TestUtils::MakeUniqueTempDirectory("ge_cubelut_missing");
     std::error_code ec;
-    std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
     const auto scenePath = root / "main.scene";
     ASSERT_TRUE(WriteFile(scenePath, MakeAuthoredCubeLutScene("assets/demo_smh_lut.cube")));
@@ -3777,9 +3796,8 @@ TEST(SceneIO, LoadCubeLutEffect_AuthoredPathMissing_DegradesWithResolveError)
 // same relative path still wins over the editor's copy.
 TEST(SceneIO, LoadFromSecondaryMount_PathRefsResolveProjectFirstThenOtherMounts)
 {
-    const auto root = std::filesystem::temp_directory_path() / "ge_mount_order_refs";
+    const auto root = TestUtils::MakeUniqueTempDirectory("ge_mount_order_refs");
     std::error_code ec;
-    std::filesystem::remove_all(root, ec);
     const auto projectRoot = root / "project";
     const auto editorRoot = root / "editor";
     std::filesystem::create_directories(projectRoot / "Luts", ec);
@@ -3853,9 +3871,8 @@ TEST(SceneIO, LoadFromSecondaryMount_PathRefsResolveProjectFirstThenOtherMounts)
 // editor-mount scene instantiates from the editor mount.
 TEST(SceneIO, LoadFromSecondaryMount_ResourcePathResolvesOnThatMount)
 {
-    const auto root = std::filesystem::temp_directory_path() / "ge_mount_order_resource";
+    const auto root = TestUtils::MakeUniqueTempDirectory("ge_mount_order_resource");
     std::error_code ec;
-    std::filesystem::remove_all(root, ec);
     const auto projectRoot = root / "project";
     const auto editorRoot = root / "editor";
     std::filesystem::create_directories(projectRoot, ec);
@@ -6281,6 +6298,66 @@ TEST(SceneIO, TerrainDebugViewAppliesWithoutSerializing)
     }
 }
 
+// A ValueCurve target the enum does not name is rejected and leaves the target as it was: the loader
+// reports the property as skipped with the schema's error, and that error names the valid targets.
+TEST(SceneIO, ValueCurveRejectsUnknownTarget)
+{
+    Scene::EnsureBuiltInSchemasRegistered();
+    const Scene::ISceneComponentSchema* schema = Scene::SceneSchemaRegistry::Find("ValueCurve");
+    ASSERT_NE(schema, nullptr);
+
+    ECS::World w;
+    const ECS::EntityHandle e = w.CreateEntity();
+    ASSERT_TRUE(e.IsValid());
+
+    const Scene::SceneLoadContext loadCtx{};
+    std::string err;
+    ASSERT_TRUE(schema->ApplyProperty(w, e, loadCtx, "target", "postProcessWeight", &err)) << err;
+
+    EXPECT_FALSE(schema->ApplyProperty(w, e, loadCtx, "target", "postProcessExposure", &err));
+    EXPECT_EQ(w.GetComponent<Components::ValueCurve>(e)->Target, Components::ValueCurveTarget::PostProcessWeight);
+    EXPECT_NE(err.find("must be one of: none, transformPositionX,"), std::string::npos) << err;
+    EXPECT_NE(err.find("postProcessWeight"), std::string::npos) << err;
+}
+
+// Every target in kValueCurveTargetEntries saves as a name that loads back to the same value, in any case.
+TEST(SceneIO, ValueCurveTargetNamesRoundTrip)
+{
+    Scene::EnsureBuiltInSchemasRegistered();
+    const Scene::ISceneComponentSchema* schema = Scene::SceneSchemaRegistry::Find("ValueCurve");
+    ASSERT_NE(schema, nullptr);
+
+    constexpr std::string_view kTargetPrefix = "ValueCurve.target = ";
+    for (const Components::ValueCurveTargetEntry& entry : Components::kValueCurveTargetEntries)
+    {
+        const Components::ValueCurveTarget target = entry.Value;
+        ECS::World w;
+        const ECS::EntityHandle saved = w.CreateEntity();
+        Components::ValueCurve curve{};
+        curve.Target = target;
+        w.AddComponentImmediate(saved, curve);
+
+        std::vector<std::string> lines;
+        schema->Serialize(w, saved, Scene::SceneSaveContext{}, lines);
+        const auto line = std::find_if(lines.begin(), lines.end(), [&](const std::string& l)
+                                       { return l.starts_with(kTargetPrefix); });
+        ASSERT_NE(line, lines.end()) << entry.Name;
+        const std::string name = line->substr(kTargetPrefix.size());
+
+        std::string upperName = name;
+        std::transform(upperName.begin(), upperName.end(), upperName.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+        for (const std::string& written : {name, upperName})
+        {
+            const ECS::EntityHandle loaded = w.CreateEntity();
+            std::string err;
+            ASSERT_TRUE(schema->ApplyProperty(w, loaded, Scene::SceneLoadContext{}, "target", written, &err))
+                << written << ": " << err;
+            EXPECT_EQ(w.GetComponent<Components::ValueCurve>(loaded)->Target, target) << written;
+        }
+    }
+}
+
 // The authored water surface height round-trips through TerrainSchema, and an unset one leaves
 // no line behind: the sentinel is the lowest float, which the formatter would not reproduce.
 TEST(SceneIO, SaveThenLoad_RoundTripTerrainSeaLevel)
@@ -7889,7 +7966,7 @@ TEST(SceneIO, Validate_CycleFailsLoad)
 
 TEST(SceneIO, BlueprintInstance_InstantiatesWithPrefixAndOverrides)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     const auto bpPath = (dir / "bp.blueprint").lexically_normal();
     const auto scenePath = (dir / "bp_scene.scene").lexically_normal();
 
@@ -7926,7 +8003,7 @@ TEST(SceneIO, BlueprintInstance_InstantiatesWithPrefixAndOverrides)
 
 TEST(SceneIO, Save_PreservesBlueprintInstanceAndRemovalDirectives)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     const auto bpPath = (dir / "bp_remove.blueprint").lexically_normal();
     const auto scenePath = (dir / "bp_remove_scene.scene").lexically_normal();
     const auto outPath = (dir / "bp_remove_scene_out.scene").lexically_normal();
@@ -8031,7 +8108,7 @@ TEST(SceneIO, SaveThenLoad_NavigationSourcePolicyOnEntitiesAndBlueprints)
 
 TEST(SceneIO, Save_PreservesSubsceneInstanceAndDoesNotFlatten)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     const auto chunkPath = (dir / "chunk_a.scene").lexically_normal();
     const auto scenePath = (dir / "subscene_main.scene").lexically_normal();
     const auto outPath = (dir / "subscene_main_out.scene").lexically_normal();
@@ -8064,6 +8141,85 @@ TEST(SceneIO, Save_PreservesSubsceneInstanceAndDoesNotFlatten)
     EXPECT_NE(saved.find("[subscene id=\"area\""), std::string::npos);
     EXPECT_NE(saved.find("offset = (100, 0, 0)"), std::string::npos);
     EXPECT_EQ(saved.find("[entity id=\"area.root\""), std::string::npos);
+}
+
+// The subscene root keeps its source as a GUID, not as the authored text. An
+// authored spelling that differs from GUID::ToString (upper case here) must
+// still name the same [resource] on save: one resource line, reused id.
+TEST(SceneIO, Save_SubsceneResourceGuidKeepsOneResourceLine)
+{
+    const auto dir = SceneTestDirectory();
+    const auto chunkPath = (dir / "chunk_guid.scene").lexically_normal();
+    const auto scenePath = (dir / "subscene_guid_main.scene").lexically_normal();
+    const auto outPath = (dir / "subscene_guid_main_out.scene").lexically_normal();
+
+    ASSERT_TRUE(WriteFile(chunkPath,
+                          "[scene name=\"Chunk\" version=1]\n"
+                          "\n"
+                          "[entity id=\"root\"]\n"
+                          "Name.value = \"ChunkRoot\"\n"));
+
+    const std::string authoredGuid = "0000AB12-0000-0000-0000-00000000C0DE";
+    ASSERT_TRUE(WriteFile(scenePath,
+                          "[scene name=\"Main\" version=1]\n"
+                          "[resource id=\"chunk\" path=\"chunk_guid.scene\" guid=\"" + authoredGuid + "\"]\n"
+                          "\n"
+                          "[subscene id=\"area\" source=\"chunk\"]\n"
+                          "offset = (1, 2, 3)\n"));
+
+    ECS::World world;
+    ASSERT_TRUE(Scene::LoadSceneFromFile(world, scenePath, Scene::LoadOptions{Scene::LoadMode::Replace}));
+
+    const ECS::EntityHandle root = FindByTag(world, "area");
+    ASSERT_TRUE(root.IsValid());
+    const auto* instance = world.GetComponent<Components::SceneSubsceneInstance>(root);
+    ASSERT_NE(instance, nullptr);
+    EXPECT_EQ(instance->sourceGuid, GUID(authoredGuid));
+    EXPECT_TRUE(instance->hasOffset);
+    EXPECT_FLOAT_EQ(instance->offset.x, 1.0f);
+    EXPECT_FLOAT_EQ(instance->offset.y, 2.0f);
+    EXPECT_FLOAT_EQ(instance->offset.z, 3.0f);
+
+    Scene::SaveOptions so{};
+    so.preserveSubscenes = true;
+    ASSERT_TRUE(Scene::SaveSceneToFile(world, outPath, so));
+
+    std::string saved;
+    ASSERT_TRUE(ReadFile(outPath, saved));
+    const size_t firstResource = saved.find("[resource ");
+    ASSERT_NE(firstResource, std::string::npos);
+    EXPECT_EQ(saved.find("[resource ", firstResource + 1), std::string::npos) << saved;
+
+    // Saving to another file renumbers resource ids, so read the id back from
+    // the one resource line and require the subscene to name it.
+    const std::string idKey = "id=\"";
+    const size_t idStart = saved.find(idKey, firstResource);
+    ASSERT_NE(idStart, std::string::npos) << saved;
+    const size_t idEnd = saved.find('"', idStart + idKey.size());
+    ASSERT_NE(idEnd, std::string::npos) << saved;
+    const std::string resourceId = saved.substr(idStart + idKey.size(), idEnd - idStart - idKey.size());
+    EXPECT_NE(saved.find("[subscene id=\"area\" source=\"" + resourceId + "\"]"), std::string::npos) << saved;
+}
+
+// The scene instance roots hold their source as a GUID. Reflection must name it an asset GUID
+// and mark it read-only, so the default inspector shows the GUID text instead of a byte count
+// and neither the inspector nor set_component edits a value SceneIO owns.
+TEST(SceneIO, SceneInstanceSourceGuidReflectsAsReadOnlyAssetGuid)
+{
+    const ECS::ComponentTypeId instanceTypes[] = {
+        ECS::GetComponentTypeId<Components::SceneBlueprintInstance>(),
+        ECS::GetComponentTypeId<Components::SceneSubsceneInstance>(),
+    };
+    for (const ECS::ComponentTypeId typeId : instanceTypes)
+    {
+        const std::span<const ECS::FieldInfo> fields = ECS::ComponentFieldRegistry::Get(typeId);
+        const auto sourceGuid = std::find_if(fields.begin(), fields.end(),
+                                             [](const ECS::FieldInfo& f) { return f.Name == "sourceGuid"; });
+        ASSERT_NE(sourceGuid, fields.end()) << ECS::ComponentFieldRegistry::GetCanonicalName(typeId);
+        EXPECT_EQ(sourceGuid->Type, ECS::FieldTypeId::AssetGuid);
+        EXPECT_EQ(sourceGuid->Size, sizeof(GUID));
+        EXPECT_TRUE(ECS::HasAnyFlag(sourceGuid->Flags, ECS::FieldFlags::ReadOnly));
+    }
 }
 
 TEST(SceneIO, Save_PreservesCommentBlocksBeforeSections)
@@ -8128,7 +8284,7 @@ TEST(SceneIO, Save_PreservesCommentBlocksBeforeSections)
 
 TEST(SceneIO, Save_PreservesEmbedBlocksOnOverwrite)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     const auto scenePath = (dir / "embed_preserve.scene").lexically_normal();
 
     const std::string scene =
@@ -8718,7 +8874,7 @@ TEST(SceneIO, CustomComponentSchema_LoadAndSaveRoundTrip)
 
 TEST(SceneIO, Include_MergesResourcesAndEnablesBlueprintUse)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
 
@@ -8756,7 +8912,7 @@ TEST(SceneIO, Include_MergesResourcesAndEnablesBlueprintUse)
 
 TEST(SceneIO, AssetDependencyExtractor_FindsSceneAndBlueprintPathRefs)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
 
@@ -8820,7 +8976,7 @@ TEST(SceneIO, ValidateFails_OnDanglingResourceReference)
 
 TEST(SceneIO, ValidateFails_WhenIncludeContainsEntities)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
 
@@ -8882,7 +9038,7 @@ TEST(SceneIO, ParseFails_WhenSubsceneEnabledIsNotBool)
 
 TEST(SceneIO, BlueprintFileMustContainEntities)
 {
-    const auto dir = std::filesystem::temp_directory_path() / "GameEngine_SceneIOTests";
+    const auto dir = SceneTestDirectory();
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
 
@@ -9057,9 +9213,8 @@ struct HealHarness
 
     HealHarness(const char* tag)
     {
-        projectRoot = std::filesystem::temp_directory_path() / (std::string("ge_heal_") + tag);
+        projectRoot = TestUtils::MakeUniqueTempDirectory(std::string("ge_heal_") + tag);
         std::error_code ec;
-        std::filesystem::remove_all(projectRoot, ec);
         std::filesystem::create_directories(projectRoot / "Materials", ec);
         scenePath = projectRoot / "main.scene";
         resolver.SetRoot(projectRoot);
@@ -11118,3 +11273,250 @@ TEST(SceneIO, CameraExposureCompensationCurveDropsNonFiniteKeys)
     EXPECT_EQ(flat->AutoExposureCompensationCurve.KeyCount, 0u);
 }
 
+TEST(SceneIO, RenderSortingRoundTripsLayerOrderAndGroupOnMeshArtwork)
+{
+    const auto path = MakeTempPath("render-sorting.scene");
+    ASSERT_TRUE(WriteFile(path,
+        "[scene name=\"Artwork\" version=1]\n"
+        "[entity id=\"artwork\"]\n"
+        "Transform.position = (0, 0, 7)\n"
+        "RenderSorting.Layer = 1234\n"
+        "RenderSorting.OrderInLayer = -27\n"
+        "RenderSorting.GroupChildren = true\n"));
+    ECS::World world;
+    ASSERT_TRUE(Scene::LoadSceneFromFile(world, path, Scene::LoadOptions{Scene::LoadMode::Replace}));
+    auto entity = FindByTag(world, "artwork");
+    const auto* sorting = world.GetComponent<Components::RenderSorting>(entity);
+    ASSERT_NE(sorting, nullptr);
+    EXPECT_EQ(sorting->Layer, 1234);
+    EXPECT_EQ(sorting->OrderInLayer, -27);
+    EXPECT_TRUE(sorting->GroupChildren);
+    ASSERT_TRUE(Scene::SaveSceneToFile(world, path, Scene::SaveOptions{}));
+    ECS::World loaded;
+    ASSERT_TRUE(Scene::LoadSceneFromFile(loaded, path, Scene::LoadOptions{Scene::LoadMode::Replace}));
+    sorting = loaded.GetComponent<Components::RenderSorting>(FindByTag(loaded, "artwork"));
+    ASSERT_NE(sorting, nullptr);
+    EXPECT_EQ(sorting->Layer, 1234);
+    EXPECT_EQ(sorting->OrderInLayer, -27);
+    EXPECT_TRUE(sorting->GroupChildren);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+
+TEST(SceneIO, SaveThenLoad_RoundTripColliderPhysicsMaterial)
+{
+    const auto scenePath = MakeTempPath("collider_material.scene");
+    const GUID materialGuid = GUID::Generate();
+    ECS::World original;
+    const auto entity = original.CreateEntity();
+    original.AddComponentImmediate(entity, MakeSceneTag("surface"));
+    original.AddComponentImmediate(entity, Components::Transform{});
+    Components::PhysicsCollider collider{};
+    collider.materialAsset.Set(materialGuid);
+    original.AddComponentImmediate(entity, collider);
+    ASSERT_TRUE(Scene::SaveSceneToFile(original, scenePath, Scene::SaveOptions{}));
+
+    ECS::World loaded;
+    ASSERT_TRUE(Scene::LoadSceneFromFile(loaded, scenePath, Scene::LoadOptions{Scene::LoadMode::Replace}));
+    const auto loadedEntity = FindByTag(loaded, "surface");
+    ASSERT_TRUE(loadedEntity.IsValid());
+    const auto* restored = loaded.GetComponent<Components::PhysicsCollider>(loadedEntity);
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->materialAsset.ToGuid(), materialGuid);
+}
+
+TEST(SceneIO, RainSettingsRoundTripAndClamp)
+{
+    const auto scenePath = MakeTempPath("rain_settings.scene");
+    ASSERT_TRUE(WriteFile(scenePath,
+        "[scene name=\"Weather\" version=1]\n"
+        "[entity id=\"rain\"]\n"
+        "RainSettingsEffect.waterDropSize = 1.7\n"
+        "RainSettingsEffect.fallingRainSizeOffset = -0.3\n"
+        "RainSettingsEffect.waterRippleSpeed = 2.5\n"
+        "WindVolume.rainAmount = 0.25\n"));
+    ECS::World world;
+    ASSERT_TRUE(Scene::LoadSceneFromFile(world, scenePath, Scene::LoadOptions{Scene::LoadMode::Replace}));
+    const auto entity = FindByTag(world, "rain");
+    ASSERT_NE(world.GetComponent<Components::RainSettingsEffect>(entity), nullptr);
+    ASSERT_NE(world.GetComponent<Components::WindVolume>(entity), nullptr);
+    const auto saved = MakeTempPath("rain_settings_saved.scene");
+    ASSERT_TRUE(Scene::SaveSceneToFile(world, saved));
+    ECS::World loaded;
+    ASSERT_TRUE(Scene::LoadSceneFromFile(loaded, saved, Scene::LoadOptions{Scene::LoadMode::Replace}));
+    const auto e = FindByTag(loaded, "rain");
+    const auto* rain = loaded.GetComponent<Components::RainSettingsEffect>(e);
+    ASSERT_NE(rain, nullptr);
+    EXPECT_FLOAT_EQ(rain->WaterDropSize, 1.7f);
+    EXPECT_FLOAT_EQ(rain->FallingRainSizeOffset, -0.3f);
+    EXPECT_FLOAT_EQ(rain->WaterRippleSpeed, 2.5f);
+    const auto* wind = loaded.GetComponent<Components::WindVolume>(e);
+    ASSERT_NE(wind, nullptr);
+    EXPECT_FLOAT_EQ(wind->RainAmount, 0.25f);
+
+    ASSERT_TRUE(WriteFile(scenePath,
+        "[scene name=\"Weather\" version=1]\n"
+        "[entity id=\"rain\"]\n"
+        "RainSettingsEffect.waterDropSize = -8\n"
+        "RainSettingsEffect.fallingRainSizeOffset = 8\n"
+        "RainSettingsEffect.waterRippleSpeed = 8\n"
+        "WindVolume.rainAmount = -8\n"));
+    ASSERT_TRUE(Scene::LoadSceneFromFile(loaded, scenePath, Scene::LoadOptions{Scene::LoadMode::Replace}));
+    const auto c = FindByTag(loaded, "rain");
+    const auto* clamped = loaded.GetComponent<Components::RainSettingsEffect>(c);
+    ASSERT_NE(clamped, nullptr);
+    EXPECT_FLOAT_EQ(clamped->WaterDropSize, 0.25f);
+    EXPECT_FLOAT_EQ(clamped->FallingRainSizeOffset, 1.75f);
+    EXPECT_FLOAT_EQ(clamped->WaterRippleSpeed, 4.0f);
+    ASSERT_NE(loaded.GetComponent<Components::WindVolume>(c), nullptr);
+    EXPECT_FLOAT_EQ(loaded.GetComponent<Components::WindVolume>(c)->RainAmount, 0.0f);
+}
+
+TEST(SceneIO, DepthPixelationEffectRoundTrip)
+{
+    Components::DepthPixelationEffect effect{};
+    effect.Enabled = false;
+    effect.AutoBandResolution = 1;
+    effect.AutoFarPixelSize = 2;
+    effect.SimpleScreenSpace = 1;
+    effect.StabilizationMode = 2;
+    effect.Intensity = 0.75f;
+    effect.NearEnd = 12.0f;
+    effect.MiddleEnd = 65.0f;
+    effect.NearResolution = 720.0f;
+    effect.MiddleResolution = 240.0f;
+    effect.FarResolution = 120.0f;
+    effect.SkyResolution = 60.0f;
+    effect.ResolutionMode = 1;
+    effect.NearDivisor = 16;
+    effect.MiddleDivisor = 8;
+    effect.FarDivisor = 4;
+    effect.SkyDivisor = 2;
+    effect.BandCount = 10;
+    effect.Band3End = 103.0f;
+    effect.Band4End = 163.0f;
+    effect.Band5End = 243.0f;
+    effect.Band6End = 363.0f;
+    effect.Band7End = 523.0f;
+    effect.Band8End = 723.0f;
+    effect.Band9End = 1003.0f;
+    effect.Band4Resolution = 93.0f;
+    effect.Band5Resolution = 93.0f;
+    effect.Band6Resolution = 93.0f;
+    effect.Band7Resolution = 93.0f;
+    effect.Band8Resolution = 93.0f;
+    effect.Band9Resolution = 93.0f;
+    effect.Band10Resolution = 93.0f;
+    effect.Band4Divisor = 7.0f;
+    effect.Band5Divisor = 7.0f;
+    effect.Band6Divisor = 7.0f;
+    effect.Band7Divisor = 7.0f;
+    effect.Band8Divisor = 7.0f;
+    effect.Band9Divisor = 7.0f;
+    effect.Band10Divisor = 7.0f;
+    effect.DistanceMode = 1;
+    effect.DebugRanges = 1;
+    ExpectReflectionSchemaParity("DepthPixelationEffect", effect,
+        [](const auto& a, const auto& b) {
+            EXPECT_EQ(a.Enabled, b.Enabled);
+            EXPECT_EQ(a.AutoBandResolution, b.AutoBandResolution);
+            EXPECT_EQ(a.AutoFarPixelSize, b.AutoFarPixelSize);
+            EXPECT_EQ(a.SimpleScreenSpace, b.SimpleScreenSpace);
+            EXPECT_EQ(a.StabilizationMode, b.StabilizationMode);
+            EXPECT_EQ(a.Intensity, b.Intensity);
+            EXPECT_EQ(a.NearEnd, b.NearEnd);
+            EXPECT_EQ(a.MiddleEnd, b.MiddleEnd);
+            EXPECT_EQ(a.NearResolution, b.NearResolution);
+            EXPECT_EQ(a.MiddleResolution, b.MiddleResolution);
+            EXPECT_EQ(a.FarResolution, b.FarResolution);
+            EXPECT_EQ(a.SkyResolution, b.SkyResolution);
+            EXPECT_EQ(a.ResolutionMode, b.ResolutionMode);
+            EXPECT_EQ(a.NearDivisor, b.NearDivisor);
+            EXPECT_EQ(a.MiddleDivisor, b.MiddleDivisor);
+            EXPECT_EQ(a.FarDivisor, b.FarDivisor);
+            EXPECT_EQ(a.SkyDivisor, b.SkyDivisor);
+            EXPECT_EQ(a.BandCount, b.BandCount);
+            EXPECT_EQ(a.Band3End, b.Band3End);
+            EXPECT_EQ(a.Band4End, b.Band4End);
+            EXPECT_EQ(a.Band5End, b.Band5End);
+            EXPECT_EQ(a.Band6End, b.Band6End);
+            EXPECT_EQ(a.Band7End, b.Band7End);
+            EXPECT_EQ(a.Band8End, b.Band8End);
+            EXPECT_EQ(a.Band9End, b.Band9End);
+            EXPECT_EQ(a.Band4Resolution, b.Band4Resolution);
+            EXPECT_EQ(a.Band5Resolution, b.Band5Resolution);
+            EXPECT_EQ(a.Band6Resolution, b.Band6Resolution);
+            EXPECT_EQ(a.Band7Resolution, b.Band7Resolution);
+            EXPECT_EQ(a.Band8Resolution, b.Band8Resolution);
+            EXPECT_EQ(a.Band9Resolution, b.Band9Resolution);
+            EXPECT_EQ(a.Band10Resolution, b.Band10Resolution);
+            EXPECT_EQ(a.Band4Divisor, b.Band4Divisor);
+            EXPECT_EQ(a.Band5Divisor, b.Band5Divisor);
+            EXPECT_EQ(a.Band6Divisor, b.Band6Divisor);
+            EXPECT_EQ(a.Band7Divisor, b.Band7Divisor);
+            EXPECT_EQ(a.Band8Divisor, b.Band8Divisor);
+            EXPECT_EQ(a.Band9Divisor, b.Band9Divisor);
+            EXPECT_EQ(a.Band10Divisor, b.Band10Divisor);
+            EXPECT_EQ(a.DistanceMode, b.DistanceMode);
+            EXPECT_EQ(a.DebugRanges, b.DebugRanges);
+        });
+}
+
+TEST(SceneIO, SaveThenLoad_RoundTripMovingPlatform)
+{
+    const auto scenePath = MakeTempPath("moving_platform.scene");
+
+    ECS::World w1;
+    const ECS::EntityHandle path = w1.CreateEntity();
+    ASSERT_TRUE(path.IsValid());
+    w1.AddComponentImmediate(path, Components::SceneEntityTag{{'p', 'a', 't', 'h', '\0'}});
+
+    const ECS::EntityHandle deck = w1.CreateEntity();
+    ASSERT_TRUE(deck.IsValid());
+    w1.AddComponentImmediate(deck, Components::SceneEntityTag{{'d', 'e', 'c', 'k', '\0'}});
+    Components::MovingPlatform mp{};
+    mp.pathMode = Components::PlatformPathMode::Loop;
+    mp.path = path;
+    mp.speed = 3.5f;
+    mp.endpointPause = 0.75f;
+    // Runtime state: deliberately non-default, and deliberately NOT expected back.
+    mp.distance = 42.0f;
+    mp.direction = -1;
+    mp.finished = true;
+    w1.AddComponentImmediate(deck, mp);
+
+    ASSERT_TRUE(Scene::SaveSceneToFile(w1, scenePath, Scene::SaveOptions{}));
+
+    // The mode is stored by name, so a scene diff stays readable and renumbering
+    // the enum cannot silently repoint an authored platform.
+    std::ifstream in(scenePath);
+    ASSERT_TRUE(in.is_open());
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    EXPECT_NE(buffer.str().find("MovingPlatform.pathMode = Loop"), std::string::npos);
+
+    ECS::World w2;
+    ASSERT_TRUE(Scene::LoadSceneFromFile(w2, scenePath, Scene::LoadOptions{Scene::LoadMode::Replace}));
+
+    const auto deckLoaded = FindByTag(w2, "deck");
+    const auto pathLoaded = FindByTag(w2, "path");
+    ASSERT_TRUE(deckLoaded.IsValid());
+    ASSERT_TRUE(pathLoaded.IsValid());
+
+    const auto* back = w2.GetComponent<Components::MovingPlatform>(deckLoaded);
+    ASSERT_NE(back, nullptr);
+    EXPECT_FALSE(w2.HasComponent<ECS::ComponentDisabled<Components::MovingPlatform>>(deckLoaded));
+    EXPECT_EQ(back->pathMode, Components::PlatformPathMode::Loop);
+    EXPECT_FLOAT_EQ(back->speed, 3.5f);
+    EXPECT_FLOAT_EQ(back->endpointPause, 0.75f);
+
+    // The reference survives as a reference: it names the reloaded path entity,
+    // not whatever handle the old world happened to hand out.
+    EXPECT_EQ(back->path, pathLoaded);
+
+    // Where the platform had got to is not authoring data, so it comes back at
+    // the start of its path rather than 42 m along it, finished and reversed.
+    EXPECT_FLOAT_EQ(back->distance, 0.0f);
+    EXPECT_EQ(back->direction, 1);
+    EXPECT_FALSE(back->finished);
+}

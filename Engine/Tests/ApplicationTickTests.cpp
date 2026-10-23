@@ -9,13 +9,14 @@
 
 #include "Core/Application.h"
 #include "Core/Engine.h"
+#include "Platform/Environment.h"
 #include "Scripting/ScriptsConfig.h"
 
 #include "EngineLogCapture.h"
+#include "TestTempDir.h"
 
 #include <gtest/gtest.h>
 
-#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -146,8 +147,7 @@ TEST(ApplicationTick, ExitRequestedMeansNoFrameRuns)
 
 TEST(ApplicationTick, ManualTicksAdvanceOneFrameEachAndStopOnExit)
 {
-    const fs::path tempRoot =
-        fs::temp_directory_path() / "ge_application_tick_test";
+    const fs::path tempRoot = GameEngine::TestUtils::MakeUniqueTempDirectory("ge_application_tick_test");
     fs::create_directories(tempRoot / "Assets");
 
     // Scripting-free EngineCore so this Engine-only target boots without a
@@ -206,12 +206,12 @@ TEST(ApplicationTick, ManualTicksAdvanceOneFrameEachAndStopOnExit)
 // is testable in-process; the armed arm is a live check.
 TEST(ApplicationTick, StartupFrameTimingsNeedTheFrameTraceSwitch)
 {
-    const char* frameTrace = std::getenv("GE_FRAME_TRACE");
-    if (frameTrace != nullptr && *frameTrace != '\0' && std::string(frameTrace) != "0")
+    if (GameEngine::Platform::EnvironmentSwitchEnabled("GE_FRAME_TRACE", false))
         GTEST_SKIP() << "GE_FRAME_TRACE is armed in this environment; this test asserts the "
                         "unset arm";
 
-    const fs::path tempRoot = fs::temp_directory_path() / "ge_application_frame_trace_test";
+    const fs::path tempRoot =
+        GameEngine::TestUtils::MakeUniqueTempDirectory("ge_application_frame_trace_test");
     fs::create_directories(tempRoot / "Assets");
 
     GameEngine::ScriptsConfig scriptsConfig{};

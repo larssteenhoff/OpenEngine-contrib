@@ -107,6 +107,11 @@ class PlayModeManager
     // Intended to be called after the engine rendering loop is enabled.
     void ApplyEditModeSystemGating();
 
+    // Registers the play-mode fixed-id commands (UiReplayCommandIds::Play* and
+    // AssertPlayMode*) with EditorMenuRegistry. The registry keeps `this` for the
+    // process lifetime: call once, on the editor's manager.
+    void RegisterCommands();
+
   private:
     struct ManagedPlayModeCallbacks
     {
@@ -127,6 +132,11 @@ class PlayModeManager
     struct UndoHistoryStash;
 
     void SetState(PlayModeState s);
+
+    // The fixed-id commands: refuse (filling outError) a transition the state
+    // does not allow instead of doing nothing.
+    bool RunPlayEnterCommand(std::string* outError);
+    bool RunPlayTogglePauseCommand(std::string* outError);
 
     Snapshot CaptureSnapshot() const;
     bool ApplySnapshot(const Snapshot& snapshot) const;

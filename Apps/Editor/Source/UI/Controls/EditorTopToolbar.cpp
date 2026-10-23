@@ -11,7 +11,6 @@
 #include "Platform/ContextMenu.h"
 #include "UI/EditorIcons.h"
 #include "Platform/Window.h"
-#include "PlayMode/AudioToggleButton.h"
 #include "PlayMode/PlayButtonMenu.h"
 #include "PlayMode/PlayButtonState.h"
 #include "PlayMode/PlayModeManager.h"
@@ -60,11 +59,11 @@ constexpr ToolbarButtonInfo kToolbarButtons[] = {
     {"TopToolbarRecord",         "Record",              "editor:Icons/recording_off_button.svg"},
     {"TopToolbarCenter3",        "Pause",               "editor:Icons/pause.svg"},
     {"TopToolbarCenter4",        "Play",                "editor:Icons/play.svg"},
-    {"TopToolbarAudio",          "Audio",               "editor:Icons/audio-on-speaker.svg"},
     {"TopToolbarCenter1",        "Play Fullscreen",     "editor:Icons/fullscreen.svg"},
     {"TopToolbarUndoHistory",    "Undo History",        "editor:Icons/undo.svg"},
     {"TopToolbarRight1",         "Script Editor",       "editor:Icons/log.svg"},
     {"TopToolbarNodeGraph",      "Node Graph",          "editor:Icons/node.svg"},
+    {"TopToolbarTilePalette",    "Tile Palette",        "editor:Icons/TileSet.svg"},
     {"TopToolbarMixer",          "Mixer",               "editor:Icons/mixer.svg"},
     {"TopToolbarAnimation",      "Animation",           "editor:Icons/alarm.svg"},
     {"TopToolbarTimeline",       "Timeline",            "editor:Icons/film.svg"},
@@ -283,6 +282,13 @@ void EditorTopToolbar::WireControls(UIElement* rootEl, Platform::Window* window,
             btn->RegisterEventHandler(kEventButtonClick, [fn = cb.onNodeGraphClicked](UIEvent&) { fn(); });
     }
 
+    if (auto* button = dynamic_cast<Button*>(rootEl->FindById(HashStringId(EditorPanelIds::TopToolbarTilePalette))))
+    {
+        button->SetTooltip("Tile Palette");
+        if (cb.onTilePaletteClicked)
+            button->RegisterEventHandler(kEventButtonClick, [fn = cb.onTilePaletteClicked](UIEvent&) { fn(); });
+    }
+
     // Bookmarks button
     if (auto* btn = dynamic_cast<Button*>(rootEl->FindById(HashStringId(EditorPanelIds::TopToolbarBookmarks))))
     {
@@ -338,14 +344,6 @@ void EditorTopToolbar::WireControls(UIElement* rootEl, Platform::Window* window,
         SetAudioEnabled(Editor::AudioEnabledSettings::ApplySaved(audio));
         playBtn->AddManipulator(ContextMenuManipulator::Create(
             Editor::PlayButtonMenuItems(audio, [this](bool enabled) { SetAudioEnabled(enabled); })));
-    }
-
-    // Audio toggle right of Play: the same state as the Play button menu's "Audio Enabled" row.
-    if (auto* audioBtn = dynamic_cast<Button*>(rootEl->FindById(HashStringId(EditorPanelIds::TopToolbarAudio))))
-    {
-        m_AudioToggleButton = audioBtn;
-        Editor::WireAudioToggleButton(*audioBtn, EngineCore::GetInstance().GetAudioSystem(),
-                                      [this](bool enabled) { SetAudioEnabled(enabled); });
     }
 
     // Save scene (same as Editor.Global.SaveScene: save to path, or Save As modal if untitled)
@@ -583,8 +581,6 @@ void EditorTopToolbar::SetAudioEnabled(bool enabled)
 {
     if (m_PlayButton)
         m_PlayButton->SetTooltip(enabled ? "Play. Right-click for options." : "Play (audio muted). Right-click for options.");
-    if (m_AudioToggleButton)
-        Editor::ApplyAudioToggleState(*m_AudioToggleButton, enabled);
 }
 
 void EditorTopToolbar::SetRecordActive(bool active)

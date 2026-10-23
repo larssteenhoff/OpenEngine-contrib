@@ -1,3 +1,5 @@
+#include "Assets/AssetManager.h"
+#include "Assets/AssetRegistry.h"
 #include "Assets/RenderPipelineAsset.h"
 #include "Core/Application.h"
 #include "Core/Engine.h"
@@ -11,7 +13,13 @@
 #include "Scripting/ScriptsConfig.h"
 #include "TestDeviceHelper.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
+#include <future>
+#include <mutex>
+#include <thread>
 #include <fstream>
 #include <gtest/gtest.h>
 
@@ -23,6 +31,58 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// Hold the actual async pipeline factory path, delegating to the production factory.
+// The watchdog releases even a regressed blocking frame call, making failure bounded.
+class HeldPipelineLoad final
+{
+  public:
+    HeldPipelineLoad(AssetFactory inner, fs::path path)
+        : m_Inner(std::move(inner)), m_Path(std::move(path)), m_Watchdog([this]
+          {
+              std::unique_lock lock(m_Mutex);
+              if (!m_Condition.wait_for(lock, std::chrono::seconds(10), [this] { return m_Released; }))
+              {
+                  TimedOut = true;
+                  m_Released = true;
+                  m_Condition.notify_all();
+              }
+          }) {}
+    ~HeldPipelineLoad() { Release(); m_Watchdog.join(); }
+    SharedPtr<Asset> Create(const AssetMetadata& metadata)
+    {
+        std::error_code ec;
+        if (fs::equivalent(metadata.Path, m_Path, ec))
+        {
+            std::unique_lock lock(m_Mutex);
+            ++Entered;
+            m_Condition.notify_all();
+            m_Condition.wait(lock, [this] { return m_Released; });
+        }
+        return m_Inner(metadata);
+    }
+    bool WaitForEntry()
+    {
+        std::unique_lock lock(m_Mutex);
+        return m_Condition.wait_for(lock, std::chrono::seconds(5), [this] { return Entered != 0; });
+    }
+    void Release()
+    {
+        std::lock_guard lock(m_Mutex);
+        m_Released = true;
+        m_Condition.notify_all();
+    }
+    std::atomic<unsigned> Entered{0};
+    std::atomic<bool> TimedOut{false};
+
+  private:
+    AssetFactory m_Inner;
+    fs::path m_Path;
+    std::mutex m_Mutex;
+    std::condition_variable m_Condition;
+    bool m_Released = false;
+    std::thread m_Watchdog;
+};
+
 struct Counters
 {
     unsigned Constructed = 0;
@@ -59,6 +119,10 @@ class PipelineRegistrationTest : public testing::Test
     std::vector<std::string> messages;
     std::unique_ptr<TestLog::ScopedEngineLogCapture> capture;
     bool initialized = false;
+    std::vector<std::shared_ptr<HeldPipelineLoad>> heldLoads;
+    std::vector<AssetFuture> heldFutures;
+    AssetTypeRegistration originalPipelineRegistration;
+    bool factoryReplaced = false;
 
     static fs::path ResolveShader(const fs::path& path)
     {
@@ -70,7 +134,9 @@ class PipelineRegistrationTest : public testing::Test
     void SetUp() override
     {
         previousCwd = fs::current_path();
-        root = fs::temp_directory_path() / ("pipeline-registration-" + GUID::Generate().ToString());
+        // The engine canonicalizes its workspace root (macOS: /var -> /private/var); an absolute path
+        // the tests resolve must name the same registry entry as the engine's own relative lookup.
+        root = fs::weakly_canonical(fs::temp_directory_path()) / ("pipeline-registration-" + GUID::Generate().ToString());
         pipelineFile = root / "Assets/RenderPipelines/ForwardPlus.rendergraph";
         fs::create_directories(pipelineFile.parent_path());
         ScriptsConfig scripts{};
@@ -133,6 +199,20 @@ class PipelineRegistrationTest : public testing::Test
 
     void TearDown() override
     {
+        // Retain the held tasks across ASSERT exits. Release, drain, then restore
+        // the exact factory before shutting down services or the asset manager.
+        for (const auto& held : heldLoads)
+            held->Release();
+        for (auto& future : heldFutures)
+            (void)future.get();
+        heldFutures.clear();
+        if (factoryReplaced)
+        {
+            auto& registry = EngineCore::GetInstance().GetAssetManager().GetRegistry().GetTypeRegistry();
+            registry.UnregisterAssetType(AssetType::RenderPipeline);
+            EXPECT_TRUE(registry.RegisterAssetType(originalPipelineRegistration));
+            factoryReplaced = false;
+        }
         ECS::ClearActiveRegistrationModule();
         // The spine borrows the frame. Reap it before destruction, including
         // ASSERT exits; node counter references remain alive through Shutdown.
@@ -151,9 +231,33 @@ class PipelineRegistrationTest : public testing::Test
         capture.reset();
         if (initialized)
             EngineCore::GetInstance().Shutdown();
+        heldLoads.clear();
         std::error_code ec;
         fs::current_path(previousCwd, ec);
         fs::remove_all(root, ec);
+    }
+
+    std::shared_ptr<HeldPipelineLoad> Hold(const fs::path& path)
+    {
+        auto& registry = EngineCore::GetInstance().GetAssetManager().GetRegistry().GetTypeRegistry();
+        if (factoryReplaced || !registry.TryGetAssetTypeRegistration(
+                AssetType::RenderPipeline, originalPipelineRegistration))
+            return {};
+        auto held = std::make_shared<HeldPipelineLoad>(originalPipelineRegistration.factory, path);
+        auto replacement = originalPipelineRegistration;
+        replacement.factory = [held](const AssetMetadata& metadata) { return held->Create(metadata); };
+        registry.UnregisterAssetType(AssetType::RenderPipeline);
+        factoryReplaced = true; // TearDown restores even if replacement registration fails.
+        if (!registry.RegisterAssetType(replacement))
+            return {};
+        heldLoads.push_back(held);
+        return held;
+    }
+
+    AssetFuture& StartHeldLoad(const GUID& guid)
+    {
+        heldFutures.push_back(EngineCore::GetInstance().GetAssetManager().LoadAssetAsync(guid));
+        return heldFutures.back();
     }
 
     void Write(const char* passes, const char* name = "AuthoredLatePipeline")
@@ -164,8 +268,26 @@ class PipelineRegistrationTest : public testing::Test
         ASSERT_TRUE(out.good());
     }
 
-    void Build()
+    void Build(bool preload = true)
     {
+        // These older tests exercise compilation and reports, not asynchronous readiness.
+        // Pending-load tests explicitly bypass this fixture preparation.
+        if (preload)
+        {
+            auto& assets = EngineCore::GetInstance().GetAssetManager();
+            auto path = services->Spine().GetActiveRenderPipelinePath();
+            if (path.empty())
+                path = "RenderPipelines/ForwardPlus.rendergraph";
+            const auto requested = assets.ResolveAssetGuid(path);
+            if (!requested.IsNull())
+                assets.LoadAssetAsync(requested).get();
+            if (MountsEditorAssets() && fs::exists(standInFile))
+            {
+                const auto standIn = assets.ResolveAssetGuid("RenderPipelines/ForwardPlus.rendergraph", kAssetSourceAliasEditor);
+                if (!standIn.IsNull())
+                    assets.LoadAssetAsync(standIn).get();
+            }
+        }
         frame->BeginFrame(frameIndex++);
         TextureDesc color{};
         color.width = color.height = 32;
@@ -230,6 +352,134 @@ class PipelineRegistrationTest : public testing::Test
         ASSERT_TRUE(out.good());
     }
 };
+
+// Exercise an unpinned last-good pipeline as well as the initial default request.
+class PendingPipelineRegistrationTest : public PipelineRegistrationTest, public testing::WithParamInterface<bool> {};
+
+TEST_P(PendingPipelineRegistrationTest, PendingRequestKeepsDrawingThenAppliesOnce)
+{
+    ASSERT_TRUE(Register("Ready"));
+    auto& assets = EngineCore::GetInstance().GetAssetManager();
+    if (GetParam())
+    {
+        Write(R"({"id":"Ready","type":"Ready"})", "LastGood");
+        Build();
+        ASSERT_NE(services->Spine().ActiveBlueprint(), nullptr);
+        pipelineFile = root / "Assets/RenderPipelines/Replacement.rendergraph";
+        services->Spine().SetActiveRenderPipelinePath("RenderPipelines/Replacement.rendergraph");
+    }
+    Write(R"({"id":"Ready","type":"Ready"})", "AfterLoad");
+    auto held = Hold(pipelineFile);
+    ASSERT_NE(held, nullptr);
+    const auto guid = assets.ResolveAssetGuid(pipelineFile);
+    ASSERT_FALSE(guid.IsNull());
+    auto& loading = StartHeldLoad(guid);
+    ASSERT_TRUE(held->WaitForEntry());
+    const auto generation = services->Spine().ActiveBlueprintGen();
+    Build(false);
+    EXPECT_FALSE(held->TimedOut.load());
+    EXPECT_EQ(OrchestratorFailureLines(), 0u);
+    if (GetParam())
+    {
+        ASSERT_NE(services->Spine().ActiveBlueprint(), nullptr);
+        EXPECT_EQ(services->Spine().ActiveBlueprint()->pipelineName, "LastGood");
+        EXPECT_EQ(services->Spine().ActiveBlueprintGen(), generation);
+    }
+    held->Release();
+    ASSERT_NE(loading.get(), nullptr);
+    Build(false);
+    ASSERT_NE(services->Spine().ActiveBlueprint(), nullptr);
+    EXPECT_EQ(services->Spine().ActiveBlueprint()->pipelineName, "AfterLoad");
+    const auto applied = services->Spine().ActiveBlueprintGen();
+    Build(false);
+    EXPECT_EQ(services->Spine().ActiveBlueprintGen(), applied);
+    EXPECT_EQ(held->Entered.load(), 1u);
+}
+
+INSTANTIATE_TEST_SUITE_P(DefaultAndLastGood, PendingPipelineRegistrationTest, testing::Bool());
+
+TEST_F(PipelineRegistrationTest, ChangingPathWhilePendingNeverAppliesTheOldRequest)
+{
+    ASSERT_TRUE(Register("Ready"));
+    Write(R"({"id":"Ready","type":"Ready"})", "Abandoned");
+    auto& assets = EngineCore::GetInstance().GetAssetManager();
+    auto held = Hold(pipelineFile);
+    ASSERT_NE(held, nullptr);
+    const auto oldGuid = assets.ResolveAssetGuid(pipelineFile);
+    ASSERT_FALSE(oldGuid.IsNull());
+    auto& oldLoad = StartHeldLoad(oldGuid);
+    ASSERT_TRUE(held->WaitForEntry());
+    Build(false);
+    EXPECT_FALSE(held->TimedOut.load());
+    pipelineFile = root / "Assets/RenderPipelines/Selected.rendergraph";
+    Write(R"({"id":"Ready","type":"Ready"})", "Selected");
+    ASSERT_NE(assets.LoadAssetAsync(assets.ResolveAssetGuid(pipelineFile)).get(), nullptr);
+    services->Spine().SetActiveRenderPipelinePath("RenderPipelines/Selected.rendergraph");
+    Build(false);
+    ASSERT_NE(services->Spine().ActiveBlueprint(), nullptr);
+    EXPECT_EQ(services->Spine().ActiveBlueprint()->pipelineName, "Selected");
+    const auto generation = services->Spine().ActiveBlueprintGen();
+    held->Release();
+    ASSERT_NE(oldLoad.get(), nullptr);
+    Build(false);
+    EXPECT_EQ(services->Spine().ActiveBlueprint()->pipelineName, "Selected");
+    EXPECT_EQ(services->Spine().ActiveBlueprintGen(), generation);
+}
+
+TEST_F(PipelineRegistrationTest, StartupWaitsForPendingRequestedDecodeBeforeReturning)
+{
+    ASSERT_TRUE(Register("Ready"));
+    Write(R"({"id":"Ready","type":"Ready"})", "StartupPipeline");
+    auto& assets = EngineCore::GetInstance().GetAssetManager();
+    auto held = Hold(pipelineFile);
+    ASSERT_NE(held, nullptr);
+    const auto guid = assets.ResolveAssetGuid(pipelineFile);
+    ASSERT_FALSE(guid.IsNull());
+    auto& loading = StartHeldLoad(guid);
+    ASSERT_TRUE(held->WaitForEntry());
+    std::promise<void> returned;
+    auto completed = returned.get_future();
+    bool returnedBeforeRelease = false;
+    std::thread release([&]
+    {
+        returnedBeforeRelease = completed.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+        held->Release();
+    });
+    const auto result = services->Spine().ResolveActiveRenderPipelineNow("RenderPipelines/ForwardPlus.rendergraph");
+    returned.set_value();
+    release.join();
+    EXPECT_FALSE(returnedBeforeRelease);
+    EXPECT_FALSE(held->TimedOut.load());
+    EXPECT_EQ(result.Failure, PipelineResolveFailure::None) << result.Message;
+    ASSERT_NE(services->Spine().ActiveBlueprint(), nullptr);
+    EXPECT_EQ(services->Spine().ActiveBlueprint()->pipelineName, "StartupPipeline");
+    EXPECT_NE(loading.get(), nullptr);
+}
+
+TEST_F(PipelineRegistrationTest, PendingStandInDoesNotReportFailureAndRetries)
+{
+    Write(R"({"id":"Missing","type":"Missing"})");
+    auto& assets = EngineCore::GetInstance().GetAssetManager();
+    ASSERT_NE(assets.LoadAssetAsync(assets.ResolveAssetGuid(pipelineFile)).get(), nullptr);
+    auto held = Hold(standInFile);
+    ASSERT_NE(held, nullptr);
+    const auto guid = assets.ResolveAssetGuid("RenderPipelines/ForwardPlus.rendergraph", kAssetSourceAliasEditor);
+    ASSERT_FALSE(guid.IsNull());
+    auto& loading = StartHeldLoad(guid);
+    ASSERT_TRUE(held->WaitForEntry());
+    Build(false);
+    EXPECT_FALSE(held->TimedOut.load());
+    EXPECT_EQ(TestLog::CountLinesContaining(messages, "cannot stand in for"), 0u);
+    held->Release();
+    ASSERT_NE(loading.get(), nullptr);
+    Build(false);
+    ASSERT_NE(services->Spine().ActiveBlueprint(), nullptr);
+    EXPECT_EQ(services->Spine().ActiveBlueprint()->pipelineName, "EngineStandIn");
+    const auto generation = services->Spine().ActiveBlueprintGen();
+    Build(false);
+    EXPECT_EQ(services->Spine().ActiveBlueprintGen(), generation);
+    EXPECT_EQ(held->Entered.load(), 1u);
+}
 
 TEST_F(PipelineRegistrationTest, DefaultPathRecoversAfterFirstModuleRegistrationWithoutSourceEdit)
 {
@@ -524,17 +774,20 @@ TEST_F(PipelineRegistrationTest, ARefusedPipelineReportsTheStandInDrawingInItsPl
 }
 
 // A pipeline that does not load leaves the engine's pipeline standing in, and the spine's report
-// names why: the asset manager's decode error, which carries the parse error. The first frame's
-// load fails; from the next frame the load is suppressed, and the reason still names the error.
+// names why: the asset manager's decode error, which carries the parse error. Startup
+// observes the first failure; subsequent nonblocking frames report its suppressed retry.
 TEST_F(PipelineRegistrationTest, AStandInForAMalformedPipelineNamesTheParseError)
 {
     WriteAsset("RenderPipelines/Malformed.rendergraph", "{ this is not json");
     services->Spine().SetActiveRenderPipelinePath("RenderPipelines/Malformed.rendergraph");
+    const auto first = services->Spine().ResolveActiveRenderPipelineNow("RenderPipelines/Malformed.rendergraph");
+    EXPECT_EQ(first.Failure, PipelineResolveFailure::LoadFailed) << first.Message;
+    EXPECT_NE(first.Message.find("JSON parse failed"), std::string::npos) << first.Message;
     Build();
     const PipelineStandIn& standIn = services->Spine().ActivePipelineStandIn();
     ASSERT_TRUE(standIn.IsActive()) << "the views draw a stand-in and the spine does not say so";
     EXPECT_EQ(standIn.StandInName, "EngineStandIn");
-    EXPECT_EQ(standIn.Reason.rfind("The file could not be loaded (", 0), 0u) << standIn.Reason;
+    EXPECT_EQ(standIn.Reason.rfind("Its last load failed (", 0), 0u) << standIn.Reason;
     EXPECT_NE(standIn.Reason.find("JSON parse failed"), std::string::npos) << standIn.Reason;
 
     Build();

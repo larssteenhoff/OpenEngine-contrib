@@ -27,7 +27,7 @@
 using namespace GameEngine;
 
 
-// Stage 5 Block C: custom-state string-overload helpers. Mirror the
+// Custom-state string-overload helpers. Mirror the
 // case-insensitive normalization used by CSSParser for :my-state names
 // (lowercased ASCII before hashing).
 namespace
@@ -53,11 +53,8 @@ void UIElement::AddCustomState(StringId stateId)
     // A custom-state flip changes selector matches like a class change. Route
     // the dirty mark through the owning manager's aggregate custom-state
     // analysis (MarkPseudoStateScope): it raises LayoutDirty when a
-    // custom-state rule is layout-affecting — the correctness mirror of the
-    // :focus-within generalization (#211), which the old blind
-    // StyleDirty|VisualDirty relied on the signature fallback for — and fans
-    // the mark out to descendants/siblings for combinator rules, which the old
-    // self-only mark never reached. The forwarder still applies the
+    // custom-state rule is layout-affecting and fans the mark out to
+    // descendants/siblings for combinator rules. The forwarder applies the
     // CustomStateRules narrowing (via MarkPseudoStateScope) and no-ops when the
     // stylesheet has no custom-state rules at all.
     UIManagerMarkCustomStateScope(m_OwnerManager, this);
@@ -195,7 +192,7 @@ UIElement::~UIElement()
         UI::ForgetElementOwnsModuleHandler(this);
     }
 
-    // Step 2a (additive): notify the global Mount registry so any Mount
+    // Notify the global Mount registry so any Mount
     // currently targeting this element nulls its raw m_Target before the
     // pointer dangles. Constant-time hash-map probe; early-outs on
     // elements that were never targeted by a Mount.
@@ -256,15 +253,15 @@ UIElement::~UIElement()
     // destroyed. An element never outlives its manager with the owner still
     // set: ~UIManager detaches every survivor.
     if (m_OwnerManager &&
-        (m_PrimitiveRangeCap > 0 || m_ClipSlotIdx != 0xFFFFu || m_TransformSlotIdx != 0 ||
-         m_DrawOrderIdx != 0xFFFFFFFFu))
+        (m_PrimitiveRangeCap > 0 || m_ClipSlotIdx != UI::kNoClip || m_BackgroundClipSlotIdx != UI::kNoClip ||
+         m_TransformSlotIdx != 0 || m_DrawOrderIdx != kNoDrawOrderSlice))
     {
         UIManagerFreeRenderSlots(m_OwnerManager, this);
     }
 
-    // Stage 5 Block A: tombstone any dirty-queue entries pointing at this
-    // element + erase any m_FocusWithinChain entry. m_InQueueFlags now
-    // includes the InFocusChain bit (set when RebuildFocusWithinChain
+    // Tombstone any dirty-queue entries pointing at this element + erase
+    // any m_FocusWithinChain entry. m_InQueueFlags includes the
+    // InFocusChain bit (set when RebuildFocusWithinChain
     // adds the element to m_FocusWithinChain), so this single check
     // covers both queue and focus-chain membership; flags == 0 skips the
     // call entirely.
@@ -586,7 +583,7 @@ void UIElement::ReplaceStylesheetBlock(const std::vector<const Stylesheet*>& old
     // Prepare insertion list: dedupe within the new block AND against
     // survivors outside the removed block (shared @imports whose entry is
     // owned by another attached style would otherwise duplicate at a
-    // shifted cascade position — C-10; see the manager-side variant).
+    // shifted cascade position; see the manager-side variant).
     std::unordered_set<const Stylesheet*> surviving;
     surviving.reserve(replacement.size());
     for (const auto& h : replacement)
@@ -706,7 +703,7 @@ void UIElement::AddChild(std::unique_ptr<UIElement> child) {
     if (m_OwnerManager) child->SetOwnerManager(m_OwnerManager);
     // A newly attached subtree must have its styles/layout computed at least once.
     child->MarkDirtySubtree(StyleDirty | LayoutDirty | VisualDirty | ChildrenDirty);
-    // Cascade-memoization Phase 2: parent/ancestor context changed for the
+    // Parent/ancestor context changed for the
     // newly attached subtree — descendant selectors (`.foo .bar`) targeting
     // the new ancestors may now match (or stop matching). Invalidate the
     // child subtree's rule cache.
@@ -752,7 +749,7 @@ void UIElement::InsertChild(size_t index, std::unique_ptr<UIElement> child)
     if (m_OwnerManager)
         child->SetOwnerManager(m_OwnerManager);
     child->MarkDirtySubtree(StyleDirty | LayoutDirty | VisualDirty | ChildrenDirty);
-    // Cascade-memoization Phase 2: same as AddChild — new ancestor context.
+    // Same as AddChild — new ancestor context.
     child->InvalidateRuleCacheSubtree();
     m_Children.insert(m_Children.begin() + static_cast<ptrdiff_t>(index), std::move(child));
     raw->NoteDfsParentChanged();
@@ -949,12 +946,12 @@ void UIElement::RemoveChildImpl(UIElement* child) {
         const UIElement& removed = **it;
         const std::type_info& removedType = typeid(removed);
 
-        // Step 2b: explicitly detach the child's Yoga node from this
+        // Explicitly detach the child's Yoga node from this
         // element's Yoga tree before the unique_ptr destructor runs.
         // Without this, the orphaned Yoga child stays attached to the
-        // parent until the next GC reaps it — and any cascade / solve
-        // pass that runs in between iterates the dead child.
-        // Idempotent against the existing GC reap.
+        // parent until the next Yoga child-list sync drops it — and any
+        // cascade / solve pass that runs in between iterates the dead child.
+        // Idempotent against that sync.
         UIElementDetachYogaChild(this, it->get());
         const bool removedSubtreeHadOverlay = it->get() && it->get()->m_HasOverlayInSubtree;
         m_Children.erase(it);
@@ -1107,7 +1104,7 @@ std::unique_ptr<UIElement> UIElement::TakeChild(UIElement* child)
         m_OwnerManager->ClearHoverForSubtree(it->get());
 
     std::unique_ptr<UIElement> out = std::move(*it);
-    // Step 2b followup: detach the Yoga node before clearing UIElement
+    // Detach the Yoga node before clearing UIElement
     // parent. Symmetric with RemoveChild — the moved subtree is alive
     // but no longer this parent's child, so its YGNode shouldn't stay
     // attached to this parent's Yoga node. The new parent's AddChild
@@ -1307,7 +1304,7 @@ void UIAttributeAccess::SetAuthoredAttribute(UIElement& el, std::string_view nam
     std::string key(name);
     NormalizeAttrNameInPlace(key);
     el.m_Attributes[std::move(key)] = std::string(value);
-    // P4 (C-10): [attr] selectors match against these values, and the
+    // [attr] selectors match against these values, and the
     // structural rule cache bakes the match result — without invalidation
     // the re-cascade reuses the stale rule set and attribute-driven rules
     // never re-match. Subtree because descendant chains ([a] .x) exist.
@@ -1326,7 +1323,7 @@ void UIAttributeAccess::SetSelectorAttribute(UIElement& el, std::string_view nam
     std::string key(name);
     NormalizeAttrNameInPlace(key);
     el.m_Attributes[std::move(key)] = std::string(value);
-    // P4 (C-10): see SetAuthoredAttribute — cached structural matches bake
+    // See SetAuthoredAttribute — cached structural matches bake
     // the attribute state and must be rebuilt.
     el.InvalidateRuleCacheSubtree();
     if (markDirty)

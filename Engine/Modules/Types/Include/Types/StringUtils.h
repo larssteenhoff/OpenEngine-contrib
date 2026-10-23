@@ -59,11 +59,18 @@ inline std::string FormatMebibytes(unsigned long long bytes)
     return text;
 }
 
+// `c` with A-Z folded to a-z; every other byte is unchanged, whatever the C locale.
+// ToLowerAscii and the case-insensitive compares fold through this, so the prefix, suffix and
+// equality compares are constexpr.
+constexpr char ToLowerAsciiChar(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
 inline std::string ToLowerAscii(std::string_view sv)
 {
     std::string s(sv);
-    std::transform(s.begin(), s.end(), s.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(s.begin(), s.end(), s.begin(), ToLowerAsciiChar);
     return s;
 }
 
@@ -74,44 +81,41 @@ inline bool ContainsIgnoreCase(std::string_view haystack, std::string_view needl
         return true;
     if (needle.size() > haystack.size())
         return false;
-    auto toLower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
     auto it = std::search(haystack.begin(), haystack.end(),
                           needle.begin(), needle.end(),
-                          [&](char a, char b) { return toLower(a) == toLower(b); });
+                          [](char a, char b) { return ToLowerAsciiChar(a) == ToLowerAsciiChar(b); });
     return it != haystack.end();
 }
 
 // Case-insensitive prefix check.
-inline bool StartsWithIgnoreCase(std::string_view haystack, std::string_view prefix)
+constexpr bool StartsWithIgnoreCase(std::string_view haystack, std::string_view prefix)
 {
     if (prefix.size() > haystack.size())
         return false;
     for (size_t i = 0; i < prefix.size(); ++i)
     {
-        if (std::tolower(static_cast<unsigned char>(haystack[i])) !=
-            std::tolower(static_cast<unsigned char>(prefix[i])))
+        if (ToLowerAsciiChar(haystack[i]) != ToLowerAsciiChar(prefix[i]))
             return false;
     }
     return true;
 }
 
 // Case-insensitive suffix check.
-inline bool EndsWithIgnoreCase(std::string_view haystack, std::string_view suffix)
+constexpr bool EndsWithIgnoreCase(std::string_view haystack, std::string_view suffix)
 {
     if (suffix.size() > haystack.size())
         return false;
     const size_t off = haystack.size() - suffix.size();
     for (size_t i = 0; i < suffix.size(); ++i)
     {
-        if (std::tolower(static_cast<unsigned char>(haystack[off + i])) !=
-            std::tolower(static_cast<unsigned char>(suffix[i])))
+        if (ToLowerAsciiChar(haystack[off + i]) != ToLowerAsciiChar(suffix[i]))
             return false;
     }
     return true;
 }
 
 // Case-insensitive equality.
-inline bool EqualsIgnoreCase(std::string_view a, std::string_view b)
+constexpr bool EqualsIgnoreCase(std::string_view a, std::string_view b)
 {
     return a.size() == b.size() && StartsWithIgnoreCase(a, b);
 }
@@ -149,6 +153,18 @@ inline std::string_view TrimWhitespaceView(std::string_view s)
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
         s.remove_suffix(1);
     return s;
+}
+
+// Copies `value` into a fixed char array, truncated so the array always ends in a terminator,
+// and zero-fills every byte after the copied text.
+template <std::size_t Capacity>
+void CopyToFixedString(char (&target)[Capacity], std::string_view value)
+{
+    static_assert(Capacity > 0, "a fixed string needs room for its terminator");
+    const std::size_t count = std::min(value.size(), Capacity - 1);
+    if (count > 0)
+        std::memcpy(target, value.data(), count);
+    std::memset(target + count, 0, Capacity - count);
 }
 
 inline std::string ToUpperSnakeCase(const std::string& name)

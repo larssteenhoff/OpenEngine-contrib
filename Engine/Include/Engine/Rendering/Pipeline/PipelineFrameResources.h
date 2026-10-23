@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Rendering/CameraTypes.h"
+#include "Rendering/Core/HashUtils.h"
 #include "Rendering/Core/RenderGraph/RGFrame.h"
 
 #include <string>
@@ -49,9 +50,9 @@ struct PipelineFrameResources
     {
         size_t operator()(const Key& k) const noexcept
         {
-            size_t h = std::hash<uint32_t>{}(static_cast<uint32_t>(k.ViewId));
-            h ^= std::hash<std::string>{}(k.Name) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-            return h;
+            const uint64_t h = ::GameEngine::Rendering::HashUtils::HashCombine(
+                static_cast<uint32_t>(k.ViewId), std::hash<std::string>{}(k.Name));
+            return static_cast<size_t>(h);
         }
     };
     // Per-view scalars the pre-pass derives once per frame.
@@ -66,6 +67,11 @@ struct PipelineFrameResources
         // against this ("extent.basis": "output" in the blueprint).
         uint32_t OutputWidth = 0;
         uint32_t OutputHeight = 0;
+        // The render->output crossing for this view is the pixel-perfect
+        // integer upscale, not the render-scale one: Render* is the camera's
+        // padded reference RT and Output* the panel it is zoomed into. The two
+        // crossings are mutually exclusive.
+        bool PixelPerfectCrossing = false;
     };
 
     ::GameEngine::Rendering::RenderGraph::RGFrame* Frame = nullptr;

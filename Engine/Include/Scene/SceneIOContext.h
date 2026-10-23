@@ -27,7 +27,7 @@ struct SceneLoadContext
 
     // Per-load tables — populated at load start, consumed by ResolveResourceId helper.
     std::unordered_map<std::string, std::filesystem::path> ResourceAbsPathById;
-    std::unordered_map<std::string, std::string> ResourceGuidById;
+    std::unordered_map<std::string, GUID> ResourceGuidById;
 
     struct EmbedDef
     {

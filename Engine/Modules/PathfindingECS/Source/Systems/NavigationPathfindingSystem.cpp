@@ -146,10 +146,11 @@ void NavigationPathfindingSystem::Update(ECS::World& world, float32 deltaTime)
     world.Query<ECS::Read<Components::NavigationAgent>,
                 ECS::Write<Components::NavigationAgentState>>().Each(
         [&](ECS::EntityHandle e, const Components::NavigationAgent& agent,
-            Components::NavigationAgentState& state)
+            ECS::Writable<Components::NavigationAgentState> stateRow)
         {
-            if (!state.HasDestination)
+            if (!stateRow->HasDestination)
                 return;
+            Components::NavigationAgentState& state = stateRow.Mutable();
 
             auto status = static_cast<Pathfinding::PathStatus>(state.Status);
             // Retry Failed even when ReplanInterval is 0 (a game may set it) so the
@@ -220,18 +221,20 @@ bool NavigationPathfindingSystem::CollectRequests(ECS::World& world)
                 ECS::Write<Components::NavigationAgentState>,
                 ECS::Read<Components::WorldTransform>>().Each(
         [&](ECS::EntityHandle e, const Components::NavigationAgent& agent,
-            Components::NavigationAgentState& state, const Components::WorldTransform& wt)
+            ECS::Writable<Components::NavigationAgentState> stateRow,
+            const Components::WorldTransform& wt)
         {
-            if (!state.HasDestination || (!state.PathDirty && !state.ReplanRequested))
+            if (!stateRow->HasDestination || (!stateRow->PathDirty && !stateRow->ReplanRequested))
             {
                 // A request withdrawn while queued (arrival, a game clearing
                 // PathDirty) gives up its place.
-                if (state.PathRequestSequence != 0)
-                    state.PathRequestSequence = 0;
-                if (!state.HasDestination)
-                    state.ReplanRequested = false;
+                if (stateRow->PathRequestSequence != 0)
+                    stateRow.Mutable().PathRequestSequence = 0;
+                if (!stateRow->HasDestination && stateRow->ReplanRequested)
+                    stateRow.Mutable().ReplanRequested = false;
                 return;
             }
+            Components::NavigationAgentState& state = stateRow.Mutable();
 
             const Pathfinding::NavMapHandle map{agent.NavMapIndex, agent.NavMapGeneration};
             if (!hasGridRequest)
@@ -279,8 +282,9 @@ void NavigationPathfindingSystem::PrepareBodies(ECS::World& world)
                 ECS::Write<Components::NavigationAgentState>,
                 ECS::Read<Components::WorldTransform>>().Each(
         [&](ECS::EntityHandle, const Components::NavigationAgent& agent,
-            Components::NavigationAgentState& state, const Components::WorldTransform& wt)
+            ECS::Writable<Components::NavigationAgentState> stateRow, const Components::WorldTransform& wt)
         {
+            const Components::NavigationAgentState& state = stateRow.Get();
             if (agent.AgentId == 0)
                 return;
             auto* grid = navWorld.GetGridMap({agent.NavMapIndex, agent.NavMapGeneration});
@@ -300,7 +304,8 @@ void NavigationPathfindingSystem::PrepareBodies(ECS::World& world)
             // HasCellReservations hint can outlive its expired cells.
             if (!requesting && HasCurrentBody(*grid, agent, wt.matrix[12], wt.matrix[14], m_AccumulatedTime))
                 return;
-            StampNavigationAgentOccupancy(agent, state, wt.matrix[12], wt.matrix[14], m_AccumulatedTime);
+            StampNavigationAgentOccupancy(agent, stateRow.Mutable(), wt.matrix[12], wt.matrix[14],
+                                          m_AccumulatedTime);
         });
 }
 

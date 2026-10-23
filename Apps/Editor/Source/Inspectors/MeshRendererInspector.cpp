@@ -1,6 +1,8 @@
 #include "Inspectors/MeshRendererInspector.h"
 
 #include "InspectorRegistry.h"
+#include "Editor/Entities/EditorComponentTraits.h"
+#include "Rendering/Sorting/RenderSortingEditor.h"
 
 #include "AssetCore/GUID.h"
 #include "Assets/AssetManager.h"
@@ -37,6 +39,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace GameEngine
@@ -516,6 +519,30 @@ static void BuildMeshRendererMaterialInspectorUI(const InspectorContext& ctx)
 
 void RegisterMeshRendererInspector()
 {
+    constexpr int kMeshRendererSortKey = 30;
+    constexpr int kMaterialSectionSortKey = 31;
+
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Mesh Renderer";
+        traits.Category = "Rendering";
+        traits.SortKey = kMeshRendererSortKey;
+        traits.Tooltip = "Renders a static mesh with a material";
+        traits.InspectorIconClass = "inspector-section-icon-mesh-renderer";
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Components::MeshRenderer>(), std::move(traits));
+    }
+    {
+        Editor::EditorComponentTraits traits;
+        traits.DisplayName = "Material";
+        traits.SortKey = kMaterialSectionSortKey;
+        traits.Tooltip = "Material slots and shader properties for this mesh renderer";
+        traits.InspectorIconClass = "inspector-section-icon-material";
+        traits.Removable = false;
+        Editor::EditorComponentTraitsRegistry::Get().Register(
+            ECS::GetComponentTypeId<Editor::MeshRendererMaterialInspectorSection>(), std::move(traits));
+    }
+
     InspectorFn fn = [](const InspectorContext& ctx)
     {
         if (!ctx.Parent || !ctx.World || !ctx.Entity.IsValid())
@@ -527,6 +554,8 @@ void RegisterMeshRendererInspector()
             AddLine(ctx.Parent, "(MeshRenderer missing)");
             return;
         }
+
+        Editor::AddRenderSortingDiagnostic(ctx);
 
         using namespace InspectorDrag;
 

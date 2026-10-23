@@ -103,10 +103,14 @@ void RegisterCrtEffectInspector()
             n,
             undo,
             "Change CRT emulated-resolution divisor",
-            [](CRT& u, float v) { u.EmulatedResolutionDiv = std::max(0.0f, std::min(v, 4096.0f)); },
-            0.5f,
-            "0 = Lottes default (6×). Larger matches integer-scaled artwork; set equal to Scene View "
-            "pixel-perfect scale when not using automatic 2D override.",
+            // Whole pixels only: the shader rounds a fractional divisor anyway
+            // (see crt.frag EmulatedResolution), so an authored 59.7 would read
+            // back as a value the effect does not use.
+            [](CRT& u, float v)
+            { u.EmulatedResolutionDiv = std::round(std::max(0.0f, std::min(v, 4096.0f))); },
+            1.0f,
+            "Whole screen pixels per emulated pixel. 0 uses 6 screen pixels per emulated pixel. Set it "
+            "to the Scene View pixel-perfect scale when not using the automatic 2D override.",
             {},
             0.0f,
             4096.0f);

@@ -1,6 +1,6 @@
 #include "TerrainECS/TerrainGpuBake.h"
 
-#include <cstdlib>
+#include "Platform/Environment.h"
 
 namespace GameEngine::TerrainECS
 {
@@ -17,17 +17,13 @@ bool IsGpuHeightBakeEnabled()
 {
     if (g_GpuHeightBakeTestOverride >= 0)
         return g_GpuHeightBakeTestOverride != 0;
-    // Default ON (kill switch GE_TERRAIN_GPU_BAKE=0), mirroring the DeferSplatResplatEnabled /
-    // IncrementalQuadtreeEnabled convention. This is inert unless the terrain engaged the atlas
+    // Default ON (kill switch GE_TERRAIN_GPU_BAKE=0), mirroring the DeferSplatResplatEnabled
+    // convention. This is inert unless the terrain engaged the atlas
     // (past the unified-source ceiling) AND is whole-resident — AtlasGpuBakeEligible is only set
     // inside the atlas dispatch block — so a terrain on the unified path is unaffected; where the
     // atlas is active it moves the drag bake onto the GPU (parity-proven at the RG16F/RGBA8
     // floors, editor-verified radius-100 drag).
-    static const bool enabled = []
-    {
-        const char* v = std::getenv("GE_TERRAIN_GPU_BAKE");
-        return !(v != nullptr && v[0] == '0');
-    }();
+    static const bool enabled = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GPU_BAKE", true);
     return enabled;
 }
 

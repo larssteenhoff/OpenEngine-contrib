@@ -1,12 +1,12 @@
 #include "UI/Controls/Widgets/SceneViewMeasureOverlay.h"
 
-#include "Components/Hierarchy.h"
 #include "Components/Measure/MeasureComponent.h"
 #include "Components/Transform.h"
 #include "Core/Engine.h"
 #include "ECS/Components.h"
 #include "ECS/ECS.h"
 #include "ECS/ECSTemplates.h"
+#include "Editor/Entities/EntityWorldPose.h"
 #include "Editor/Settings/SceneViewSettings.h"
 #include "Mathematics/MatrixOps.h"
 #include "Mathematics/Vector2.h"
@@ -15,6 +15,7 @@
 #include "SceneView/SceneViewEvents.h"
 #include "SceneView/SceneViewProjection.h"
 #include "Rendering/Text/FontAtlas.h"
+#include "Types/Fnv1a.h"
 #include "UI/Registration/ElementRegistration.h"
 #include "UI/ResolvedStyle.h"
 #include "UI/UIPrimitive.h"
@@ -438,54 +439,17 @@ bool IsEntityEnabledInScene(ECS::World& world, ECS::EntityHandle entity)
            ECS::Entity(&world, entity).IsEnabledInHierarchy();
 }
 
-bool GetEntityWorldMatrix(ECS::World& world,
-                          ECS::EntityHandle entity,
-                          Mathematics::Matrix4x4& out,
-                          int depth = 0)
-{
-    if (!entity.IsValid() || !world.IsValid(entity) || depth > 64)
-        return false;
-
-    if (const auto* transform = world.GetComponent<Components::Transform>(entity))
-    {
-        Mathematics::Matrix4x4 local = Mathematics::Matrix4x4::FromColumnMajor(transform->matrix);
-        if (const auto* parent = world.GetComponent<Components::Parent>(entity);
-            parent && parent->parent.IsValid())
-        {
-            Mathematics::Matrix4x4 parentWorld;
-            if (GetEntityWorldMatrix(world, parent->parent, parentWorld, depth + 1))
-            {
-                out = parentWorld * local;
-                return true;
-            }
-        }
-
-        out = local;
-        return true;
-    }
-
-    if (const auto* worldTransform = world.GetComponent<Components::WorldTransform>(entity))
-    {
-        out = Mathematics::Matrix4x4::FromColumnMajor(worldTransform->matrix);
-        return true;
-    }
-
-    return false;
-}
-
 bool GetEntityWorldPosition(ECS::World& world, ECS::EntityHandle entity, std::array<float, 3>& out)
 {
     if (!IsEntityEnabledInScene(world, entity))
         return false;
 
     Mathematics::Matrix4x4 worldMatrix;
-    if (GetEntityWorldMatrix(world, entity, worldMatrix))
-    {
-        out = {worldMatrix[3].x, worldMatrix[3].y, worldMatrix[3].z};
-        return true;
-    }
+    if (!Editor::TryComputeEntityWorldMatrix(&world, entity, worldMatrix))
+        return false;
 
-    return false;
+    out = {worldMatrix[3].x, worldMatrix[3].y, worldMatrix[3].z};
+    return true;
 }
 
 std::string Format2DUnitsLabel(SceneViewController* controller, float pixelLength)
@@ -626,18 +590,8 @@ uint64_t SceneViewMeasureOverlay::ComputeEmitKey() const
     // hovered entity (feeds the hover highlight). Layout-size and
     // unit-system changes mark dirty through their own paths (rect
     // write-back, setters).
-    constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
-    constexpr uint64_t kFnvPrime = 1099511628211ull;
-    uint64_t h = kFnvOffsetBasis;
-    auto mix = [&h](const void* p, size_t n)
-    {
-        const unsigned char* b = static_cast<const unsigned char*>(p);
-        for (size_t i = 0; i < n; ++i)
-        {
-            h ^= b[i];
-            h *= kFnvPrime;
-        }
-    };
+    uint64_t h = Hashing::kFnv1a64OffsetBasis;
+    auto mix = [&h](const void* p, size_t n) { h = Hashing::Fnv1a64(p, n, h); };
 
     // Measures first: with none visible the overlay draws nothing, so the
     // camera-dependent inputs must not churn re-emits — return the basis
@@ -663,7 +617,7 @@ uint64_t SceneViewMeasureOverlay::ComputeEmitKey() const
             });
     }
     if (!anyMeasure)
-        return kFnvOffsetBasis;
+        return Hashing::kFnv1a64OffsetBasis;
 
     const SceneViewCameraPose pose = m_Controller->GetCameraPose();
     mix(&pose.Pos[0], sizeof(float) * 3);

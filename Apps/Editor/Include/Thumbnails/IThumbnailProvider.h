@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 
 #include "AssetCore/GUID.h"
 #include "Thumbnails/FolderBakeReport.h"
@@ -14,6 +15,12 @@ namespace GameEngine {
 
 class IThumbnailProvider {
 public:
+    virtual std::string GetOrRequestSpriteFrame(const std::filesystem::path& /*path*/,
+        const std::string& /*animation*/, bool /*flipX*/,
+        std::function<void(const std::string&)> /*ready*/) { return {}; }
+    virtual std::string GetOrRequestAtlasRegion(const std::filesystem::path& /*path*/,
+        const std::array<float, 4>& /*uv*/, std::function<void(const std::string&)> /*ready*/,
+        const std::array<float, 2>& /*magentaKey*/ = {-1.0f, 0.0f}) { return {}; }
     virtual ~IThumbnailProvider() = default;
 
     // Set the runtime Assets/ root so returned paths can be relative to it.
@@ -21,7 +28,8 @@ public:
 
     // Returns a relative path (from Assets/) to a thumbnail or representative image if already cached.
     // If not cached, starts an async request and invokes onReady with the relative path when ready.
-    // Implementations should call onReady on a background thread; the UI side should marshal to UI thread.
+    // ThumbnailService delivers callbacks on its next UI BeginFrame. Other providers may
+    // complete on a worker; callers must follow the concrete provider's threading contract.
     // When \p StaticModelListThumbnail is true (models only), use a separate cached
     // engine texture that does not share the rotating Asset View preview.
     virtual std::string GetOrRequest(const std::filesystem::path& assetPath,

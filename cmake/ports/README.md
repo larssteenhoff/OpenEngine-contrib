@@ -270,3 +270,5 @@ Remove the overlay after the baseline includes an upstream quoted comparison,
 or when every supported build runs ports with vcpkg's pinned CMake and
 `CMP0174=NEW`, so system CMake older than 3.31 cannot reach this helper.
 Retain the regression against the replacement helper.
+
+The iOS mobile build additionally selects `cmake/ios-ports`: its SPIRV-Reflect port builds the library without command-line executables, which cannot be installed as device-side CMake executables. The `arm64-ios` triplet fixes the dependency deployment target to the Player's iOS 16.3 minimum.

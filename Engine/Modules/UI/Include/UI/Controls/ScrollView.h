@@ -65,6 +65,9 @@ class ScrollView : public UIElement
         SetScrollX(m_ScrollX + dx);
         SetScrollY(m_ScrollY + dy);
     }
+    // Drag-and-drop auto-scroll: scrolls vertically, faster the closer the
+    // pointer (layout px) is to the top or bottom edge of the clip viewport.
+    void AutoScrollNearEdge(float mouseX, float mouseY) const;
 
     // Viewport/content size (for content-aware scrollbars)
     float GetViewportWidth() const
@@ -246,8 +249,8 @@ class ScrollView : public UIElement
     // impossible here, and a without-notify variant would be an API with no problem to solve.
 
     // Not const: this dispatches an event, so it can run arbitrary subscriber code. The
-    // scroll STATE it reads is still mutable-and-const-written by the setters above; what
-    // changed is that observing the flush is no longer a read-only act.
+    // scroll STATE it reads is mutable-and-const-written by the setters above; observing
+    // the flush is not a read-only act.
     bool FlushPendingScrollChanged()
     {
         if (!m_ScrollChangedPending)
@@ -299,10 +302,6 @@ class ScrollView : public UIElement
     // Event hook so UIManager can route scroll-wheel events via UI.Scroll
     // without knowing about ScrollView specifically.
     void OnEvent(UIEvent& e) override;
-
-    // Observe layout of the internal viewport so we can keep viewport size
-    // and scroll ranges up to date without UIManager directly poking at us.
-    void OnScrollViewportLayout(UIElement* viewport, float W, float H) override;
 
   private:
     void UpdateContentTransform() const;

@@ -11,9 +11,11 @@
 #include "Markups/MarkupInspector.h"
 #include "Markups/MarkupKind.h"
 #include "Markups/MarkupLabelOverlay.h"
+#include "Markups/MarkupPicking.h"
 #include "Markups/MarkupRequestGate.h"
 #include "Markups/MarkupTool.h"
 #include "Markups/MarkupsPanel.h"
+#include "SceneView/SceneOverlayPick.h"
 #include "SceneView/SceneViewCameraRig.h"
 #include "SceneView/SceneViewFraming.h"
 #include "SceneView/SceneViewToolStripRegistry.h"
@@ -173,6 +175,7 @@ std::unique_ptr<MarkupEditorBridge> CreateMarkupEditorBridge(EditorChangeNotific
     RegisterMarkupsPanel(*bridge);
     RegisterMarkupInspector(*bridge);
     SetSplineOwnerQuery(&QueryMarkupSpline);
+    SceneTools::SetSceneOverlayPicker(&PickSceneMarkupOutline);
     ViewOverlayHost::Get().Register(std::make_unique<MarkupLabelOverlay>());
     InstallMarkupRequests();
     return bridge;

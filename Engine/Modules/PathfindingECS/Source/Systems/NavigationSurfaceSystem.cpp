@@ -258,8 +258,9 @@ void NavigationSurfaceSystem::Update(ECS::World& world, float32 /*deltaTime*/)
 
     world.Query<ECS::Write<NavigationSurface>, ECS::Optional<Components::Transform>,
                 ECS::Optional<Components::WorldTransform>>()
-        .Each([&](ECS::EntityHandle entity, NavigationSurface& surface, const Components::Transform* local,
+        .Each([&](ECS::EntityHandle entity, ECS::Writable<NavigationSurface> slot, const Components::Transform* local,
                   const Components::WorldTransform* transform) {
+            NavigationSurface& surface = slot.Mutable();
             if (authoredCellsChanged && surface.Mode == NavigationSurfaceMode::Grid && !surface.AuthoredCells.IsNull())
                 surface.BakeRequested = true;
             // A placed surface whose WorldTransform TransformHierarchy has not resolved yet (Version 0)

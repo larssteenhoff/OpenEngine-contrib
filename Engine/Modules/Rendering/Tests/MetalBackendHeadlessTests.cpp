@@ -2,6 +2,7 @@
 // SPIRV-Cross pipeline + argument-buffer descriptor path (milestone 3).
 
 #include <gtest/gtest.h>
+#include "Logger/Logger.h"
 
 #include "Rendering/Core/Device.h"
 #include "Rendering/Core/CommandList.h"
@@ -41,6 +42,19 @@ using namespace GameEngine::Rendering;
 
 namespace
 {
+
+struct ScopedMetalCompatibility
+    {
+        bool HadValue = std::getenv("GE_FORCE_COMPAT") != nullptr;
+        std::string Value = HadValue ? std::getenv("GE_FORCE_COMPAT") : "";
+        ~ScopedMetalCompatibility()
+        {
+            if (HadValue) setenv("GE_FORCE_COMPAT", Value.c_str(), 1);
+            else unsetenv("GE_FORCE_COMPAT");
+        }
+    ScopedMetalCompatibility() { setenv("GE_FORCE_COMPAT", "1", 1); }
+};
+
 
 std::unique_ptr<IDevice> CreateHeadlessMetalDevice()
 {
@@ -770,6 +784,45 @@ void main() { uOut.values[gl_GlobalInvocationID.x] = uPush.base + gl_GlobalInvoc
     EXPECT_NE(translation.Msl.find("main0"), std::string::npos) << translation.Msl;
 }
 
+TEST(MetalSpirvPipeline, CombinedDepthFormatBindsWithoutExplicitStencilFormat)
+{
+    auto device = CreateHeadlessMetalDevice();
+    ASSERT_TRUE(device);
+    const auto vertex = CompileGlsl(
+        "#version 450\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.5, 1.0); }",
+        shaderc_vertex_shader, "combined-depth.vert");
+    ASSERT_FALSE(vertex.empty());
+    PipelineDesc pipelineDesc{};
+    pipelineDesc.type = PipelineType::Graphics;
+    pipelineDesc.vertexShader = vertex;
+    pipelineDesc.depthAttachmentFormat = static_cast<uint32_t>(TextureFormat::D32_SFLOAT_S8_UINT);
+    pipelineDesc.depthStencilState.depthTestEnable = true;
+    pipelineDesc.depthStencilState.depthWriteEnable = true;
+    pipelineDesc.debugName = "CombinedDepthWithoutStencil";
+    const auto pipeline = device->CreatePipeline(pipelineDesc);
+    ASSERT_TRUE(pipeline.IsValid());
+    TextureDesc texture{};
+    texture.width = 16;
+    texture.height = 16;
+    texture.format = pipelineDesc.depthAttachmentFormat;
+    texture.usage = static_cast<uint32_t>(TextureUsage::DepthStencil);
+    const auto depth = device->CreateTexture(texture);
+    ASSERT_TRUE(depth.IsValid());
+    auto commands = device->CreateCommandList(IDevice::QueueType::Graphics);
+    commands->Begin();
+    RenderPassDesc pass{};
+    pass.depthTarget = depth;
+    commands->BeginRenderPass(pass);
+    commands->SetPipeline(pipeline);
+    commands->EndRenderPass();
+    commands->End();
+    device->ExecuteCommandLists({commands.get()});
+    device->WaitForIdle();
+    device->DestroyPipeline(pipeline);
+    device->DestroyTexture(depth);
+    device->Shutdown();
+}
+
 // The whole DescriptorType::AccelerationStructure chain in one pass: SPIR-V
 // reflection must classify a descriptor-bound accelerationStructureEXT as its
 // own type (it used to fall through to UniformBuffer, silently), the Metal
@@ -865,7 +918,7 @@ void main()
     EXPECT_NE(translation.Msl.find("uTlas [[id(3)]]"), std::string::npos) << translation.Msl;
 }
 
-TEST(MetalSpirvPipeline, TexturedQuadWithDescriptorSet)
+static void ExpectTexturedQuadWithDescriptorSet()
 {
     auto device = CreateHeadlessMetalDevice();
     if (!device)
@@ -973,6 +1026,13 @@ void main()
     pipelineDesc.depthStencilState.depthTestEnable = false;
     pipelineDesc.depthStencilState.depthWriteEnable = false;
     pipelineDesc.debugName = "MetalSpirvQuad";
+    if (!device->GetCapabilities().supportsBindlessResources)
+    {
+        const auto vertex = TranslateSpirvToMsl(vertSpv, MetalShaderStage::Vertex, {&layout}, nullptr, false);
+        ASSERT_TRUE(vertex.Success) << vertex.Error;
+        const auto fragment = TranslateSpirvToMsl(fragSpv, MetalShaderStage::Fragment, {&layout}, nullptr, false);
+        ASSERT_TRUE(fragment.Success) << fragment.Error;
+    }
     PipelineHandle pipeline = device->CreatePipeline(pipelineDesc);
     ASSERT_TRUE(pipeline.IsValid());
 
@@ -1037,6 +1097,19 @@ void main()
     device->DestroyTexture(rt);
     device->DestroyTexture(texture);
     device->Shutdown();
+}
+
+TEST(MetalSpirvPipeline, TexturedQuadWithDescriptorSet)
+{
+    ExpectTexturedQuadWithDescriptorSet();
+}
+
+TEST(MetalSpirvPipeline, CompatibilityDirectBindingsSampleTextureAndUniformBuffer)
+{
+    ScopedMetalCompatibility compatibility;
+    Logger::Log::Initialize({});
+    ExpectTexturedQuadWithDescriptorSet();
+    Logger::Log::Shutdown();
 }
 
 namespace
@@ -2685,7 +2758,7 @@ void main()
     device->Shutdown();
 }
 
-TEST(MetalSpirvPipeline, ComputeWritesStorageBuffer)
+static void ExpectComputeWritesStorageBuffer()
 {
     auto device = CreateHeadlessMetalDevice();
     if (!device)
@@ -2700,7 +2773,8 @@ layout(set = 0, binding = 0, std430) buffer Out { uint values[]; } uOut;
 layout(push_constant) uniform Push { uint base; } uPush;
 void main()
 {
-    uOut.values[gl_GlobalInvocationID.x] = uPush.base + gl_GlobalInvocationID.x;
+    if (gl_GlobalInvocationID.x < uOut.values.length())
+        uOut.values[gl_GlobalInvocationID.x] = uPush.base + gl_GlobalInvocationID.x;
 }
 )";
     std::vector<uint8_t> compSpv = CompileGlsl(kComp, shaderc_compute_shader, "fill.comp");
@@ -2759,6 +2833,17 @@ void main()
     device->DestroyDescriptorSet(set);
     device->DestroyBuffer(buffer);
     device->Shutdown();
+}
+
+TEST(MetalSpirvPipeline, ComputeWritesStorageBuffer)
+{
+    ExpectComputeWritesStorageBuffer();
+}
+
+TEST(MetalSpirvPipeline, CompatibilityDirectBindingsWriteStorageBufferAndReadItsLength)
+{
+    ScopedMetalCompatibility compatibility;
+    ExpectComputeWritesStorageBuffer();
 }
 
 // The CBT kernel set's shape on Metal: 23 compute pipelines specialised from one

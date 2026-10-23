@@ -156,9 +156,11 @@ void BuildOverrideRows(const InspectorContext& ctx)
     InspectorUI::AddLine(ctx.Parent, "Span Overrides");
     if (Editor::CountSpanOverrides(*comp) == 0u)
     {
-        InspectorUI::AddLine(ctx.Parent,
-                             "None. Select a span in the scene view to make it a gate or keep an "
-                             "explicit piece there.");
+        InspectorUI::AddLine(ctx.Parent, "None");
+        if (ctx.ShowInfoCards)
+            InspectorUI::AddInfoCard(ctx.Parent,
+                                     "Select a span in the scene view to make it a gate or keep an "
+                                     "explicit piece there.");
         return;
     }
 

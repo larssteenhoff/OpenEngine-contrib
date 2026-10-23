@@ -14,11 +14,11 @@
 #include "Assets/TextureAsset.h"
 #include "JobSystem/WorkStealingThreadPool.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Common/Utils.h"
 #include "Rendering/Core/RenderGraph/RGFrame.h"
 #include "UI/Assets/UILayoutAsset.h"
 #include "UI/Assets/UIStyleAsset.h"
-#include "UI/Controls/Mount.h"
 #include "UI/Parsers/CSSParser.h"
 #include "UI/Parsers/XMLParser.h"
 #include "UI/Registration/ElementRegistration.h"
@@ -28,9 +28,9 @@
 #include "UI/UiContext.h"
 #include "UIAttributeAccess.h"
 #include "Assets/CssImports.h"
+#include "Types/StringUtils.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <string_view>
@@ -136,38 +136,13 @@ static std::unordered_map<std::string, int> BuildCssUrlLineMap(const std::string
                 break;
             ++i;
         }
-        std::string inner = cssText.substr(start, i - start);
-        auto trim = [&](std::string& s)
-        {
-            size_t a = 0, b = s.size();
-            while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n'))
-                ++a;
-            while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n'))
-                --b;
-            s = s.substr(a, b - a);
-        };
-        trim(inner);
+        const std::string inner = TrimWhitespace(cssText.substr(start, i - start));
         if (!inner.empty() && !m.count(inner))
             m.emplace(inner, lineOf(pos));
         pos = (i < cssText.size()) ? i + 1 : i;
     }
     return m;
 }
-
-struct ParsedCssFileResult
-{
-    bool ok = false;
-    std::string path;
-    Stylesheet sheet{};
-    std::unordered_map<std::string, int> urlLineMap;
-};
-
-struct ParsedLayoutFileResult
-{
-    bool ok = false;
-    std::string path;
-    std::unique_ptr<UIElement> root;
-};
 
 } // namespace
 
@@ -658,7 +633,7 @@ void UIManager::NotifyElementOwnerChanged(UIElement* el)
     if (!el)
         return;
 
-    // instanceId -> element map (slice E1): insert on owner-gain. Erase
+    // instanceId -> element map: insert on owner-gain. Erase
     // happens in the SetOwnerManager detach branch + ~UIElement.
     m_ElementsByInstanceId[el->GetInstanceId()] = el;
     m_ElementIdIndex.Register(*el);
@@ -737,57 +712,6 @@ bool UIManager::LoadLayoutFromFile(const std::string& path)
     if (m_Root)
         m_Root->SetOwnerManager(this);
     return m_Root != nullptr;
-}
-
-void UIManager::LoadLayoutFromFileAsync(const std::string& path)
-{
-    UI::UiContextScope uiScope(m_Dispatcher.get(), m_Scheduler.get());
-    if (!m_JobSystem)
-    {
-        (void)LoadLayoutFromFile(path);
-        return;
-    }
-
-    const uint64_t gen = ++m_AsyncLayoutParseGeneration;
-    // Shared, so the completion can post from a worker after this manager is gone: the closed
-    // dispatcher refuses it. Posted work runs only from this manager's own drains.
-    std::shared_ptr<UI::UiDispatcher> dispatcher = m_Dispatcher;
-    JobSystem::WorkStealingThreadPool* js = m_JobSystem;
-    const std::string pathCopy = path;
-
-    JobSystem::TaskHandle handle = js->Submit([pathCopy]() -> std::shared_ptr<ParsedLayoutFileResult>
-                                              {
-                                                 auto res = std::make_shared<ParsedLayoutFileResult>();
-                                                 res->path = pathCopy;
-                                                 std::unique_ptr<UIElement> parsed;
-                                                 res->ok = UIParsing::XMLParser::ParseLayoutFromFile(pathCopy, parsed);
-                                                 if (res->ok)
-                                                     res->root = std::move(parsed);
-                                                 return res; });
-
-    handle.OnComplete([this, dispatcher, gen](const JobSystem::TaskHandle& h)
-                      {
-                          std::shared_ptr<ParsedLayoutFileResult> res;
-                          if (!h.TryGetResult(res) || !res)
-                              return;
-                          dispatcher->Post([this, gen, res]()
-                                           {
-                                               if (!m_AppliesAsyncResults)
-                                                   return;
-                                               if (gen != m_AsyncLayoutParseGeneration)
-                                                   return; // superseded by newer request
-                                               if (!res->ok || !res->root)
-                                               {
-                                                   Logger::Log::Warning("UI: Async layout parse failed for '{}'", res->path);
-                                                   return;
-                                               }
-                                               Logger::Log::Info("UI: Async layout parsed '{}'", res->path);
-                                               SetRoot(std::move(res->root));
-                                           }); });
-    handle.OnFailure([dispatcher, pathCopy](const JobSystem::String& err)
-                     {
-                         dispatcher->Post([pathCopy, err]()
-                                          { Logger::Log::Warning("UI: Async layout parse failed for '{}': {}", pathCopy, err); }); });
 }
 
 bool UIManager::AttachStyleFromFile(const std::string& path)
@@ -885,160 +809,14 @@ bool UIManager::AttachStyleFromFile(const std::string& path)
     return false;
 }
 
-void UIManager::AttachStyleFromFileAsync(const std::string& path)
-{
-    UI::UiContextScope uiScope(m_Dispatcher.get(), m_Scheduler.get());
-    if (!m_JobSystem)
-    {
-        (void)AttachStyleFromFile(path);
-        return;
-    }
-
-    const std::string key = UI::NormalizeStylesheetPathKey(path);
-    const uint64_t gen = ++m_AsyncStyleParseGeneration[key];
-
-    // Shared, so the completion can post from a worker after this manager is gone: the closed
-    // dispatcher refuses it. Posted work runs only from this manager's own drains.
-    std::shared_ptr<UI::UiDispatcher> dispatcher = m_Dispatcher;
-    JobSystem::WorkStealingThreadPool* js = m_JobSystem;
-    AssetManager* assets = m_AssetManager;
-    const std::string pathCopy = path;
-
-    JobSystem::TaskHandle handle = js->Submit([pathCopy, assets]() -> std::shared_ptr<ParsedCssFileResult>
-                                              {
-                                                 auto res = std::make_shared<ParsedCssFileResult>();
-                                                 res->path = pathCopy;
-                                                 auto bytes = Rendering::Utils::ReadFile(pathCopy);
-                                                 if (bytes.empty())
-                                                 {
-                                                     res->ok = false;
-                                                     return res;
-                                                 }
-                                                 std::string css(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-                                                 std::string expanded;
-                                                 std::vector<std::filesystem::path> importFiles;
-                                                 UI::ExpandCssImports(std::filesystem::path(pathCopy), css, assets, expanded, importFiles);
-
-                                                 Stylesheet sheet{};
-                                                 if (!UIParsing::CSSParser::ParseStylesFromString(expanded.empty() ? css : expanded, sheet))
-                                                 {
-                                                     res->ok = false;
-                                                     return res;
-                                                 }
-                                                 sheet.SourceName = pathCopy;
-                                                 res->urlLineMap = BuildCssUrlLineMap(expanded.empty() ? css : expanded);
-                                                 res->sheet = std::move(sheet);
-                                                 res->ok = true;
-                                                 return res; });
-
-    handle.OnComplete([this, dispatcher, key, gen](const JobSystem::TaskHandle& h)
-                      {
-                          std::shared_ptr<ParsedCssFileResult> res;
-                          if (!h.TryGetResult(res) || !res)
-                              return;
-                          dispatcher->Post([this, key, gen, res]()
-                                           {
-                                               if (!m_AppliesAsyncResults)
-                                                   return;
-                                               auto itGen = m_AsyncStyleParseGeneration.find(key);
-                                               if (itGen != m_AsyncStyleParseGeneration.end() && itGen->second != gen)
-                                                   return; // superseded by newer request for this file
-
-                                               if (!res->ok)
-                                               {
-                                                   Logger::Log::Warning("UI: Async stylesheet parse failed for '{}'", res->path);
-                                                   return;
-                                               }
-
-                                               Stylesheet sheet = std::move(res->sheet);
-                                               const auto& urlLineMap = res->urlLineMap;
-
-                                               if (m_AssetManager)
-                                               {
-                                                   auto normalize = [](const std::string& p)
-                                                   { return UIUtil::NormalizeCssUrlPath(p); };
-                                                   // Pre-resolve background-image paths and warn once at load/hot-reload
-                                                   for (auto& rule : sheet.Rules)
-                                                   {
-                                                      for (auto& prop : rule.Properties)
-                                                      {
-                                                          if (prop.PropertyId != StylePropertyId::BackgroundImage)
-                                                              continue;
-                                                          const auto& src = std::get<BackgroundImageSource>(prop.Value);
-                                                          if (src.Kind != BackgroundImageSource::SourceKind::Path || src.Value.empty())
-                                                              continue;
-
-                                                          auto itL = urlLineMap.find(src.Value);
-                                                          if (itL != urlLineMap.end())
-                                                              prop.SourceLine = itL->second;
-                                                          std::string norm = normalize(src.Value);
-                                                          auto resolved = m_AssetManager->ResolveAssetPath(norm);
-                                                          GUID g = m_AssetManager->GetRegistry().GetAssetGUID(resolved);
-                                                          if (g.IsNull())
-                                                          {
-                                                              if (prop.SourceLine > 0)
-                                                              {
-                                                                  Logger::Log::Warning("UI: background-image path '{}' not found in '{}' at line {} (resolved '{}')",
-                                                                                      src.Value, res->path, prop.SourceLine, resolved.string());
-                                                              }
-                                                              else
-                                                              {
-                                                                  Logger::Log::Warning("UI: background-image path '{}' not found in '{}' (resolved '{}')",
-                                                                                      src.Value, res->path, resolved.string());
-                                                              }
-                                                          }
-                                                      }
-                                                   }
-                                               }
-
-                                               Logger::Log::Info("UI: Async stylesheet parsed ({} rules)", (uint32_t)sheet.Rules.size());
-
-                                               const std::string mapKey = UI::NormalizeStylesheetPathKey(res->path);
-                                               auto itS = m_FileStylesheets.find(mapKey);
-                                               if (itS == m_FileStylesheets.end())
-                                               {
-                                                   auto shared = std::make_shared<Stylesheet>(sheet);
-                                                   m_FileStylesheets.emplace(mapKey, shared);
-                                                   StylesheetHandle handle = shared;
-                                                   m_GlobalStylesheets.push_back(handle);
-                                                   ++m_StylesheetSetGeneration;
-                                                   InvalidateAllInternedSheetSets();
-                                               }
-                                               else
-                                               {
-                                                   // Hot reload: update the existing stylesheet object in-place so removed
-                                                   // properties/rules revert correctly and precedence stays stable.
-                                                   if (itS->second)
-                                                   {
-                                                       *(itS->second) = sheet;
-                                                   }
-                                                   // Defensive: ensure the handle is attached globally (without reordering).
-                                                   const Stylesheet* ptr = itS->second.get();
-                                                   auto it = std::find_if(m_GlobalStylesheets.begin(), m_GlobalStylesheets.end(),
-                                                                          [&](const StylesheetHandle& existing) { return existing && existing.get() == ptr; });
-                                                   if (it == m_GlobalStylesheets.end())
-                                                   {
-                                                       m_GlobalStylesheets.push_back(itS->second);
-                                                   }
-                                                   NotifyStylesheetContentChanged();
-                                                   MarkStyleDirtyAll();
-                                               }
-                                           }); });
-    handle.OnFailure([dispatcher, pathCopy](const JobSystem::String& err)
-                     {
-                         dispatcher->Post([pathCopy, err]()
-                                          { Logger::Log::Warning("UI: Async stylesheet parse failed for '{}': {}", pathCopy, err); }); });
-}
-
 void UIManager::AddStylesheet(const StylesheetHandle& sheet)
 {
     if (!sheet)
         return;
     // Re-adding a present sheet is a position-preserving no-op. Cascade
-    // ties at equal specificity break on sheet ORDER, so the old
-    // erase+push_back silently promoted a re-added sheet to highest
-    // priority among equals — permanently, and differently per session
-    // depending on add order (C-10).
+    // ties at equal specificity break on sheet ORDER, so moving a re-added
+    // sheet to the end would promote it to highest priority among equals —
+    // permanently, and differently per session depending on add order.
     auto it = std::find_if(m_GlobalStylesheets.begin(), m_GlobalStylesheets.end(),
                            [&](const StylesheetHandle& h)
                            { return h.get() == sheet.get(); });
@@ -1097,7 +875,7 @@ void UIManager::ReplaceGlobalStylesheetBlock(const std::vector<const Stylesheet*
     // survivors already in the list outside the removed block. Hot-reload
     // blocks include transitively @imported sheets whose surviving entries
     // (owned by another attached style) stay in place — re-inserting them
-    // would duplicate every rule at a shifted cascade position (C-10).
+    // would duplicate every rule at a shifted cascade position.
     std::unordered_set<const Stylesheet*> surviving;
     surviving.reserve(replacement.size());
     for (const auto& h : replacement)
@@ -1132,18 +910,17 @@ void UIManager::ReplaceGlobalStylesheetBlock(const std::vector<const Stylesheet*
     m_GlobalStylesheets.swap(replacement);
     ++m_StylesheetSetGeneration;
 
-    // Primary-flip prep: every RetainedYogaNode's cached
-    // PersistentSheetSetId references interner entries whose sheet-pointer
-    // lists may contain the now-removed old block members. The pointers
-    // themselves might have been freed (StylesheetHandles going out of
-    // scope). Clear the interner so the next BuildYogaRecursive
-    // re-resolves from scratch.
+    // Every RetainedYogaNode's cached PersistentSheetSetId references
+    // interner entries whose sheet-pointer lists may contain the removed old
+    // block members. The pointers themselves might have been freed
+    // (StylesheetHandles going out of scope). Clear the interner so the next
+    // BuildYogaRecursive re-resolves from scratch.
     InvalidateAllInternedSheetSets();
 }
 
 void UIManager::InvalidateAllInternedSheetSets()
 {
-    // P4 (C-10): the rooted invalidation walk below cannot reach detached
+    // The rooted invalidation walk below cannot reach detached
     // subtrees (inactive dock tabs, pooled rows). Bump the epoch so their
     // caches — possibly holding pointers into freed rule storage — fail
     // the IsRuleCacheValid check on their next cascade instead.
@@ -1154,34 +931,28 @@ void UIManager::InvalidateAllInternedSheetSets()
     m_SheetSetInterner.Clear();
 #if defined(GE_HAVE_YOGA) && GE_HAVE_YOGA
     // Walk the visible tree (children + Mount portals) and zero each
-    // element's interned sheet-set ID. Stage 7 step 8: PSSID lives on
-    // UIElement::m_YogaState now, so the walk is the only way to reach
-    // every retained node.
+    // element's interned sheet-set ID. The ID lives on each element's
+    // UIElement::m_YogaState, so the walk is the only way to reach every
+    // retained node.
     std::function<void(UIElement*)> zeroPssid = [&](UIElement* el) {
         if (!el) return;
         if (el->m_YogaState)
         {
             el->m_YogaState->PersistentSheetSetId = 0;
-            // Stage 7 step 7 option 2: a global sheet-set change means
+            // A global sheet-set change means
             // every element's merged sheet list could shift. The
             // subtree-skip gate would otherwise serve a stale cascade
             // result based on the old sheets — clear the gate flag to
             // force a slow-path rebuild on the next visit.
             el->m_YogaState->CachedSubtreeValid = false;
         }
-        for (const auto& ch : el->GetChildren())
-            zeroPssid(ch.get());
-        if (auto* m = dynamic_cast<Mount*>(el))
-        {
-            if (UIElement* tgt = m->GetTarget())
-                zeroPssid(tgt);
-        }
+        el->ForEachLogicalChild(zeroPssid);
     };
     zeroPssid(m_Root.get());
 #endif
-    // Cascade-memoization Phase 4: any sheet-set change invalidates the
-    // structural rule pool for every element. Walk the root subtree so
-    // the next cascade rebuilds caches against the new sheet ordering /
+    // Any sheet-set change invalidates the structural rule pool for every
+    // element. Walk the root subtree so the next cascade rebuilds caches
+    // against the new sheet ordering /
     // rule contents (this path covers global stylesheet add/remove,
     // hot-reload content swaps, and ReplaceGlobalStylesheetBlock).
     if (m_Root)
@@ -1196,8 +967,8 @@ void UIManager::NotifyStylesheetContentChanged()
     m_StylesheetRuleIndexCache.clear();
     m_StylesheetRuleIndexCacheGeneration = 0;
 
-    // Primary-flip prep: SheetSetInterner entries hold const
-    // StylesheetRuleIndex* pointers sourced from m_StylesheetRuleIndexCache.
+    // SheetSetInterner entries hold const StylesheetRuleIndex* pointers
+    // sourced from m_StylesheetRuleIndexCache.
     // Clearing that cache just freed them; entries holding the stale
     // pointers are use-after-free waiting to happen. Clear the interner
     // and zero PSSIDs so the next pre-cascade pass re-interns with
@@ -1215,13 +986,7 @@ void UIManager::NotifyStylesheetContentChanged()
     std::function<void(UIElement*)> markStyleDirty = [&](UIElement* el) {
         if (!el) return;
         el->MarkDirty(UIElement::StyleDirty);
-        for (const auto& ch : el->GetChildren())
-            markStyleDirty(ch.get());
-        if (auto* m = dynamic_cast<Mount*>(el))
-        {
-            if (UIElement* tgt = m->GetTarget())
-                markStyleDirty(tgt);
-        }
+        el->ForEachLogicalChild(markStyleDirty);
     };
     markStyleDirty(m_Root.get());
 }
@@ -1233,19 +998,9 @@ static void MarkDirtyRecursive(UIElement* el, unsigned flags)
     if (!el)
         return;
     el->MarkDirty(flags);
-    for (const auto& ch : el->GetChildren())
-    {
-        MarkDirtyRecursive(ch.get(), flags);
-    }
     // Mount targets are portal-like and are not part of the child list. They must still
     // participate in dirty propagation so global stylesheet reloads affect all visible UI.
-    if (auto* m = dynamic_cast<Mount*>(el))
-    {
-        if (UIElement* tgt = m->GetTarget())
-        {
-            MarkDirtyRecursive(tgt, flags);
-        }
-    }
+    el->ForEachLogicalChild([flags](UIElement* child) { MarkDirtyRecursive(child, flags); });
 }
 } // namespace
 
@@ -1327,13 +1082,10 @@ void UIManager::SetRoot(std::unique_ptr<UIElement> root)
             for (const auto& ch : el->GetChildren())
                 if (ch)
                     stack.push_back(ch.get());
-            if (auto* m = dynamic_cast<Mount*>(el))
+            if (UIElement* tgt = el->GetMountTarget())
             {
-                if (UIElement* tgt = m->GetTarget())
-                {
-                    tgt->SetOwnerManager(this);
-                    stack.push_back(tgt);
-                }
+                tgt->SetOwnerManager(this);
+                stack.push_back(tgt);
             }
         }
     }
@@ -1357,12 +1109,11 @@ UIElement* UIManager::FindElementByInstanceId(uint64_t instanceId) const
     if (!root)
         return nullptr;
 
-    // Slice E1: O(1) map lookup (maintained on owner-gain / detach /
-    // destruction) + an O(depth) reachability filter. The map is
-    // ownership-scoped but the old tree walk only ever found ATTACHED
-    // elements — owned-but-detached subtrees (inactive dock tabs) must
-    // stay unfindable or hover/bubble resolves would target invisible
-    // elements.
+    // O(1) map lookup (maintained on owner-gain / detach / destruction) +
+    // an O(depth) reachability filter. The map is ownership-scoped, but only
+    // ATTACHED elements are findable — owned-but-detached subtrees (inactive
+    // dock tabs) must stay unfindable or hover/bubble resolves would target
+    // invisible elements.
     UIElement* found = nullptr;
     auto it = m_ElementsByInstanceId.find(instanceId);
     if (it != m_ElementsByInstanceId.end() && UIElementReachesRoot(it->second, root))
@@ -1371,10 +1122,7 @@ UIElement* UIManager::FindElementByInstanceId(uint64_t instanceId) const
 #ifdef _DEBUG
     // Instance lookups must stay O(1). Set GE_UI_VALIDATE_INSTANCE_INDEX=1 to
     // compare the index against a full tree walk while debugging the index.
-    static const bool s_ValidateInstanceIndex = []() {
-        const char* value = std::getenv("GE_UI_VALIDATE_INSTANCE_INDEX");
-        return value && value[0] == '1';
-    }();
+    static const bool s_ValidateInstanceIndex = Platform::EnvironmentSwitchEnabled("GE_UI_VALIDATE_INSTANCE_INDEX", false);
     if (s_ValidateInstanceIndex)
     {
         UIElement* walked = nullptr;
@@ -1392,14 +1140,7 @@ UIElement* UIManager::FindElementByInstanceId(uint64_t instanceId) const
                 walked = el;
                 break;
             }
-            for (const auto& ch : el->GetChildren())
-                if (ch)
-                    stack.push_back(ch.get());
-            if (auto* m = dynamic_cast<Mount*>(el))
-            {
-                if (UIElement* tgt = m->GetTarget())
-                    stack.push_back(tgt);
-            }
+            el->ForEachLogicalChild([&](UIElement* child) { stack.push_back(child); });
         }
         assert(walked == found &&
                "instanceId map diverged from the tree walk (E1 rollout check)");
@@ -1466,7 +1207,7 @@ bool UIManager::AcceptTextureSpaceForFormat(const std::string& name,
 
     // REFUSAL POLICY. A refused registration is a missing texture, which is a
     // changed frame — so only DisplayLinearSdr on a narrow format is refused:
-    // its producers (#767 P1b) render into wide formats by construction, so
+    // its producers render into wide formats by construction, so
     // the contradiction can only be a new, wrong stamp, and refusing it keeps
     // the failure a loudly missing texture instead of a silently wrong colour.
     //
@@ -1632,11 +1373,7 @@ void UIManager::RemoveExternalTexture(const std::string& name)
     m_ExternalRGPublished.erase(name);
     if (removed)
         MarkPrimitivesNeedRegen(0x200u);
-    static const bool s_Log = []() -> bool
-    {
-        const char* e = std::getenv("GE_UI_GEOM_INVALIDATE_LOG");
-        return (e && e[0] == '1');
-    }();
+    static const bool s_Log = Platform::EnvironmentSwitchEnabled("GE_UI_GEOM_INVALIDATE_LOG", false);
     static int s_Budget = 24;
     if (s_Log && s_Budget-- > 0)
     {
@@ -1648,11 +1385,7 @@ void UIManager::ClearElementBackgroundTexture(UIElement& el)
 {
     el.Styles().ResetBackgroundImage();
 
-    static const bool s_Log = []() -> bool
-    {
-        const char* e = std::getenv("GE_UI_GEOM_INVALIDATE_LOG");
-        return (e && e[0] == '1');
-    }();
+    static const bool s_Log = Platform::EnvironmentSwitchEnabled("GE_UI_GEOM_INVALIDATE_LOG", false);
     static int s_Budget = 24;
     if (s_Log && s_Budget-- > 0)
     {
@@ -1752,10 +1485,7 @@ UIManager::ResolveExternalTexture(const std::string& name) const
     // GE_UI_REBIND_DIAG=1: trace which registry a thumbnail name resolves
     // through (device / RenderGraph registration) — the discriminator for "element
     // has the name but renders nothing" bugs.
-    static const bool sResolveDiag = []() {
-        const char* e = std::getenv("GE_UI_REBIND_DIAG");
-        return e && e[0] == '1';
-    }();
+    static const bool sResolveDiag = Platform::EnvironmentSwitchEnabled("GE_UI_REBIND_DIAG", false);
     const bool diagThis = sResolveDiag && name.rfind("editor_model_thumb", 0) == 0;
     auto diag = [&](const char* branch, uint32_t width, uint32_t height)
     {
@@ -1815,7 +1545,7 @@ bool UIManager::HasFontAtlasKeyForTesting(const std::string& atlasKey) const
 }
 
 // ---------------------------------------------------------------------------
-// Asset hot-reload integration (C1 / C2 / E7)
+// Asset hot-reload integration
 //
 // Subscribe to AssetEventDispatcher and forward Texture / Font events into
 // per-UIManager pending lists. The dispatcher fires on the AssetManager's

@@ -32,6 +32,7 @@
 #include "Assets/AlphaCutoffThreshold.h"
 #include "Assets/TextureAlphaDecodeProbe.h"
 #include "Assets/TextureAlphaProbe.h"
+#include "Core/CpuProfiler.h"
 #include "Core/Engine.h"
 #include "Logger/Logger.h"
 #include "JobSystem/WorkStealingThreadPool.h"
@@ -81,6 +82,9 @@ using namespace ::GameEngine::Rendering;
 
 namespace
 {
+
+// The surface a material without its own surfaceShader composes.
+constexpr std::string_view kDefaultSurfaceShader = "Surfaces/standard_surface.glsl";
 
 // The directory a material's shader references resolve from first. EMPTY when
 // the asset path is unknown: ResolveShaderReference then skips the material-dir
@@ -308,8 +312,6 @@ void MaterialSystem::Initialize(Rendering::IDevice* device, PerFrameWritePool& f
     // Runtime material registry: owns all runtime Material instances.
     m_RuntimeMaterialRegistry.Initialize(device);
     m_RuntimeMaterialRegistry.SetPreUnregisterCallback([this](const Material* mat) {
-        m_ShaderCompilationCache.ClearVariantsForMaterial(mat);
-
         // Defer variant-pipeline cache erasure to BeginFrame on the render
         // thread. The unregister callback can fire from any thread (asset
         // reloader, GC worker); the four caches are written from the render
@@ -393,18 +395,16 @@ void MaterialSystem::ShutdownPhaseA()
 
 void MaterialSystem::ShutdownPhaseB()
 {
-    // Clear the shader compilation cache before the material registry — the
-    // per-material variant map holds Material pointers that become invalid after
-    // registry shutdown. (was :1064)
+    // Drop the compiled shader entries. (was :1064)
     m_ShaderCompilationCache.Clear();
     m_ShaderErrors.Clear();
 
-    // Suppress the pre-unregister callback during shutdown: the shader cache is
-    // already bulk-cleared above, and the SSBO free-list / reverse lookup are
-    // about to be cleared below. Only after the callback is disarmed reset the
-    // variant cache the callback dereferences (EnqueueEviction), then shut the
-    // registry down — feature teardown (RS-side, between the phases) can
-    // unregister materials, so this order is load-bearing. (was :1069-1073)
+    // Suppress the pre-unregister callback during shutdown: the SSBO free-list /
+    // reverse lookup are about to be cleared below. Only after the callback is
+    // disarmed reset the variant cache the callback dereferences
+    // (EnqueueEviction), then shut the registry down — feature teardown
+    // (RS-side, between the phases) can unregister materials, so this order is
+    // load-bearing. (was :1069-1073)
     m_RuntimeMaterialRegistry.SetPreUnregisterCallback(nullptr);
     m_PipelineVariants.reset();
     m_RuntimeMaterialRegistry.Shutdown();
@@ -515,8 +515,6 @@ void MaterialSystem::PumpProjectPrewarm()
 
 void MaterialSystem::OnActiveRenderPipelineChanged()
 {
-    // Stale per-material variant entries must not persist across pipeline changes.
-    m_ShaderCompilationCache.ClearAllMaterialVariants();
 }
 
 void MaterialSystem::OnProjectSwitched()
@@ -1830,7 +1828,6 @@ void MaterialSystem::RecompileMaterialPipeline(const GUID& guid, const MaterialD
     // unchanged path must invalidate here or the worker would re-serve the old
     // compile. (The on-disk layer hashes content and needs no help.)
     m_ShaderCompilationCache.InvalidateGlobalEntry(cacheKey);
-    m_ShaderCompilationCache.ClearVariantsForMaterial(mat);
     if (auto slots = ResolveSurfaceTextureSlots(resolved, mat->GetMaterialAssetPath()))
         mat->SetTextureSlotMap(std::move(*slots));
 
@@ -2132,17 +2129,31 @@ bool MaterialSystem::IsSurfaceProjectOwned(const MaterialDocument& doc,
 std::optional<std::vector<std::pair<std::string, uint8_t>>> MaterialSystem::ResolveSurfaceTextureSlots(
     const MaterialDocument& doc, const std::filesystem::path& materialAssetPath)
 {
-    if (!EnsureMaterialBuildContextReady())
-        return std::nullopt; // headless / context not yet warm — leave the map as-is
+    GE_CPU_PROFILE_SCOPE("MaterialSystem.ResolveSurfaceTextureSlots");
+    {
+        GE_CPU_PROFILE_SCOPE("MaterialSystem.ResolveSurfaceTextureSlots.ContextSetup");
+        if (!EnsureMaterialBuildContextReady())
+            return std::nullopt; // headless / context not yet warm — leave the map as-is
+    }
 
-    const std::filesystem::path surfacePath = ResolveSurfacePath(doc, materialAssetPath);
+    std::filesystem::path surfacePath;
+    {
+        GE_CPU_PROFILE_SCOPE("MaterialSystem.ResolveSurfaceTextureSlots.ResolvePath");
+        surfacePath = ResolveSurfacePath(doc, materialAssetPath);
+    }
 
     std::string source;
-    if (!ReadFileTextShared(surfacePath, source))
-        return std::nullopt; // unresolved/unreadable — compose reports it; keep the old map
+    {
+        GE_CPU_PROFILE_SCOPE("MaterialSystem.ResolveSurfaceTextureSlots.ReadSource");
+        if (!ReadFileTextShared(surfacePath, source))
+            return std::nullopt; // unresolved/unreadable — compose reports it; keep the old map
+    }
 
-    Rendering::TextureSlotResolution slots =
-        Rendering::ShaderComposer::ResolveTextureSlots(source);
+    Rendering::TextureSlotResolution slots;
+    {
+        GE_CPU_PROFILE_SCOPE("MaterialSystem.ResolveSurfaceTextureSlots.ParseSlots");
+        slots = Rendering::ShaderComposer::ResolveTextureSlots(source);
+    }
     // A rejected surface fails the compose with a hard error (logged there). The
     // failed compile leaves the material's PREVIOUS pipeline running, so the old
     // routing map must survive with it — report no-result rather than empty.
@@ -2155,8 +2166,6 @@ void MaterialSystem::CompileMaterialPipeline(Material& mat, const MaterialDocume
 {
     if (!m_Device)
         return;
-
-    m_ShaderCompilationCache.ClearVariantsForMaterial(&mat);
 
     if (!EnsureMaterialBuildContextReady())
         return;
@@ -2465,12 +2474,6 @@ void MaterialSystem::ApplyPendingPipelinePublishes()
             continue;
         }
 
-        // Drop stale per-material shader variants so a draw re-derives against the
-        // published base — the synchronous CompileMaterialPipeline does the same
-        // before it interns (they are keyed by Material*, not MaterialVersion, so
-        // the version bump below does not evict them).
-        m_ShaderCompilationCache.ClearVariantsForMaterial(mat);
-
         // F4: these are plain (unsynchronized) writes to fields a draw-time record
         // reads. They are safe ONLY because there is no render-ahead thread — the
         // engine runs a single frame spine, and this drain executes in BeginFrame
@@ -2521,6 +2524,46 @@ void MaterialSystem::FlushAsyncMaterialCompiles()
     DrainPrewarmJobs();
     ApplyPendingPipelinePublishes();
     m_PipelineVariants->ApplyPendingVariantPublishes();
+}
+
+std::shared_future<void> MaterialSystem::PrefetchMaterialShaderSources(
+    const MaterialDocument& doc, const std::filesystem::path& materialAssetPath)
+{
+    assert((m_OwnerThreadId == std::thread::id{} || IsOwnerThread())
+           && "Shader source prefetch submission requires the owner thread");
+    auto& engine = GameEngine::EngineCore::GetInstance();
+    if (!engine.IsInitialized() || engine.GetJobSystem().GetWorkerCount() == 0 ||
+        !EnsureMaterialBuildContextReady())
+    {
+        std::promise<void> unavailable;
+        unavailable.set_value();
+        return unavailable.get_future().share();
+    }
+
+    MaterialDocument resolved = doc;
+    if (m_MaterialCompiler)
+        m_MaterialCompiler->ReconcileShaderReferences(resolved);
+    const MaterialBuildContext context = m_MaterialBuildContext;
+    // No live registry, document or facade reference crosses to the worker. A
+    // failed read is left to registration, which reports the missing source.
+    // packaged_task makes a dropped task ready with broken_promise, so a
+    // polling caller cannot wait indefinitely.
+    auto task = std::make_shared<std::packaged_task<void()>>(
+        [surface = resolved.surfaceShader, modifier = resolved.vertexModifier,
+         materialDir = MaterialDirOf(materialAssetPath), context]() {
+            std::string source;
+            ReadFileTextShared(Rendering::ShaderComposer::ResolveShaderReference(
+                                   surface.empty() ? std::string(kDefaultSurfaceShader) : surface,
+                                   materialDir, context),
+                               source);
+            if (!modifier.empty())
+                ReadFileTextShared(
+                    Rendering::ShaderComposer::ResolveShaderReference(modifier, materialDir, context),
+                    source);
+        });
+    auto result = task->get_future().share();
+    SubmitTrackedPrewarm([task = std::move(task)] { (*task)(); });
+    return result;
 }
 
 void MaterialSystem::PrewarmMaterialBaseShader(const MaterialDocument& doc,
@@ -2666,7 +2709,7 @@ void MaterialSystem::PrewarmMaterialVariants(Material& mat,
                                              Rendering::MaterialKeyword colorPassKeywords)
 {
     // The registered key and compile inputs are exactly what the draw path
-    // compiles its variants from (ShaderCompilationCache::GetOrCompileVariant).
+    // compiles its variants from (PipelineVariantCache::SubmitPendingVariantCompiles).
     PrewarmMaterialVariantSet(mat.GetVariantKey(), mat.GetCompileSpec(), mat.GetAlphaMode(),
                               mat.IgnoresVertexColor(), mat.GetName(), mat.GetMaterialAssetPath(), colorPassKeywords,
                               PrewarmOrigin::OnDemand);

@@ -673,3 +673,34 @@ TEST(ModelRenderSetupTest, BindChangedMeshRenderers_UnresolvableGuidDoesNotCrash
 
     device->Shutdown();
 }
+
+TEST(ModelRenderSetupTest, StandaloneMaterialsFollowRendererActivation)
+{
+    auto device = CreateVulkanDeviceFast();
+    if (!device)
+        GTEST_SKIP() << "No Vulkan device available";
+    RenderServices rs;
+    ASSERT_TRUE(rs.Initialize(device.get()));
+    ECS::World world;
+    const GUID shared = GUID::Generate();
+    const GUID hidden = GUID::Generate();
+    Components::MeshRenderer visible{};
+    visible.materialAssetGuid.Set(shared);
+    world.Create<Components::MeshRenderer>(visible);
+    world.Create<Components::MeshRenderer>(visible);
+    Components::MeshRenderer deferred{};
+    deferred.materialAssetGuid.Set(hidden);
+    ECS::Entity entity = world.Create<Components::MeshRenderer>(deferred);
+    entity.SetEnabled<Components::MeshRenderer>(false);
+    auto pending = CollectStandaloneMaterialGuids(world, rs);
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending.front(), shared);
+    entity.SetEnabled<Components::MeshRenderer>(true);
+    pending = CollectStandaloneMaterialGuids(world, rs);
+    EXPECT_EQ(pending.size(), 2u);
+    EXPECT_NE(std::find(pending.begin(), pending.end(), hidden), pending.end());
+    entity.SetEnabled<Components::MeshRenderer>(false);
+    pending = CollectStandaloneMaterialGuids(world, rs);
+    EXPECT_EQ(pending.size(), 1u);
+    device->Shutdown();
+}

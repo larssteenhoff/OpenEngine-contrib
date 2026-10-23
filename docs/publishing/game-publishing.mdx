@@ -24,6 +24,22 @@ A runtime template is the engine executable and its libraries. A game containing
 
 The editor stores the Steam Deck platform under the name `Steam`. In publishing configuration, `platform` is the binary's operating system, `deviceProfile` is an optional device preference, and `depotId` selects the Steam depot. One Linux depot can serve both Linux desktops and the Steam Deck. It does not need a separate Deck depot.
 
+## Android and iOS builds
+
+The Build panel lists Windows, Steam Deck, Linux, Mac, Android, iOS, and Web. Select Android or iOS, add the scenes, choose the configuration and output folder, and press **Build**. The editor cooks the selected content, compiles the native Player and C++ gameplay, and packages the application using its installed mobile build tools.
+
+Open **Settings > Build > Android > Mobile build** or **iOS > Mobile build** for the engine source checkout and target SDK settings. The engine checkout defaults to the source used to build the editor. It must contain the engine's CMake project and its vcpkg toolchain. CMake, Python 3, and the target compiler must be installed. The first build compiles the runtime and dependencies; later builds reuse a cache outside the project.
+
+Android exports target ARM64, Android 9 (API 28) or later, and Vulkan. Install Android SDK platform 35 or later, SDK build tools 35 or later, NDK r29 or later, and a Java development kit. The editor discovers SDK and NDK installations automatically; the settings can select explicit paths. The output is an APK signed with the Android development key at `~/.android/debug.keystore`.
+
+iOS exports require a Mac with Xcode and target ARM64 devices running iOS 16.3 or later. Rendering uses native Metal. Older GPUs use the compatibility renderer according to their reported capabilities. Set the development signing team in the iOS build settings to produce a signed application. A device UDID can select a connected device for provisioning. Without a signing team, the output is an unsigned `.app` for subsequent signing. Development signing requires an Apple account configured in Xcode and an appropriate provisioning profile.
+
+The exported Player includes the normal startup scene, render pipeline, referenced assets, packages, game configuration, and application icon. C++ gameplay is linked into the application; desktop dynamic libraries are not loaded on mobile. C# gameplay and C# package modules currently fail the export with an ahead-of-time compilation requirement. Mobile movie recording is unavailable. Build output reports compiler and packaging errors, and cancellation stops the build process group.
+
+Install the exported APK or signed iOS application on a device to verify rendering, touch and controller input, and background/resume behavior. Packaging success alone does not verify device execution.
+
+For a mobile scene inspection session, launch with `GE_PLAYER_DEMO_CONTROLS=1` to show FPS and frame time, drag to orbit, hold the bottom zoom areas, and reset the camera. Ordinary game launches keep their own input and camera. `GE_SHADOW_DEBUG_MODE=6` selects the temporary contact-only lighting view; enable **Screen-space Shadows** on the scene’s **Shadow Settings** volume first. Like the editor’s Shadow Debug view, this launch setting does not save with the scene.
+
 ## First project setup
 
 Install Python 3.10 or newer. Run these commands from the game project, replacing `/path/to/GameEngine` with your engine checkout (on Windows, use its Windows path). The scripts need only Python's standard library.

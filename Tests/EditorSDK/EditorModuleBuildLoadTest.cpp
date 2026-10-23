@@ -365,16 +365,14 @@ TEST(EditorModuleBuildLoad, EztreeEditorModuleBuildsAndRegistersRealPlugin)
 
     // Traits registered at module load: find by display name (the test does
     // not compile against the package's component headers).
-    const auto traitsSnapshot = ed::EditorComponentTraitsRegistry::Get().Snapshot();
-    const auto treeTraits = std::find_if(traitsSnapshot.begin(), traitsSnapshot.end(),
-                                         [](const auto& entry) {
-                                             return entry.second.DisplayName == "Tree Generator";
-                                         });
-    ASSERT_NE(treeTraits, traitsSnapshot.end());
-    EXPECT_EQ(treeTraits->second.HierarchyRowClass, "hierarchy-entity-tree-generator");
-    EXPECT_EQ(treeTraits->second.InspectorIconClass, "inspector-section-icon-tree-generator");
-    EXPECT_TRUE(treeTraits->second.IsPickInstanceRoot);
-    EXPECT_TRUE(treeTraits->second.GizmoPivotAtEntityOrigin);
+    const auto treeTypeId = ed::EditorComponentTraitsRegistry::Get().FindByDisplayName("Tree Generator");
+    ASSERT_NE(treeTypeId, decltype(treeTypeId){});
+    ed::EditorComponentTraits treeTraits;
+    ASSERT_TRUE(ed::EditorComponentTraitsRegistry::Get().TryGet(treeTypeId, treeTraits));
+    EXPECT_EQ(treeTraits.HierarchyRowClass, "hierarchy-entity-tree-generator");
+    EXPECT_EQ(treeTraits.InspectorIconClass, "inspector-section-icon-tree-generator");
+    EXPECT_TRUE(treeTraits.IsPickInstanceRoot);
+    EXPECT_TRUE(treeTraits.GizmoPivotAtEntityOrigin);
 
     // Phase 2: the module registered its Tree Stats panel descriptor with the
     // package-mount-scoped UI asset paths, and its factory produces a real

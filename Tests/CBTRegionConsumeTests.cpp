@@ -499,6 +499,37 @@ TEST(CBTRegionConsume, SingleTerrainActivatesCBTDrawGate)
     EXPECT_TRUE(CBTUpdateSystem::ComputeTerrainActive(world));
 }
 
+// The terrain term in the reflection-probe content digest: nothing without an
+// active terrain, a new value when the rendered terrain's identity changes, and
+// the same value while only continuous shape values move (an inspector drag
+// must not recapture a "Once" probe every frame).
+TEST(CBTRegionConsume, TerrainContentDigestTracksIdentityNotShape)
+{
+    Components::Terrain terrain{};
+    EXPECT_EQ(CBTUpdateSystem::ComputeTerrainContentDigest(false, terrain), 0u);
+
+    const uint64 base = CBTUpdateSystem::ComputeTerrainContentDigest(true, terrain);
+    EXPECT_NE(base, 0u);
+
+    Components::Terrain resized = terrain;
+    resized.SizeX *= 2.0f;
+    resized.HeightScale *= 2.0f;
+    resized.PlanetRadius *= 2.0f;
+    EXPECT_EQ(CBTUpdateSystem::ComputeTerrainContentDigest(true, resized), base);
+
+    Components::Terrain relit = terrain;
+    relit.MaterialLibraryGuid.Set(GUID::Derive(GUID::Null(), "terrain-content-digest-test"));
+    EXPECT_NE(CBTUpdateSystem::ComputeTerrainContentDigest(true, relit), base);
+
+    Components::Terrain planet = terrain;
+    planet.Domain = Components::TerrainDomain::Spherical;
+    EXPECT_NE(CBTUpdateSystem::ComputeTerrainContentDigest(true, planet), base);
+
+    Components::Terrain shadowless = terrain;
+    shadowless.CastShadows = false;
+    EXPECT_NE(CBTUpdateSystem::ComputeTerrainContentDigest(true, shadowless), base);
+}
+
 TEST(CBTRegionConsume, NoHandleOrDisabledTerrainLeavesCBTInactive)
 {
     ECS::World empty;

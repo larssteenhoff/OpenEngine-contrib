@@ -206,10 +206,41 @@ public:
     ShellProcessResult RunShellCommand(const std::string& command,
                                        std::function<void(const std::string& line)> onLine = nullptr);
 
+    /// Runs an executable with literal arguments and build cancellation.
+    ShellProcessResult RunProcess(const ProcessLaunch& launch,
+                                  std::function<void(const std::string&)> onLine = nullptr);
+
+    /// Stages mobile content using the normal asset collection, manifests, package validation, and cooking.
+    bool PrepareMobileContent(const BuildSettings& settings, std::filesystem::path& contentRoot, std::string& error);
+
     void RegisterStep(BuildStep step);
 
 private:
     bool ExecuteImpl(const BuildSettings& settings);
+
+    // ExecuteImpl phases. BuildTargetLayout carries the per-build staging paths
+    // and target flags every phase reads.
+    struct BuildTargetLayout;
+    static BuildTargetLayout MakeBuildTargetLayout(const BuildSettings& settings);
+    bool ValidateOutputDirectories(const BuildSettings& settings, const BuildTargetLayout& target);
+    void ResolveBuildPackages(const BuildSettings& settings);
+    bool ValidateBuildHost(const BuildSettings& settings, const BuildTargetLayout& target);
+    bool ValidateBuildConfiguration(const BuildSettings& settings);
+#if defined(_WIN32)
+    bool ResolveCrossFlavorRuntime(const BuildSettings& settings, const BuildTargetLayout& target);
+#endif
+    bool PrepareStagingTarget(const BuildSettings& settings, const BuildTargetLayout& target);
+    bool CompileGameCode(const BuildSettings& settings, const BuildTargetLayout& target);
+    bool CollectBuildAssets(const BuildSettings& settings, AssetManifest& manifest);
+    bool StageContent(const BuildSettings& settings, const BuildTargetLayout& target,
+                      const AssetManifest& manifest);
+    bool AssembleMacBundleRuntime(const BuildSettings& settings, const BuildTargetLayout& target);
+    bool AssembleFlatRuntime(const BuildSettings& settings, const BuildTargetLayout& target);
+    bool StagePlayerMetadata(const BuildSettings& settings, const BuildTargetLayout& target,
+                             const AssetManifest& manifest);
+    bool CookPackagedAssets(const BuildSettings& settings, const BuildTargetLayout& target,
+                            const AssetManifest& manifest);
+    bool FinalizeMacBundle(const BuildSettings& settings, const BuildTargetLayout& target);
 
     // Core phases
     bool PreparePlayerProject(const BuildSettings& s, const std::filesystem::path& stagingDir);
@@ -254,6 +285,7 @@ private:
     // root and must run after CopyRuntimeDependencies decided the script mode —
     // neither travels through BuildContext.
     bool RunPackageAssetStep(BuildContext& ctx);
+    void ResolvePackagesForBuild(const BuildSettings& settings);
     bool StagePackageCode(const std::filesystem::path& contentRoot, const BuildSettings& s);
 
     // Step 0: blocks this build thread until the editor's native module builds

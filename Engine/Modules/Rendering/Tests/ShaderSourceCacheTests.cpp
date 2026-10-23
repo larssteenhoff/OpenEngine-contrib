@@ -14,6 +14,7 @@
 
 #include "Source/Materials/ShaderIncludeClosure.h"
 #include "Source/Materials/ShaderSourceCache.h"
+#include "TestTempDir.h"
 
 #include <filesystem>
 #include <fstream>
@@ -36,11 +37,7 @@ class ShaderSourceCacheTest : public ::testing::Test
   protected:
     void SetUp() override
     {
-        m_Root = fs::temp_directory_path() /
-                 ("shader_source_cache_" + std::to_string(::testing::UnitTest::GetInstance()
-                                                              ->random_seed()) +
-                  "_" + std::to_string(reinterpret_cast<uintptr_t>(this)));
-        fs::remove_all(m_Root);
+        m_Root = GameEngine::TestUtils::MakeUniqueTempDirectory("shader_source_cache");
         fs::create_directories(m_Root);
     }
 

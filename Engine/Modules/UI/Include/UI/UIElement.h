@@ -31,6 +31,7 @@
 #include "UI/ResolvedStyle.h"
 #include "Mathematics/Rect.h"
 #include "Mathematics/Vector2.h"
+#include "UI/SlotAllocator.h"
 
 
 
@@ -94,13 +95,11 @@ namespace UI
 void DispatchDestructionDetach(UIElement* doomedRoot);
 } // namespace UI
 
-// Event-driven UI rewrite, Stage 1 (additive): return any persistent
-// render slots (primitive range, clip slot, draw-order slot) owned by
-// `el` to the manager's allocators. Called from ~UIElement when the
-// element owns slots. No-op for elements with no slots allocated, which
-// is every element today (Stage 2+ wires the allocations).
+// Return any persistent render slots (primitive range, clip slot,
+// draw-order slot) owned by `el` to the manager's allocators. Called from
+// ~UIElement and on an owner change, when the element owns slots.
 void UIManagerFreeRenderSlots(UIManager* owner, UIElement* el);
-// Stage 5 Block A part 3f: forwarder so SetOwnerManager (header-inline,
+// Forwarder so SetOwnerManager (header-inline,
 // can't include UIManager.h) can clean up the old manager's dirty queues
 // + focus-within chain when an element changes owner.
 void UIManagerRemoveFromDirtyQueues(UIManager* owner, UIElement* el);
@@ -111,14 +110,13 @@ void UIManagerRemoveFromDirtyQueues(UIManager* owner, UIElement* el);
 // unconditional LayoutDirty and the custom-state path's blind self StyleDirty.
 void UIManagerMarkCheckedStateScope(UIManager* owner, UIElement* el);
 void UIManagerMarkCustomStateScope(UIManager* owner, UIElement* el);
-// Cascade-memoization Phase 6 (sibling-combinator precision): true if
-// any selector in the manager's effective stylesheet set uses `+` or
-// `~`. Class/id mutation sites consult this to decide whether
+// True if any selector in the manager's effective stylesheet set uses
+// `+` or `~`. Class/id and child-mutation sites consult this to decide whether
 // following-sibling caches need invalidation (the conservative "always
 // invalidate" path is wasteful for the common case where stylesheets
 // don't use sibling combinators).
 bool UIManagerUsesSiblingCombinators(const UIManager* owner);
-// P4 (C-10): manager-wide rule-cache epoch, bumped whenever stylesheet
+// Manager-wide rule-cache epoch, bumped whenever stylesheet
 // content or the global sheet set changes. Element rule caches stamp the
 // epoch at build time and are only trusted when it still matches —
 // subtree invalidation walks only reach the rooted tree, so detached
@@ -175,18 +173,6 @@ enum class OverlayLayer : uint8_t
     // controls inside dropdowns, modals, and drag overlays — so it must
     // render above all of them.
     HoverTooltip
-};
-
-// Type tag for fast UIElement kind dispatch without dynamic_cast. Debug builds
-// pay a non-trivial RTTI string-compare per dynamic_cast; BuildYogaRecursive
-// does `dynamic_cast<Mount*>` and the signature block does
-// `dynamic_cast<WeightedPane*>` on every traversed element, so a virtual
-// one-byte-returning Kind() shaves measurable time off the slow path.
-enum class UIElementKind : uint8_t
-{
-    Default = 0,
-    Mount,
-    WeightedPane,
 };
 
 class UIElement {
@@ -267,12 +253,6 @@ public:
         return WeakRef<T>(element ? element->WeakRefBlock() : std::weak_ptr<UIElement>{});
     }
 
-    // One-byte type tag used to dispatch without dynamic_cast on hot paths
-    // (BuildYogaRecursive Mount branch, signature-block WeightedPane branch).
-    // Subclasses override and return a value from the UIElementKind enum;
-    // the default here keeps the common case cheap.
-    virtual UIElementKind Kind() const { return UIElementKind::Default; }
-
     const std::string& GetId() const { return m_Id; }
     StringId GetIdHash() const { return m_IdHash; }
     void SetId(const std::string& id);
@@ -329,17 +309,16 @@ public:
     // values are not part of the share key).
     bool HasSelectorAttributes() const { return !m_Attributes.empty(); }
 
-    // Stage 5 Block C: custom pseudo-state API. Selectors of the form
+    // Custom pseudo-state API. Selectors of the form
     // `:my-state` match elements whose custom-state set contains "my-state".
     // Custom names are stored by hashed StringId (case-insensitive: hashed
     // from lowercased string at the convenience overloads).
     //
-    // Cascade-memoization Phase 5: bodies live in UIElement.cpp so they
-    // can consult CSSParser::IsRuleCacheEnabled() and the per-element
-    // CustomStateRules predicate to narrow the dirty mark — adding or
+    // Add/Remove (bodies in UIElement.cpp) route the dirty mark through
+    // UIManagerMarkCustomStateScope, which narrows it with the per-element
+    // CustomStateRules bit when the rule cache is enabled — adding or
     // removing a custom state can only flip a selector match if the
-    // element's rule cache references at least one `:foo-state(...)`
-    // selector.
+    // element's rule cache references at least one custom-state selector.
     void AddCustomState(StringId stateId);
     void RemoveCustomState(StringId stateId);
     bool HasCustomState(StringId stateId) const
@@ -363,8 +342,7 @@ public:
     // parent, the owner and the attached root (UIAttachedRootAccess) in step.
     std::vector<std::unique_ptr<UIElement>>& GetMutableChildren() { return m_Children; }
 
-    // DFS-parent for cascade purposes — same edge BuildYogaRecursive
-    // bakes into NodeRec.parentIndex. For Mount portal targets this is
+    // DFS-parent for cascade purposes. For Mount portal targets this is
     // the Mount host (the target's m_DfsParent), not the target's owning
     // UIElement parent (m_Parent). For everything else it falls back to
     // m_Parent. Set/cleared by Mount::SetTarget; otherwise nullptr.
@@ -393,19 +371,20 @@ public:
     {
         if (m_OwnerManager != owner)
         {
-            // Stage 2: free render slots in the OLD manager before swapping.
+            // Free render slots in the OLD manager before swapping.
             // After the swap the new manager will allocate fresh slots on
             // the next PrimitiveGen visit. Without this, slots would leak in
             // the old manager and the element would render ghost primitives
             // in the old buffer.
             if (m_OwnerManager &&
                 (m_PrimitiveRangeCap > 0 || m_ClipSlotIdx != 0xFFFFu ||
-                 m_TransformSlotIdx != 0 || m_DrawOrderIdx != 0xFFFFFFFFu))
+                 m_BackgroundClipSlotIdx != 0xFFFFu || m_TransformSlotIdx != 0 ||
+                 m_DrawOrderIdx != kNoDrawOrderSlice))
             {
                 UIManagerFreeRenderSlots(m_OwnerManager, this);
             }
 
-            // Stage 5 Block A part 3f: clean up the OLD manager's dirty
+            // Clean up the OLD manager's dirty
             // queues + focus-within chain. Elements re-parented across
             // managers (modal popups, floating panels) would otherwise
             // leave dangling references in the old manager — which the
@@ -437,7 +416,7 @@ public:
             if (m_OwnerManager)
                 UIManagerUnregisterElementLookups(m_OwnerManager, this);
 
-            // Cascade-memoization Phase 7: cross-manager owner change
+            // Cross-manager owner change
             // invalidates the structural rule cache. The new manager's
             // stylesheet set is almost certainly different (and even if
             // identical, the SheetSetInterner instance differs, so cached
@@ -452,9 +431,9 @@ public:
             // UIManager's FontAtlas pages which may differ from the new one.
             if (m_TextMeasurable)
                 m_TextMeasurable->ResetTextShapeCache();
-            // Stage 2: same wraparound concern for the PrimitiveGen frame
-            // counter — reset to 0 so a stale value from a previous owner
-            // can't accidentally match the new owner's counter.
+            // Reset the PrimitiveGen frame stamp to 0, which no live frame
+            // uses, so a stale stamp from the previous owner can't match the
+            // new owner's counter.
             m_LastPrimitiveGenFrame = 0;
             UIManagerNotifyElementOwnerChanged(owner, this);
             // ...and register with the NEW manager so this element's local sheets
@@ -528,9 +507,6 @@ public:
     void SetTooltipPlacement(TooltipPlacement p) { m_TooltipPlacement = p; }
     TooltipPlacement GetTooltipPlacement() const { return m_TooltipPlacement; }
 
-    // Inline style text (original string, kept for inspection/serialization).
-    const std::string& GetInlineStyleText() const { return m_InlineStyleText; }
-
     // Pseudo-class hook for CSS :checked.
     virtual bool IsPseudoChecked() const { return false; }
 
@@ -597,7 +573,22 @@ public:
 
     // Type-dispatch hooks for primitive generation, avoiding dynamic_cast in the hot path.
     virtual TextInput* GetAsTextInput() { return nullptr; }
-    virtual UIElement* GetMountTarget() { return nullptr; }
+    // The non-owned element a Mount displays; nullptr on every other element.
+    virtual UIElement* GetMountTarget() const { return nullptr; }
+
+    // Visits every element the logical tree places directly under this one:
+    // each non-null child in order, then the Mount target. The Mount target is
+    // not owned, so it is not in GetChildren(); every tree walk that must reach
+    // mounted panels (cascade, layout, hit-testing, lookup) goes through here.
+    template <typename Fn>
+    void ForEachLogicalChild(Fn&& fn) const
+    {
+        for (const auto& child : m_Children)
+            if (child)
+                fn(child.get());
+        if (UIElement* target = GetMountTarget())
+            fn(target);
+    }
 
     // Cached interface pointer set by text-bearing subclasses (Label, TextInput, TextArea)
     // during construction. Non-text elements leave this null for zero overhead at lookup time.
@@ -1286,20 +1277,9 @@ public:
 	    }
 
 
-	    // Hook for scrollable containers (e.g., ScrollView) to observe viewport
-	    // layout for descendants marked with the "scroll-viewport" class
-	    // without UIManager needing direct knowledge of their types.
-	    virtual void OnScrollViewportLayout(UIElement* viewport, float W, float H)
-	    {
-	        (void)viewport;
-	        (void)W;
-	        (void)H;
-	    }
-	
 	    // Focus proxy: optional indirection for internal editors (e.g. TextInput)
 	    // that want focus/tab/keyboard routing to go through an owning control.
 	    void SetFocusProxy(UIElement* el) { m_FocusProxy = el; }
-	    UIElement* GetFocusProxy() const { return m_FocusProxy; }
 	
 	    UIElement* ResolveFocusTarget()
 	    {
@@ -1385,7 +1365,7 @@ public:
         // Set flags on self + all descendants in one pass, then propagate the
         // summary bit up the ancestor chain exactly once.
         //
-        // Stage 5 Block A part 3f.2: each descendant must also land in the
+        // Each descendant must also land in the
         // dirty queues — drain processes only queued elements, so without
         // per-descendant notification a MarkDirtySubtree call would only
         // queue the root and drain would miss the descendants entirely.
@@ -1442,10 +1422,10 @@ public:
         // virtualized cells) can stay on the cheap patch paths. If a class change *does*
         // affect layout, the UIManager's signature checks will request a relayout.
         MarkDirtySubtree(StyleDirty | VisualDirty);
-        // Cascade-memoization Phase 2: class is the most common structural
+        // Class is the most common structural
         // match key (`.foo` selectors). Self + descendants invalidate.
         InvalidateRuleCacheSubtree();
-        // Cascade-memoization Phase 6: when the stylesheet set uses
+        // When the stylesheet set uses
         // `+`/`~` combinators, an element's class flip changes the match
         // for following siblings (`.foo + .bar`, `.foo ~ .baz`).
         if (UIManagerUsesSiblingCombinators(m_OwnerManager))
@@ -1460,7 +1440,7 @@ public:
                 m_ClassIds.erase(m_ClassIds.begin() + (ptrdiff_t)i);
                 m_ClassNames.erase(m_ClassNames.begin() + (ptrdiff_t)i);
                 MarkDirtySubtree(StyleDirty | VisualDirty);
-                // Cascade-memoization Phase 2: see AddClassInternal note.
+                // See AddClassInternal note.
                 InvalidateRuleCacheSubtree();
                 if (UIManagerUsesSiblingCombinators(m_OwnerManager))
                     InvalidateRuleCacheFollowingSiblings();
@@ -1524,9 +1504,9 @@ private:
     // Wire the StyleOverrides dirty callback on construction so any mutation
     // to this element's overrides (Set/Reset/Clear, SetCustom, etc.) routes
     // through MarkDirty — which propagates SubtreeDirty up the ancestor chain.
-    // Without this the override dirty bits stayed internal to StyleOverrides
-    // and the Slice 2 fast path had to abort any subtree containing a
-    // descendant with override-dirty.
+    // Without it the override dirty bits would stay internal to
+    // StyleOverrides and the subtree-skip gate could not trust SubtreeDirty
+    // for a subtree holding a descendant with override-dirty.
     void WireOverridesDirtyCallback()
     {
         m_Overrides.SetDirtyCallback(
@@ -1688,7 +1668,7 @@ protected:
     TooltipPlacement m_TooltipPlacement = TooltipPlacement::Auto;
     std::vector<std::string> m_ClassNames;
     std::vector<StringId> m_ClassIds;
-    // Stage 5 Block C: custom pseudo-state ids. Small set in practice
+    // Custom pseudo-state ids. Small set in practice
     // (most elements have 0 custom states; controls with explicit states
     // typically carry 1-3). Stored as a vector for cache locality on the
     // MatchesSelectorChain hot path. No string copy kept — all matching
@@ -1697,13 +1677,13 @@ protected:
     AttributeMap m_Attributes;
     UIElement* m_Parent = nullptr;
     // Mount portal host: when this element is a Mount target, points to
-    // the Mount UIElement that displays it. Provides the DFS-parent edge
-    // that NodeRec.parentIndex tracked before Stage 7 step 6.3b. Maintained
-    // synchronously by Mount::SetTarget / SwapTargetForActivation / dtor.
+    // the Mount UIElement that displays it: the parent edge that depth-first
+    // tree walks follow through the portal. Maintained synchronously by
+    // Mount::SetTarget / SwapTargetForActivation / dtor.
     // nullptr for non-Mount-targets — GetDfsParent() falls back to m_Parent.
     UIElement* m_DfsParent = nullptr;
 public:
-    // Owned per-element retained Yoga state (Stage 7 step 8). Allocated on
+    // Owned per-element retained Yoga state. Allocated on
     // first BuildYogaRecursive visit; destroyed in ~UIElement when the
     // owning element dies. Declared BEFORE m_Children so that children
     // destruct first and detach their YGNodes from this element's YGNode
@@ -2117,9 +2097,10 @@ protected:
 	    UIElement* m_FocusProxy = nullptr;
 
   public:
-    // Event-driven UI rewrite, Stage 1 (additive, currently unused at
-    // runtime): per-element render handle into the manager's persistent
-    // SSBO mirrors. Stage 2+ wires actual allocations through these.
+    // Per-element render handles into the owning UIManager's persistent
+    // primitive, clip and draw-order arrays. The manager's primitive pass
+    // allocates, resizes and releases them; UIManager::FreeRenderSlots
+    // releases all of them at once.
     //
     // m_PrimitiveRangeStart : start in m_PersistentPrimitives (kInvalidSlot
     //                         when no primitives are owned — pure-layout
@@ -2129,14 +2110,17 @@ protected:
     //                         text edits absorb without relocation.
     // m_ClipSlotIdx         : index in m_PersistentClipRects (0xFFFF when
     //                         this element does not own a clip slot).
+    // m_BackgroundClipSlotIdx: dedicated border-box clip used by cooked SVG
+    //                         backgrounds (separate from overflow clipping).
     // m_AmbientClipIdx      : clip-stack top at this element's last
-    //                         full-DFS self-emission (0xFFFF = unclipped).
+    //                         full-DFS self-emission (UI::kNoClip = unclipped).
     //                         Overlay and Mount subtrees don't follow tree
     //                         ancestry, so the drain reads this recorded
     //                         emit-time ambient instead of inferring it
     //                         from baked primitives or a parent walk.
     // m_DrawOrderIdx        : start in m_DrawOrder for this element's
-    //                         slice (size mirrors m_PrimitiveRangeCount).
+    //                         slice (size mirrors m_PrimitiveRangeCount;
+    //                         kNoDrawOrderSlice when there is no slice).
     // m_TransformSlotIdx    : index in m_PersistentTransforms while the
     //                         element has a CSS transform (0 = none; slot 0
     //                         is the shared identity, never owned).
@@ -2145,14 +2129,16 @@ protected:
     //                         ancestor's), recorded for the same reason as
     //                         m_AmbientClipIdx.
     //
-    // Sentinels match SlotAllocator::kInvalidSlot and UI::kNoClip; not
-    // typed as those constants here to keep the headers light.
-    uint32_t m_PrimitiveRangeStart = 0xFFFFFFFFu;
+    // The clip sentinel 0xFFFF matches UI::kNoClip.
+    static constexpr uint32_t kNoDrawOrderSlice = 0xFFFFFFFFu;
+
+    uint32_t m_PrimitiveRangeStart = UI::SlotAllocator::kInvalidSlot;
     uint16_t m_PrimitiveRangeCount = 0;
     uint16_t m_PrimitiveRangeCap   = 0;
     uint16_t m_ClipSlotIdx         = 0xFFFFu;
+    uint16_t m_BackgroundClipSlotIdx = 0xFFFFu;
     uint16_t m_AmbientClipIdx      = 0xFFFFu;
-    uint32_t m_DrawOrderIdx        = 0xFFFFFFFFu;
+    uint32_t m_DrawOrderIdx        = kNoDrawOrderSlice;
     uint32_t m_TransformSlotIdx    = 0;
     uint32_t m_AmbientTransformIdx = 0;
 
@@ -2164,7 +2150,7 @@ protected:
     // reset the accumulator and Mount hops route through the host.
     float m_PrimitiveAncestorOpacity = 1.0f;
 
-    // Stage 2: re-entrancy detector for the per-element finalize path in
+    // Re-entrancy detector for the per-element finalize path in
     // PrimitiveGen. Each PrimitiveGen frame bumps UIManager::m_PrimitiveGenFrame
     // and writes that value here when the element is visited. If the visit
     // enters with this already equal to the current frame counter, an event
@@ -2179,7 +2165,8 @@ protected:
 
     // PrimitiveGen frame counter of the last FULL DFS that actually processed
     // this element (stamped after the viewport/clip cull, full mode only).
-    // The E1 drain compares this against the manager's last-full-DFS counter:
+    // The primitive-data drain (CollectDrainItems) compares this against the
+    // manager's last-full-DFS counter:
     // a mismatch means the element was clip-culled out of (or created after)
     // the last full walk, so its slot range / DrawOrder bookkeeping is stale
     // and must not be used for in-place slice surgery.
@@ -2216,7 +2203,7 @@ protected:
     };
     uint8_t m_InQueueFlags = 0;
 
-    // Stage 5 Block B: per-element predicate for "do any matched style
+    // Per-element predicate for "do any matched style
     // rules reference this pseudo-state?" Computed as a side output of
     // ComputeStyleInto each time the cascade resolves this element.
     // Mark-dirty sites consult this bitmask to skip pushing elements
@@ -2238,11 +2225,8 @@ protected:
     };
     uint16_t m_MatchedPseudoStates = 0;
 
-    // Cascade-matcher memoization (Phase 1, additive — readers wired in
-    // Phases 3+).
-    //
     // Per-element cache of structurally-matching rules. Populated by
-    // BuildRuleCache (forthcoming Phase 3) by walking the candidate rules
+    // CSSParser::BuildRuleCache by walking the candidate rules
     // in the element's effective stylesheet set and applying a STRUCTURAL
     // match — same as MatchesSelectorChain but treating dynamic pseudo
     // classes (:hover/:focus/:active/:disabled/:enabled/:checked/
@@ -2290,11 +2274,10 @@ protected:
     }
 
     // Marks this element + every descendant's rule cache stale. Cheap when
-    // already invalid (early-out on the recursion). Called by mutation sites
-    // in Phase 2.
+    // already invalid (early-out on the recursion). Called by mutation sites.
     //
-    // Cascade-memoization Phase 7: also resets m_MatchedPseudoStates to
-    // all-bits-set. The Phase 5 narrowing predicate `(bits & flag) != 0`
+    // Also resets m_MatchedPseudoStates to all-bits-set. The narrowing
+    // predicate `(bits & flag) != 0`
     // then defaults to "true" (mark dirty) until the next cascade
     // rebuilds with real bits — conservative against the case where a
     // stylesheet hot-reload added a rule referencing a pseudo we hadn't
@@ -2307,31 +2290,25 @@ protected:
             // Children may still be valid (we lazy-invalidate). Recurse so
             // subtree-mutation semantics are deterministic regardless of
             // entry state.
-            for (auto& ch : m_Children)
-                if (ch && ch->m_RuleCacheValid)
-                    ch->InvalidateRuleCacheSubtree();
             // Mount portal targets are not part of m_Children but participate
             // in cascade. Their cached rule pointers reference the same
             // stylesheets as the visible tree, so they must be invalidated
             // alongside m_Children — otherwise a stylesheet-set change leaves
             // dangling rule pointers in mounted subtrees and the next cascade
             // dereferences them.
-            if (UIElement* tgt = GetMountTarget())
-                if (tgt->m_RuleCacheValid)
-                    tgt->InvalidateRuleCacheSubtree();
+            ForEachLogicalChild([](UIElement* child) {
+                if (child->m_RuleCacheValid)
+                    child->InvalidateRuleCacheSubtree();
+            });
             return;
         }
         m_RuleCacheValid = false;
         m_CachedMatchedRules.clear();  // free the vector storage proactively
         m_MatchedPseudoStates = 0xFFFFu;  // conservative: mark-dirty default until rebuilt
-        for (auto& ch : m_Children)
-            if (ch)
-                ch->InvalidateRuleCacheSubtree();
-        if (UIElement* tgt = GetMountTarget())
-            tgt->InvalidateRuleCacheSubtree();
+        ForEachLogicalChild([](UIElement* child) { child->InvalidateRuleCacheSubtree(); });
     }
 
-    // Cascade-memoization Phase 6: invalidate the rule cache subtree of
+    // Invalidate the rule cache subtree of
     // every sibling AFTER this element under the same parent. Used by
     // class/id mutation sites when the active stylesheet set contains
     // `+` or `~` selectors — a class change on element X can flip the

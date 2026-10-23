@@ -16,6 +16,7 @@
 #include "Input/InputSystem.h" // kKeyActionRelease
 #include "Input/KeyCodes.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 #include "Rendering/Common/Utils.h"                // Rendering::Utils::ReadFile
 #include "Rendering/Core/RenderGraph/RGFrame.h"     // RGLoadOp, RGTexture (full)
 #include "UI/Assets/UILayoutAsset.h"
@@ -28,7 +29,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -45,11 +45,7 @@ static constexpr float kMaxAnimationStepSeconds = 0.1f;
 // HUD-verify aid. Off by default.
 static bool GameUiDiagEnabled()
 {
-    static const bool kEnabled = []
-    {
-        const char* v = std::getenv("GE_GAMEUI_DIAG");
-        return v && v[0] == '1';
-    }();
+    static const bool kEnabled = Platform::EnvironmentSwitchEnabled("GE_GAMEUI_DIAG", false);
     return kEnabled;
 }
 

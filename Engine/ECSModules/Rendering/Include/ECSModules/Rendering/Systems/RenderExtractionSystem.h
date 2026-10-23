@@ -13,6 +13,7 @@
 #include "Engine/Rendering/DrawCommandProducer.h"
 #include "Engine/Rendering/VolumetricFogTypes.h"
 #include "Engine/Rendering/WorldDrawTypes.h"
+#include "Engine/Rendering/SortingLayers.h"
 #include "Rendering/Core/Device.h"
 #include "AssetCore/GUID.h"
 #include "Components/Rendering/MeshRenderer.h"
@@ -72,6 +73,7 @@ public:
         GameEngine::Components::MeshRenderer meshRenderer;
         // Components::GIEmitter presence, resolved once at gather time.
         bool giEmitter = false;
+        RenderSortingData Sorting{};
         // Holds a component that puts it in the always-refresh subset
         // (SkinnedMeshRenderer, SkeletonRef or AnimatorRef; morph carriers
         // are found by their own column).
@@ -119,6 +121,7 @@ public:
     // distinguishable from real escalation storms in soak.
     enum EscalationReason : uint32
     {
+        kEscalationSorting            = 1u << 17,
         kEscalationFeedDisabled       = 1u << 0,  // E1: flag off / world unsubscribed
         kEscalationFeedOverflow       = 1u << 1,  // E2
         kEscalationMissedWindow       = 1u << 2,  // E3
@@ -231,6 +234,13 @@ private:
     ECS::ChangeGate m_ProbeGateLocalBounds;
     ECS::ChangeGate m_ProbeGateSectorCoord;
     ECS::ChangeGate m_ProbeGateLodGroup;
+    ECS::ChangeGate m_ProbeGateSorting;
+    ECS::ChangeGate m_ProbeGateSortingParents;
+    ECS::ChangeGate m_ProbeGateSortingTransforms;
+    uint64 m_SortingRevision = 0;
+    bool m_HadSorting = false;
+    Rendering::SortingLayers m_SortingLayers;
+    uint64 m_SortingSnapshotRevision = 0;
     // The oldest of the four probe gates before this frame's probes advanced
     // them: what the structural delta lane's changed-chunk query compares against.
     ECS::ChangeGate m_ProbeSince;

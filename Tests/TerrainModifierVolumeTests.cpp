@@ -1863,7 +1863,7 @@ enum class EditPath
 };
 
 // The set_component write reproduced exactly: capture, patch, apply back.
-// Mirrors SetReflectedComponentFields (DebugHandlers.cpp:403-442).
+// Mirrors SetReflectedComponentFields (SceneEntityDebugHandlers.cpp).
 void ApplyBlendViaComponentBytes(ECS::World& world, ECS::EntityHandle entity,
                                  Components::TerrainModifierBlend blend, float32 smoothing)
 {

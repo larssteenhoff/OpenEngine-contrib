@@ -1,6 +1,7 @@
 #include "ECS/ComponentFieldRegistry.h"
 
 #include "ECS/ModuleRegistration.h"
+#include "Types/StringUtils.h"
 
 #include <cctype>
 #include <cstddef>
@@ -229,20 +230,6 @@ std::string_view ComponentFieldRegistry::GetCanonicalName(ComponentTypeId typeId
     return it->second.CanonicalName;
 }
 
-namespace {
-bool IEquals(std::string_view a, std::string_view b)
-{
-    if (a.size() != b.size())
-        return false;
-    for (std::size_t i = 0; i < a.size(); ++i)
-    {
-        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
-            return false;
-    }
-    return true;
-}
-} // namespace
-
 ComponentTypeId ComponentFieldRegistry::FindByName(std::string_view name)
 {
     // Case-insensitive: callers include the scene loader (component names are lowercased by the
@@ -252,16 +239,16 @@ ComponentTypeId ComponentFieldRegistry::FindByName(std::string_view name)
         const std::string_view canon = entry.CanonicalName;
         if (canon.empty())
             continue;
-        if (IEquals(canon, name))
+        if (EqualsIgnoreCase(canon, name))
             return typeId;
         // Simple-name suffix: canon ends with "::name" (native C++) or ".name" (managed blob
         // components register their dotted CLR name, e.g. "Game.Health" matches "Health").
         if (canon.size() >= name.size() + 2 &&
-            IEquals(canon.substr(canon.size() - name.size()), name) &&
+            EqualsIgnoreCase(canon.substr(canon.size() - name.size()), name) &&
             canon.substr(canon.size() - name.size() - 2, 2) == "::")
             return typeId;
         if (canon.size() >= name.size() + 1 &&
-            IEquals(canon.substr(canon.size() - name.size()), name) &&
+            EqualsIgnoreCase(canon.substr(canon.size() - name.size()), name) &&
             canon[canon.size() - name.size() - 1] == '.')
             return typeId;
     }
@@ -272,7 +259,7 @@ const FieldInfo* ComponentFieldRegistry::FindField(ComponentTypeId typeId, std::
 {
     for (const FieldInfo& field : Get(typeId))
     {
-        if (IEquals(field.Name, fieldName))
+        if (EqualsIgnoreCase(field.Name, fieldName))
             return &field;
     }
     return nullptr;

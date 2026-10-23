@@ -8,9 +8,9 @@
 #include "Rendering/Materials/ShaderCompileService.h"
 #include "Core/Application.h"
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <utility>
@@ -724,7 +724,7 @@ bool TerrainRenderFeature::EnsureUnifiedTiledTextures(TerrainHandle handle,
     // GE_TERRAIN_NO_VRAM_STAGING disables the barrier (allocate immediately, old + new coexist):
     // the kill-switch, and the way to measure the un-staged transient peak with this same
     // instrumentation for the before/after pair.
-    static const bool kNoVramStaging = std::getenv("GE_TERRAIN_NO_VRAM_STAGING") != nullptr;
+    static const bool kNoVramStaging = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_NO_VRAM_STAGING", false);
     if (!kNoVramStaging && m_UnifiedReprovisionDrainFrame != 0)
     {
         if (m_MonotonicFrame < m_UnifiedReprovisionDrainFrame)
@@ -1825,7 +1825,7 @@ void TerrainRenderFeature::UploadTerrainParamsArray(const Terrain::TerrainGPUPar
     // GetLastTerrainParamsSlot + the count it derives. If the grass node logs a DIFFERENT slot/active
     // than the LAST line here, a later UploadTerrainParamsArray (a second world/registry, or the
     // single-terrain path) overwrote the slot with 0 grass -> the node declares nothing. Throttled.
-    static const bool kUpDbg = std::getenv("GE_TERRAIN_GRASS_DEBUG") != nullptr;
+    static const bool kUpDbg = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_GRASS_DEBUG", false);
     static uint32 s_LastUpKey = 0xFFFFFFFFu;
     // Key on (count, activeGrass) only — NOT the cyclic frame slot fi, which changes every frame and
     // would re-log the idle count==0 case forever, flooding the log ring at boot.

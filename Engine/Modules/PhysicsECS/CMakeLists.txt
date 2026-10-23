@@ -11,6 +11,11 @@ add_library(PhysicsECS OBJECT
     Source/HeightFieldDataProvider.cpp
     Source/HeightFieldCollisionReadiness.cpp
     Source/PhysicsWorldSettingsHelpers.cpp
+    Source/MovingPlatformReflection.cpp
+    Source/Systems/MovingPlatformSystem.cpp
+    Source/Systems/PlatformPathTraversal.cpp
+    Source/PhysicsMaterialAsset.cpp
+    Source/ContactSurfaceTable.cpp
     Source/Systems/PhysicsWorldBootstrapSystem.cpp
     Source/Systems/PhysicsEventsSystem.cpp
     Source/Systems/PhysicsInitSystem.cpp
@@ -28,15 +33,23 @@ target_compile_features(PhysicsECS PUBLIC cxx_std_20)
 target_include_directories(PhysicsECS
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/Include
+    PRIVATE
+        # Asset-manager access includes FileWatcher headers; Engine owns its objects.
+        $<TARGET_PROPERTY:FileWatcher,INTERFACE_INCLUDE_DIRECTORIES>
+        # Component registration includes render-layer reflection traits.
+        $<TARGET_PROPERTY:GameEngineRendering,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 target_link_libraries(PhysicsECS
     PUBLIC
         Physics
+        AssetCore
         ECS
         ECSComponents
         Types
         Mathematics
         Logger
+        Spline
+        SplineECS
 )
 

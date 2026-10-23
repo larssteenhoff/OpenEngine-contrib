@@ -1,12 +1,12 @@
 #include "SceneView/MeasureSceneGizmo.h"
 
-#include "Components/Hierarchy.h"
 #include "Components/Measure/MeasureComponent.h"
 #include "Components/Transform.h"
 #include "Core/Engine.h"
 #include "ECS/Components.h"
 #include "ECS/ECS.h"
 #include "ECS/ECSTemplates.h"
+#include "Editor/Entities/EntityWorldPose.h"
 #include "Mathematics/MatrixOps.h"
 #include "Mathematics/Ray.h"
 #include "Mathematics/Vector3.h"
@@ -70,54 +70,14 @@ float DistancePointToRaySq(const Vector3& point, const GizmoRay& ray, float& out
     return (point - Mathematics::RayPointAt(ray, t)).LengthSquared();
 }
 
-bool GetEntityWorldMatrix(ECS::World* world,
-                          ECS::EntityHandle entity,
-                          Mathematics::Matrix4x4& out,
-                          int depth = 0)
-{
-    if (!world || !entity.IsValid() || !world->IsValid(entity) || depth > 64)
-        return false;
-
-    if (const auto* transform = world->GetComponent<Components::Transform>(entity))
-    {
-        Mathematics::Matrix4x4 local = Mathematics::Matrix4x4::FromColumnMajor(transform->matrix);
-        if (const auto* parent = world->GetComponent<Components::Parent>(entity);
-            parent && parent->parent.IsValid())
-        {
-            Mathematics::Matrix4x4 parentWorld;
-            if (GetEntityWorldMatrix(world, parent->parent, parentWorld, depth + 1))
-            {
-                out = parentWorld * local;
-                return true;
-            }
-        }
-
-        out = local;
-        return true;
-    }
-
-    if (const auto* worldTransform = world->GetComponent<Components::WorldTransform>(entity))
-    {
-        out = Mathematics::Matrix4x4::FromColumnMajor(worldTransform->matrix);
-        return true;
-    }
-
-    return false;
-}
-
 bool GetEntityWorldPosition(ECS::World* world, ECS::EntityHandle entity, Vector3& out)
 {
-    if (!world || !entity.IsValid() || !world->IsValid(entity))
+    Mathematics::Matrix4x4 worldMatrix;
+    if (!Editor::TryComputeEntityWorldMatrix(world, entity, worldMatrix))
         return false;
 
-    Mathematics::Matrix4x4 worldMatrix;
-    if (GetEntityWorldMatrix(world, entity, worldMatrix))
-    {
-        out = Vector3(worldMatrix[3].x, worldMatrix[3].y, worldMatrix[3].z);
-        return true;
-    }
-
-    return false;
+    out = Vector3(worldMatrix[3].x, worldMatrix[3].y, worldMatrix[3].z);
+    return true;
 }
 
 ECS::EntityHandle ResolveMeasureEndpointEntity(ECS::World* world,

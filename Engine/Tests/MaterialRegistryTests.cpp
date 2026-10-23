@@ -943,6 +943,31 @@ TEST_F(MaterialRegistryTest, Unregister_RemovesMaterial)
     EXPECT_EQ(m_registry.Find(guid), nullptr);
 }
 
+// The registration generation names a GUID binding: a re-Register of a bound
+// GUID re-applies in place and keeps it, and a Register after Unregister binds a
+// new Material under a larger one. 0 names no binding.
+TEST_F(MaterialRegistryTest, RegistrationGeneration_AdvancesOnlyWhenGuidBindsNewMaterial)
+{
+    const GUID guid = GUID::Generate();
+    EXPECT_EQ(m_registry.GetRegistrationGeneration(guid), 0u);
+
+    Material* first = m_registry.Register(guid, MakeTestPBRDocument());
+    ASSERT_NE(first, nullptr);
+    const uint64_t firstGeneration = m_registry.GetRegistrationGeneration(guid);
+    EXPECT_NE(firstGeneration, 0u);
+
+    ASSERT_EQ(m_registry.Register(guid, MakeTestPBRDocument("Edited")), first);
+    EXPECT_EQ(m_registry.GetRegistrationGeneration(guid), firstGeneration)
+        << "an in-place re-apply keeps the object, so it keeps the generation";
+
+    m_registry.Unregister(guid);
+    EXPECT_EQ(m_registry.GetRegistrationGeneration(guid), 0u);
+
+    ASSERT_NE(m_registry.Register(guid, MakeTestPBRDocument()), nullptr);
+    EXPECT_GT(m_registry.GetRegistrationGeneration(guid), firstGeneration)
+        << "a GUID bound to a new object must carry a newer generation";
+}
+
 TEST_F(MaterialRegistryTest, Register_UnlitLightingModel)
 {
     MaterialDocument doc = MakeTestPBRDocument();
@@ -1271,9 +1296,8 @@ TEST_F(MaterialRegistryTest, Register_IntTypedDocumentProperty_LandsAsFloatBits)
 //
 // DeriveBaseVariantKey drives the recompile trigger: a keyword edit changes the
 // variant key, which RegisterMaterialFromDocument's pipelineAffectingChanged
-// compares (!(prevKey == newKey)) to route through CompileMaterialPipeline (which
-// clears the per-material variant cache at its start). Device-free — the free
-// function needs no registry/device.
+// compares (!(prevKey == newKey)) to route through CompileMaterialPipeline.
+// Device-free — the free function needs no registry/device.
 
 static MaterialDocument MakeKeywordDoc(std::vector<std::string> keywords)
 {

@@ -2,6 +2,7 @@
 
 #include "CBTTerrain/SphereAnalyticModifiers.h" // the tangent-plane dab falloff (S3 preview form)
 #include "Logger/Logger.h"
+#include "Platform/Environment.h"
 
 #include <algorithm>
 #include <cmath>
@@ -53,10 +54,7 @@ bool ResolveTangentDabFalloff()
     // GE_TERRAIN_TANGENT_DAB flips BASE-resolution dab writes to the tangent-plane falloff (the
     // S3 preview's closed form) — default OFF so an unflagged store's bytes stay pre-S4
     // byte-identical. Escalated writes always use the tangent form regardless (see the header).
-    static const bool kResolved = [] {
-        const char* v = std::getenv("GE_TERRAIN_TANGENT_DAB");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
+    static const bool kResolved = Platform::EnvironmentSwitchEnabled("GE_TERRAIN_TANGENT_DAB", false);
     return kResolved;
 }
 
